@@ -545,6 +545,7 @@ body{
 .viewport-wrap[data-mode="rotate"]{cursor:alias;}
 .viewport-wrap[data-mode="scale"]{cursor:nwse-resize;}
 .viewport-wrap[data-mode="select"]{cursor:default;}
+.viewport-wrap[data-mode="sketch"]{cursor:crosshair;}
 
 /* ═══ BOOLEAN PICK OVERLAY ═══ */
 .bool-banner{
@@ -717,32 +718,44 @@ body{
   <div class="ribbon-panel" id="panel-sketch">
     <div class="ribbon-group">
       <div class="ribbon-tools">
-        <button class="rb-lg" title="Line"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><line x1="5" y1="19" x2="19" y2="5"/><circle cx="5" cy="19" r="2"/><circle cx="19" cy="5" r="2"/></svg><span>Line</span></button>
-        <button class="rb-lg" title="Circle"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="1" fill="currentColor"/></svg><span>Circle</span></button>
-        <button class="rb-lg" title="Rectangle"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="4" y="6" width="16" height="12" rx="1"/></svg><span>Rectangle</span></button>
-        <button class="rb-lg" title="Arc"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M5 19A14 14 0 0119 5"/><circle cx="5" cy="19" r="2"/><circle cx="19" cy="5" r="2"/></svg><span>Arc</span></button>
-        <button class="rb-lg" title="Spline"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 17c4-6 6 4 9-2s5-8 9-2"/></svg><span>Spline</span></button>
+        <button class="rb-lg" id="btn-startsketch" onclick="startSketch()" title="Create a new 2D sketch on the base plane">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="1"/><path d="M8 16l3-8 2 5 1-3 2 6"/></svg>
+          <span>Create Sketch</span>
+        </button>
+        <button class="rb-lg" id="btn-finishsketch" onclick="finishSketch()" title="Finish the active sketch">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 6L9 17l-5-5"/></svg>
+          <span>Finish Sketch</span>
+        </button>
+      </div>
+      <div class="ribbon-group-label">Sketch</div>
+    </div>
+    <div class="ribbon-group">
+      <div class="ribbon-tools">
+        <button class="rb-lg" id="sk-line" onclick="setSketchTool('line')" title="Line (chain of segments)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><line x1="5" y1="19" x2="19" y2="5"/><circle cx="5" cy="19" r="2"/><circle cx="19" cy="5" r="2"/></svg><span>Line</span></button>
+        <button class="rb-lg" id="sk-circle" onclick="setSketchTool('circle')" title="Circle (center, radius)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="1" fill="currentColor"/></svg><span>Circle</span></button>
+        <button class="rb-lg" id="sk-rect" onclick="setSketchTool('rect')" title="Rectangle (two corners)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="4" y="6" width="16" height="12" rx="1"/></svg><span>Rectangle</span></button>
+        <button class="rb-lg" id="sk-arc" onclick="setSketchTool('arc')" title="Arc (start, end, point on arc)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M5 19A14 14 0 0119 5"/><circle cx="5" cy="19" r="2"/><circle cx="19" cy="5" r="2"/></svg><span>Arc</span></button>
+        <button class="rb-lg" id="sk-spline" onclick="setSketchTool('spline')" title="Spline (click points, Enter to finish)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 17c4-6 6 4 9-2s5-8 9-2"/></svg><span>Spline</span></button>
       </div>
       <div class="ribbon-group-label">Draw</div>
     </div>
     <div class="ribbon-group">
       <div class="ribbon-tools">
         <div class="ribbon-stack">
-          <button class="rb-sm" title="Trim"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12"/><path d="M6 18L12 12"/></svg> Trim</button>
-          <button class="rb-sm" title="Extend"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="4" y1="12" x2="16" y2="12"/><polyline points="14 8 20 12 14 16"/></svg> Extend</button>
-          <button class="rb-sm" title="Offset"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="10" height="10" rx="1"/><rect x="10" y="10" width="10" height="10" rx="1" stroke-dasharray="3 2"/></svg> Offset</button>
+          <button class="rb-sm" onclick="deleteLastSketchEntity()" title="Delete last drawn entity"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg> Undo Entity</button>
+          <button class="rb-sm" onclick="clearSketch()" title="Clear all entities in the active sketch"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12"/><path d="M18 6L6 18"/></svg> Clear</button>
         </div>
       </div>
       <div class="ribbon-group-label">Modify</div>
     </div>
     <div class="ribbon-group">
       <div class="ribbon-tools">
-        <div class="ribbon-stack">
-          <button class="rb-sm" title="Dimension"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="4" y1="18" x2="20" y2="18"/><polyline points="4 16 4 20"/><polyline points="20 16 20 20"/><text x="12" y="15" text-anchor="middle" font-size="8" fill="currentColor" stroke="none">25</text></svg> Dimension</button>
-          <button class="rb-sm" title="Constrain"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16"/><path d="M4 20h16"/><path d="M12 4v16" stroke-dasharray="3 2"/></svg> Constrain</button>
-        </div>
+        <button class="rb-lg" onclick="startExtrude()" title="Extrude the finished sketch profile into a solid">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="4" y="14" width="16" height="6" rx="1"/><path d="M8 14V6h8v8"/><path d="M8 6l-3-3h14l-3 3"/></svg>
+          <span>Extrude</span>
+        </button>
       </div>
-      <div class="ribbon-group-label">Constrain</div>
+      <div class="ribbon-group-label">Create</div>
     </div>
   </div>
 
@@ -870,6 +883,8 @@ body{
         <div class="bt-icon"><svg viewBox="0 0 16 16" fill="none" stroke="#8a8a90" stroke-width="1.5"><rect x="2" y="4" width="12" height="8" rx="1"/><line x1="2" y1="8" x2="14" y2="8"/></svg></div>
         <div class="bt-label">End of Part</div>
       </div>
+      <!-- Sketches list (dynamic) -->
+      <div id="sketches-list"></div>
       <!-- Features list (dynamic) -->
       <div id="features-list"></div>
     </div>
@@ -994,6 +1009,21 @@ let draggingGizmo=null; // which axis being dragged
 let dragPlane=null;
 let hoveredObj=null; // for hover highlighting
 let hoveredGizmo=null; // for gizmo hover
+
+// ── 2D Sketch mode state ──
+let sketchMode=false;         // currently inside a 2D sketch
+let sketchTool=null;          // 'line' | 'circle' | 'rect' | 'arc' | 'spline'
+let sketchGroup=null;         // THREE.Group holding the active sketch's visuals
+let sketchEntities=[];        // committed entities in the active sketch: {type,pts:[{x,z}...],line}
+let sketchPts=[];             // in-progress click points for the current entity ({x,z})
+let sketchPreview=null;       // live preview line following the cursor
+let sketchPlaneMesh=null;     // translucent sketch-surface highlight
+let sketches=[];              // finished sketches: {id,name,entities,group,visible}
+let selectedSketch=null;      // sketch highlighted in the browser (extrude target)
+let sketchCounter=0;
+const SKETCH_Y=0.015;         // tiny lift above the grid to avoid z-fighting
+const SKETCH_COLOR=0x35d0ff;  // committed geometry
+const SKETCH_PREVIEW_COLOR=0xffcc33; // rubber-band preview
 
 const MATS=[
   {color:'#5b8cc8',name:'Steel Blue'},
@@ -1225,6 +1255,11 @@ function updateViewCube(){
 
 // ── Mouse ──
 function onDown(e){
+  if(sketchMode && e.button===0 && sketchTool){
+    // Left click places sketch points; other buttons still orbit/pan.
+    handleSketchClick(e);
+    return;
+  }
   if(e.button===0 && gizmoArrows.length>0 && transformMode!=='select'){
     // Check gizmo hit
     const rect=renderer.domElement.getBoundingClientRect();
@@ -1264,8 +1299,13 @@ function onMove(e){
       `X: ${pt.x.toFixed(2)} Y: ${pt.y.toFixed(2)} Z: ${pt.z.toFixed(2)}`;
   }
 
-  // Hover highlighting (only when not dragging)
-  if(!isDragging&&!draggingGizmo){
+  // Sketch preview follows the cursor (orbit/pan still handled below).
+  if(sketchMode){
+    if(sketchTool&&sketchPts.length>0&&!isDragging&&pt)refreshSketchPreview({x:pt.x,z:pt.z});
+  }
+
+  // Hover highlighting (only when not dragging, and not while sketching)
+  if(!isDragging&&!draggingGizmo&&!sketchMode){
     try{
       const canvas=renderer.domElement;
       let gizmoHandled=false;
@@ -1371,6 +1411,7 @@ function onMove(e){
 
 function onUp(e){
   if(draggingGizmo){draggingGizmo=null;return;}
+  if(sketchMode){isDragging=false;return;}
   if(isDragging){
     const dx=Math.abs(e.clientX-dragStart.x);
     const dy=Math.abs(e.clientY-dragStart.y);
@@ -1500,8 +1541,387 @@ function addPrimitive(type){
   document.getElementById('sb-status').textContent=`Created ${name}`;
 }
 
+// ═══════════════════════════════════════════
+//  2D SKETCH MODE
+//  Draw line/circle/rect/arc/spline on the base
+//  plane (XZ, y=0), then extrude the profile.
+// ═══════════════════════════════════════════
+
+// Enter sketch mode: start a fresh sketch on the base plane.
+function startSketch(){
+  if(sketchMode){toast('Already sketching — finish the current sketch first');return;}
+  sketchMode=true;
+  sketchEntities=[];
+  sketchPts=[];
+  sketchCounter++;
+  sketchGroup=new Group();
+  scene.add(sketchGroup);
+
+  // Translucent surface highlight so the sketch plane reads clearly.
+  const pg=new PlaneGeometry(24,24);
+  const pm=new THREE.MeshBasicMaterial({color:0x2a6da0,transparent:true,opacity:0.12,side:THREE.DoubleSide,depthWrite:false});
+  sketchPlaneMesh=new Mesh(pg,pm);
+  sketchPlaneMesh.rotation.x=-Math.PI/2;
+  sketchPlaneMesh.position.y=0.005;
+  sketchGroup.add(sketchPlaneMesh);
+
+  // Deselect any 3D body + gizmo while sketching.
+  selectObj(null);
+  setTransform('select');
+
+  // Switch the ribbon to the Sketch tab, look straight down at the plane.
+  const tabBtn=document.querySelector('.ribbon-tab[data-panel="sketch"]');
+  if(tabBtn)switchTab(tabBtn);
+  setView('top');
+
+  document.getElementById('vp-wrap').dataset.mode='sketch';
+  document.getElementById('btn-startsketch').classList.add('active');
+  setSketchTool('line');
+  showSketchBanner(`Sketch${sketchCounter} — pick a draw tool`);
+  document.getElementById('sb-status').textContent=`Editing Sketch${sketchCounter}`;
+  document.getElementById('sb-tool').textContent='Sketch';
+  toast(`Sketch${sketchCounter} started`);
+}
+
+function setSketchTool(tool){
+  if(!sketchMode){startSketch();}
+  // committing a tool switch cancels any half-drawn entity
+  cancelSketchEntity();
+  sketchTool=tool;
+  ['line','circle','rect','arc','spline'].forEach(t=>{
+    const b=document.getElementById('sk-'+t);
+    if(b)b.classList.toggle('active',t===tool);
+  });
+  const hints={
+    line:'Line: click points, double-click or Esc to end the chain',
+    circle:'Circle: click the center, then a point on the radius',
+    rect:'Rectangle: click two opposite corners',
+    arc:'Arc: click start, end, then a point on the arc',
+    spline:'Spline: click through-points, Enter to finish'
+  };
+  showSketchBanner(hints[tool]||'');
+}
+
+// Ray → base plane (XZ) intersection, returned as a {x,z} 2D point.
+function sketchPointFromEvent(e){
+  const rect=renderer.domElement.getBoundingClientRect();
+  const nx=((e.clientX-rect.left)/rect.width)*2-1;
+  const ny=-((e.clientY-rect.top)/rect.height)*2+1;
+  raycaster.setFromCamera(new Vector2(nx,ny),camera);
+  const plane=new THREE.Plane(new Vector3(0,1,0),0);
+  const pt=new Vector3();
+  if(!raycaster.ray.intersectPlane(plane,pt))return null;
+  return {x:pt.x,z:pt.z};
+}
+
+// Build a THREE.Line sitting on the sketch plane from a list of {x,z} points.
+function makeSketchLine(pts2d,color,dashed){
+  const verts=[];
+  pts2d.forEach(p=>verts.push(p.x,SKETCH_Y,p.z));
+  const geo=new THREE.BufferGeometry();
+  geo.setAttribute('position',new THREE.Float32BufferAttribute(verts,3));
+  const mat=dashed
+    ?new THREE.LineDashedMaterial({color,dashSize:0.25,gapSize:0.15,depthTest:false})
+    :new LineBasicMaterial({color,depthTest:false});
+  const line=new THREE.Line(geo,mat);
+  line.renderOrder=10;
+  if(dashed)line.computeLineDistances();
+  return line;
+}
+
+// Expand a high-level entity into a dense {x,z} polyline for rendering.
+function entityToPolyline(type,pts){
+  if(type==='line')return pts.slice();
+  if(type==='spline'){
+    if(pts.length<2)return pts.slice();
+    const v=pts.map(p=>new Vector3(p.x,0,p.z));
+    const curve=new THREE.CatmullRomCurve3(v,false,'catmullrom',0.5);
+    return curve.getPoints(Math.max(16,pts.length*12)).map(p=>({x:p.x,z:p.z}));
+  }
+  if(type==='rect'){
+    const [a,b]=pts;
+    return [{x:a.x,z:a.z},{x:b.x,z:a.z},{x:b.x,z:b.z},{x:a.x,z:b.z},{x:a.x,z:a.z}];
+  }
+  if(type==='circle'){
+    const [c,r]=pts;
+    const rad=Math.hypot(r.x-c.x,r.z-c.z);
+    const out=[];
+    for(let i=0;i<=64;i++){const a=i/64*Math.PI*2;out.push({x:c.x+Math.cos(a)*rad,z:c.z+Math.sin(a)*rad});}
+    return out;
+  }
+  if(type==='arc'){
+    // 3-point arc: start, end, through-point.
+    const arc=arcThrough3(pts[0],pts[1],pts[2]);
+    if(!arc)return [pts[0],pts[2]||pts[1]]; // collinear → straight fallback
+    const out=[];const steps=48;
+    for(let i=0;i<=steps;i++){
+      const a=arc.a0+(arc.a1-arc.a0)*(i/steps);
+      out.push({x:arc.cx+Math.cos(a)*arc.r,z:arc.cz+Math.sin(a)*arc.r});
+    }
+    return out;
+  }
+  return pts.slice();
+}
+
+// Circle through start(p1) & end(p2) passing through mid(p3); returns sweep
+// from p1 to p2 in the direction that includes p3.
+function arcThrough3(p1,p2,p3){
+  if(!p1||!p2||!p3)return null;
+  const ax=p1.x,ay=p1.z,bx=p2.x,by=p2.z,cx3=p3.x,cy3=p3.z;
+  const d=2*(ax*(by-cy3)+bx*(cy3-ay)+cx3*(ay-by));
+  if(Math.abs(d)<1e-6)return null; // collinear
+  const ux=((ax*ax+ay*ay)*(by-cy3)+(bx*bx+by*by)*(cy3-ay)+(cx3*cx3+cy3*cy3)*(ay-by))/d;
+  const uy=((ax*ax+ay*ay)*(cx3-bx)+(bx*bx+by*by)*(ax-cx3)+(cx3*cx3+cy3*cy3)*(bx-ax))/d;
+  const r=Math.hypot(ax-ux,ay-uy);
+  let a0=Math.atan2(ay-uy,ax-ux);
+  let a1=Math.atan2(by-uy,bx-ux);
+  const am=Math.atan2(cy3-uy,cx3-ux);
+  // Normalize so the sweep a0→a1 passes through am.
+  const norm=a=>{while(a<a0)a+=Math.PI*2;while(a>=a0+Math.PI*2)a-=Math.PI*2;return a;};
+  let a1n=norm(a1),amn=norm(am);
+  if(amn>a1n){a1n-=Math.PI*2;} // go the short/correct way through the mid point
+  return {cx:ux,cz:uy,r,a0,a1:a1n};
+}
+
+// How many clicks finalize each entity (spline/line are open-ended).
+function clicksNeeded(tool){return {rect:2,circle:2,arc:3}[tool]||Infinity;}
+
+function handleSketchClick(e){
+  if(!sketchTool)return;
+  const p=sketchPointFromEvent(e);
+  if(!p)return;
+  sketchPts.push(p);
+  const need=clicksNeeded(sketchTool);
+  if(sketchPts.length>=need && need!==Infinity){
+    commitSketchEntity();
+  }
+  // line/spline keep collecting; preview shows progress
+  refreshSketchPreview(p);
+}
+
+// Commit the in-progress entity into the sketch.
+function commitSketchEntity(){
+  if(!sketchTool||sketchPts.length===0){sketchPts=[];clearPreview();return;}
+  let pts=sketchPts.slice();
+  // Drop consecutive coincident points (e.g. the extra click from a
+  // double-click used to finish a line/spline chain).
+  if(sketchTool==='line'||sketchTool==='spline'){
+    pts=pts.filter((p,i)=>i===0||Math.hypot(p.x-pts[i-1].x,p.z-pts[i-1].z)>1e-3);
+  }
+  // Validate degenerate cases.
+  if(sketchTool==='line'&&pts.length<2){cancelSketchEntity();return;}
+  if(sketchTool==='spline'&&pts.length<2){cancelSketchEntity();return;}
+  if((sketchTool==='rect'||sketchTool==='circle')&&pts.length<2){cancelSketchEntity();return;}
+  if(sketchTool==='arc'&&pts.length<3){cancelSketchEntity();return;}
+
+  const poly=entityToPolyline(sketchTool,pts);
+  const line=makeSketchLine(poly,SKETCH_COLOR,false);
+  sketchGroup.add(line);
+  sketchEntities.push({type:sketchTool,pts,line});
+  sketchPts=[];
+  clearPreview();
+  updateStats();
+  document.getElementById('sb-status').textContent=`${sketchEntities.length} entity(ies) in sketch`;
+}
+
+// Abandon a half-drawn entity without committing it.
+function cancelSketchEntity(){sketchPts=[];clearPreview();}
+
+function clearPreview(){
+  if(sketchPreview){sketchGroup.remove(sketchPreview);sketchPreview.geometry.dispose();sketchPreview.material.dispose();sketchPreview=null;}
+}
+
+// Rubber-band preview from committed points to the cursor.
+function refreshSketchPreview(cursor){
+  if(!sketchMode||!sketchTool)return;
+  clearPreview();
+  if(sketchPts.length===0)return;
+  let poly=null;
+  if(sketchTool==='line'||sketchTool==='spline'){
+    poly=entityToPolyline(sketchTool,cursor?[...sketchPts,cursor]:sketchPts);
+  }else if(sketchTool==='rect'&&cursor){
+    poly=entityToPolyline('rect',[sketchPts[0],cursor]);
+  }else if(sketchTool==='circle'&&cursor){
+    poly=entityToPolyline('circle',[sketchPts[0],cursor]);
+  }else if(sketchTool==='arc'&&cursor){
+    if(sketchPts.length===1){poly=[sketchPts[0],cursor];}
+    else if(sketchPts.length===2){poly=entityToPolyline('arc',[sketchPts[0],sketchPts[1],cursor]);}
+  }
+  if(poly&&poly.length>=2){
+    sketchPreview=makeSketchLine(poly,SKETCH_PREVIEW_COLOR,true);
+    sketchGroup.add(sketchPreview);
+  }
+}
+
+function deleteLastSketchEntity(){
+  if(!sketchMode)return;
+  if(sketchPts.length>0){cancelSketchEntity();return;}
+  const ent=sketchEntities.pop();
+  if(ent){sketchGroup.remove(ent.line);ent.line.geometry.dispose();ent.line.material.dispose();}
+  updateStats();
+}
+
+function clearSketch(){
+  if(!sketchMode)return;
+  cancelSketchEntity();
+  sketchEntities.forEach(ent=>{sketchGroup.remove(ent.line);ent.line.geometry.dispose();ent.line.material.dispose();});
+  sketchEntities=[];
+  updateStats();
+  toast('Sketch cleared');
+}
+
+// Finish the active sketch: keep its geometry as reference, add a tree node.
+function finishSketch(){
+  if(!sketchMode)return;
+  commitSketchEntity(); // flush any line/spline chain in progress
+  exitSketchUI();
+
+  if(sketchEntities.length===0){
+    // Nothing drawn — discard the empty sketch.
+    if(sketchGroup){scene.remove(sketchGroup);}
+    sketchGroup=null;
+    toast('Empty sketch discarded');
+    document.getElementById('sb-status').textContent='Ready';
+    return;
+  }
+  if(sketchPlaneMesh){sketchGroup.remove(sketchPlaneMesh);sketchPlaneMesh.geometry.dispose();sketchPlaneMesh.material.dispose();sketchPlaneMesh=null;}
+  const sk={id:Date.now()+Math.random(),name:`Sketch${sketchCounter}`,entities:sketchEntities,group:sketchGroup,visible:true};
+  sketches.push(sk);
+  sketchGroup=null;sketchEntities=[];
+  selectedSketch=sk;
+  updateSketchTree();
+  setView('iso');
+  toast(`${sk.name} finished — select Extrude to build a solid`);
+  document.getElementById('sb-status').textContent=`${sk.name} finished`;
+}
+
+// Common teardown of the sketch-mode UI flags.
+function exitSketchUI(){
+  sketchMode=false;sketchTool=null;sketchPts=[];
+  clearPreview();
+  hideSketchBanner();
+  document.getElementById('vp-wrap').dataset.mode='select';
+  document.getElementById('btn-startsketch').classList.remove('active');
+  ['line','circle','rect','arc','spline'].forEach(t=>{const b=document.getElementById('sk-'+t);if(b)b.classList.remove('active');});
+  document.getElementById('sb-tool').textContent='Select';
+}
+
+// ── Sketch browser nodes ──
+function updateSketchTree(){
+  const list=document.getElementById('sketches-list');
+  if(!list)return;
+  list.innerHTML=sketches.map(s=>`
+    <div class="bt-node ${selectedSketch===s?'selected':''}" data-sketch="${s.id}" onclick="selectSketch('${s.id}')">
+      <div class="bt-indent" style="width:24px;"></div>
+      <div class="bt-expand"></div>
+      <div class="bt-icon"><svg viewBox="0 0 16 16" fill="none" stroke="${s.visible?'#35d0ff':'#555'}" stroke-width="1.5"><rect x="2" y="2" width="12" height="12" rx="1"/><path d="M4 11l3-5 2 3 1-2 2 4"/></svg></div>
+      <div class="bt-label">${s.name}</div>
+      <div class="bt-vis" onclick="event.stopPropagation();toggleSketchVis('${s.id}')" title="Toggle">${s.visible?'👁':'–'}</div>
+    </div>
+  `).join('');
+}
+function selectSketch(id){
+  const s=sketches.find(x=>String(x.id)===String(id));
+  if(!s)return;
+  selectObj(null); // clear any 3D body selection
+  selectedSketch=s;
+  updateSketchTree();
+  document.getElementById('sb-status').textContent=`${s.name} selected — ready to extrude`;
+}
+function toggleSketchVis(id){
+  const s=sketches.find(x=>String(x.id)===String(id));
+  if(s){s.visible=!s.visible;s.group.visible=s.visible;updateSketchTree();}
+}
+
+// ── Sketch banner (reuses the boolean-pick banner style) ──
+function showSketchBanner(txt){
+  let b=document.getElementById('sketch-banner');
+  if(!b){
+    b=document.createElement('div');
+    b.id='sketch-banner';b.className='bool-banner';
+    document.getElementById('vp-wrap').appendChild(b);
+  }
+  b.textContent=txt;b.hidden=false;
+}
+function hideSketchBanner(){const b=document.getElementById('sketch-banner');if(b)b.hidden=true;}
+
+// ═══════════════════════════════════════════
+//  EXTRUDE — turn a finished sketch into a solid
+// ═══════════════════════════════════════════
+function startExtrude(){
+  if(sketchMode){toast('Finish the sketch first (Finish Sketch), then extrude');return;}
+  const sk=selectedSketch||sketches[sketches.length-1];
+  if(!sk){toast('No sketch to extrude — create a sketch first');document.getElementById('sb-status').textContent='Create a sketch profile to extrude';return;}
+  const shape=sketchToShape(sk);
+  if(!shape){toast('Sketch has no closed profile to extrude');return;}
+  extrudeShape(shape,sk,2);
+}
+
+// Convert a sketch's entities to a THREE.Shape (closed profile) in the X/Z plane.
+function sketchToShape(sk){
+  // Prefer a single primitive profile (circle/rect) if present.
+  const circle=sk.entities.find(e=>e.type==='circle');
+  if(circle){
+    const [c,r]=circle.pts;const rad=Math.hypot(r.x-c.x,r.z-c.z);
+    if(rad<1e-3)return null;
+    const s=new THREE.Shape();
+    s.absarc(c.x,c.z,rad,0,Math.PI*2,false);
+    return s;
+  }
+  const rect=sk.entities.find(e=>e.type==='rect');
+  if(rect){
+    const [a,b]=rect.pts;
+    if(Math.abs(b.x-a.x)<1e-3||Math.abs(b.z-a.z)<1e-3)return null;
+    const s=new THREE.Shape();
+    s.moveTo(a.x,a.z);s.lineTo(b.x,a.z);s.lineTo(b.x,b.z);s.lineTo(a.x,b.z);s.closePath();
+    return s;
+  }
+  // Otherwise stitch line/arc/spline entities into one polyline loop.
+  let poly=[];
+  sk.entities.forEach(e=>{
+    const pl=entityToPolyline(e.type,e.pts);
+    pl.forEach(pt=>{
+      const last=poly[poly.length-1];
+      if(!last||Math.hypot(last.x-pt.x,last.z-pt.z)>1e-4)poly.push(pt);
+    });
+  });
+  if(poly.length<3)return null;
+  const s=new THREE.Shape();
+  s.moveTo(poly[0].x,poly[0].z);
+  for(let i=1;i<poly.length;i++)s.lineTo(poly[i].x,poly[i].z);
+  s.closePath();
+  return s;
+}
+
+function extrudeShape(shape,sk,depth){
+  saveUndo();
+  const geo=new THREE.ExtrudeGeometry(shape,{depth,bevelEnabled:false,steps:1});
+  // Shape lives in XY; rotate so extrusion rises along +Y (world up).
+  geo.rotateX(-Math.PI/2);
+  geo.computeVertexNormals();
+
+  const m=MATS[matIdx%MATS.length];matIdx++;
+  const mat=new MeshStandardMaterial({color:new Color(m.color),metalness:0.25,roughness:0.5});
+  const mesh=new Mesh(geo,mat);
+  mesh.castShadow=true;mesh.receiveShadow=true;
+
+  const edges=new EdgesGeometry(geo,30);
+  const eMat=new LineBasicMaterial({color:0x000000,transparent:true,opacity:edgesOn?0.15:0});
+  const eLine=new LineSegments(edges,eMat);
+  mesh.add(eLine);
+
+  scene.add(mesh);
+  const name=`Extrude${++counter.box}`;
+  const obj={id:Date.now()+Math.random(),name,type:'extrude',mesh,edgeLine:eLine,color:m.color,matName:m.name,visible:true};
+  objects.push(obj);
+  selectObj(obj);
+  updateTree();updateStats();
+  lastAction='';
+  toast(`${sk.name} extruded (${depth}mm)`);
+  document.getElementById('sb-status').textContent=`Created ${name} from ${sk.name}`;
+}
+
 // Stubs for future features
-function startExtrude(){toast('Extrude — coming in Phase 2');document.getElementById('sb-status').textContent='Select a sketch profile to extrude';}
 function startRevolve(){toast('Revolve — coming in Phase 2');}
 function addFillet(){toast('Fillet — coming in Phase 3');}
 function addChamfer(){toast('Chamfer — coming in Phase 3');}
@@ -1691,6 +2111,7 @@ function treeIcon(t){
     case 'union':return'<circle cx="6" cy="8" r="4"/><circle cx="10" cy="8" r="4"/>';
     case 'cut':return'<circle cx="6" cy="8" r="4"/><circle cx="10" cy="8" r="4" stroke-dasharray="2 1"/>';
     case 'intersect':return'<circle cx="6" cy="8" r="4" stroke-dasharray="2 1"/><circle cx="10" cy="8" r="4" stroke-dasharray="2 1"/><path d="M8 4.5a4 4 0 010 7 4 4 0 010-7z"/>';
+    case 'extrude':return'<rect x="3" y="9" width="10" height="4" rx="1"/><path d="M5 9V5h6v4"/><path d="M5 5l-2-2h10l-2 2"/>';
     default:return'<circle cx="8" cy="8" r="5"/>';
   }
 }
@@ -1818,7 +2239,7 @@ function duplicateSelected(){
   if(!selected)return;
   document.getElementById('ctx-menu').hidden=true;
   const src=selected;
-  const isBool=src.type==='union'||src.type==='cut'||src.type==='intersect';
+  const isBool=src.type==='union'||src.type==='cut'||src.type==='intersect'||src.type==='extrude';
   if(isBool){
     // Clone geometry directly for boolean results
     saveUndo();
@@ -1858,8 +2279,17 @@ function selectAll(){objects.forEach(o=>o);if(objects.length>0)selectObj(objects
 
 function newScene(){
   saveUndo();
+  if(sketchMode){
+    // bail out of an active sketch cleanly
+    if(sketchGroup)scene.remove(sketchGroup);
+    sketchGroup=null;sketchEntities=[];sketchPts=[];
+    exitSketchUI();
+  }
   objects.forEach(o=>scene.remove(o.mesh));
   objects=[];
+  sketches.forEach(s=>scene.remove(s.group));
+  sketches=[];selectedSketch=null;sketchCounter=0;
+  updateSketchTree();
   if(selBox){scene.remove(selBox);selBox=null;}
   selected=null;matIdx=0;
   Object.keys(counter).forEach(k=>counter[k]=0);
@@ -1884,7 +2314,7 @@ function saveUndo(){
       rot:[o.mesh.rotation.x,o.mesh.rotation.y,o.mesh.rotation.z],
       scl:o.mesh.scale.toArray(),
       met:o.mesh.material.metalness,rou:o.mesh.material.roughness};
-    if(o.type==='union'||o.type==='cut'||o.type==='intersect'){
+    if(o.type==='union'||o.type==='cut'||o.type==='intersect'||o.type==='extrude'){
       d.geo=serializeGeo(o.mesh.geometry);
     }
     return d;
@@ -1897,7 +2327,7 @@ function saveUndo(){
 function snapshotState(){
   return objects.map(o=>{
     const d={id:o.id,name:o.name,type:o.type,color:o.color,visible:o.visible,pos:o.mesh.position.toArray(),rot:[o.mesh.rotation.x,o.mesh.rotation.y,o.mesh.rotation.z],scl:o.mesh.scale.toArray(),met:o.mesh.material.metalness,rou:o.mesh.material.roughness};
-    if(o.type==='union'||o.type==='cut'||o.type==='intersect')d.geo=serializeGeo(o.mesh.geometry);
+    if(o.type==='union'||o.type==='cut'||o.type==='intersect'||o.type==='extrude')d.geo=serializeGeo(o.mesh.geometry);
     return d;
   });
 }
@@ -1927,7 +2357,7 @@ function restore(state){
       case 'cone':geo=new ConeGeometry(1,2,32);break;
       case 'torus':geo=new TorusGeometry(1.2,0.4,16,48);break;
       case 'plane':geo=new PlaneGeometry(4,4);break;
-      case 'union':case 'cut':case 'intersect':
+      case 'union':case 'cut':case 'intersect':case 'extrude':
         if(s.geo){
           geo=new THREE.BufferGeometry();
           geo.setAttribute('position',new THREE.Float32BufferAttribute(s.geo.verts,3));
@@ -2009,6 +2439,25 @@ function exportSTL(){
 // ── Keyboard ──
 function onKey(e){
   if(e.target.tagName==='INPUT')return;
+  if(sketchMode){
+    if(e.key==='Enter'){(sketchTool==='line'||sketchTool==='spline')?commitSketchEntity():finishSketch();e.preventDefault();return;}
+    if(e.key==='Escape'){sketchPts.length>0?cancelSketchEntity():finishSketch();e.preventDefault();return;}
+    switch(e.key.toLowerCase()){
+      case 'l':setSketchTool('line');return;
+      case 'c':setSketchTool('circle');return;
+      case 'r':setSketchTool('rect');return;
+      case 'a':if(!e.ctrlKey&&!e.metaKey){setSketchTool('arc');return;}break;
+      case 'p':setSketchTool('spline');return;
+      case '1':setView('front');return;
+      case '2':setView('back');return;
+      case '3':setView('right');return;
+      case '4':setView('left');return;
+      case '7':setView('top');return;
+      case '5':setView('iso');return;
+      case 'f':zoomFit();return;
+    }
+    return; // swallow other keys while sketching
+  }
   switch(e.key.toLowerCase()){
     case 'delete':case 'backspace':deleteSelected();break;
     case 'z':if(e.ctrlKey||e.metaKey){e.shiftKey?redo():undo();e.preventDefault();}break;
@@ -2041,6 +2490,11 @@ function onCtx(e){
 }
 
 function onDbl(e){
+  if(sketchMode){
+    // Double-click ends an open chain (line/spline).
+    if(sketchTool==='line'||sketchTool==='spline')commitSketchEntity();
+    return;
+  }
   if(selected){target.copy(selected.mesh.position);dist=6;updateCamera();}
 }
 

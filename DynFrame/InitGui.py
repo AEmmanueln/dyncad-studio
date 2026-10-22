@@ -1,22 +1,36 @@
 # -*- coding: utf-8 -*-
-"""DynFrame workbench registration (GUI)."""
+"""DynFrame workbench registration (GUI).
+
+Note: this file must not rely on __file__ at import time — FreeCAD's
+startup loader does not always define it when it execs InitGui.py, and a
+failure here makes the whole workbench silently disappear. We resolve the
+module directory defensively instead.
+"""
 
 import os
 import FreeCAD
 import FreeCADGui
 
+try:
+    _DIR = os.path.dirname(__file__)
+except Exception:
+    _DIR = os.path.join(FreeCAD.getUserAppDataDir(), "Mod", "DynFrame")
+_ICON = os.path.join(_DIR, "icons", "dynframe.svg")
+
 
 class DynFrameWorkbench(FreeCADGui.Workbench):
     MenuText = "DynFrame"
     ToolTip = "Inventor-style Frame Generator, modeling helpers and export tools"
-
-    def __init__(self):
-        self.__class__.Icon = os.path.join(os.path.dirname(__file__),
-                                            "icons", "dynframe.svg")
+    Icon = _ICON
 
     def Initialize(self):
-        # Importing the module registers all DynFrame_* commands.
-        import dynframe_commands  # noqa: F401
+        try:
+            import dynframe_commands  # registers all DynFrame_* commands
+        except Exception:
+            import traceback
+            FreeCAD.Console.PrintError("DynFrame: commands failed to load\n"
+                                       + traceback.format_exc())
+            return
 
         frame = ["DynFrame_InsertMembers", "DynFrame_ChangeProfile",
                  "DynFrame_LengthenShorten", "DynFrame_TrimButt",
@@ -26,15 +40,20 @@ class DynFrameWorkbench(FreeCADGui.Workbench):
         io = ["DynFrame_ExportStep", "DynFrame_ExportStl"]
         setup = ["DynFrame_InventorNav"]
 
-        self.appendToolbar("DynFrame · Frame", frame)
-        self.appendToolbar("DynFrame · Skeleton", skel)
-        self.appendToolbar("DynFrame · Model", model)
-        self.appendToolbar("DynFrame · Export", io)
-        self.appendMenu("DynFrame", frame + skel + model + io + setup)
+        try:
+            self.appendToolbar("DynFrame · Frame", frame)
+            self.appendToolbar("DynFrame · Skeleton", skel)
+            self.appendToolbar("DynFrame · Model", model)
+            self.appendToolbar("DynFrame · Export", io)
+            self.appendMenu("DynFrame", frame + skel + model + io + setup)
+        except Exception:
+            import traceback
+            FreeCAD.Console.PrintError("DynFrame: toolbar/menu setup failed\n"
+                                       + traceback.format_exc())
         FreeCAD.Console.PrintMessage("DynFrame workbench loaded\n")
 
     def Activated(self):
-        FreeCAD.Console.PrintMessage("DynFrame workbench activated\n")
+        pass
 
     def Deactivated(self):
         pass
@@ -43,4 +62,9 @@ class DynFrameWorkbench(FreeCADGui.Workbench):
         return "Gui::PythonWorkbench"
 
 
-FreeCADGui.addWorkbench(DynFrameWorkbench())
+try:
+    FreeCADGui.addWorkbench(DynFrameWorkbench())
+except Exception:
+    import traceback
+    FreeCAD.Console.PrintError("DynFrame: addWorkbench failed at startup\n"
+                               + traceback.format_exc())

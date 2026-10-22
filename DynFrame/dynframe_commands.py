@@ -1,38 +1,35 @@
 # -*- coding: utf-8 -*-
-"""DynFrame commands: Frame Generator, trim/miter, cut list, export,
-quick fillet and an Inventor navigation preset.
+"""DynFrame commands — an Inventor-style Frame Generator for FreeCAD.
 
-Design notes
-------------
-* A "member" is a Part::Feature whose Shape is a profile face extruded
-  along its local +Z, placed so +Z points down the selected edge. Its
-  cut length and profile name are stored as properties (used by the
-  cut list).
-* Selections are read via Gui.Selection; sub-selected edges come back in
-  GLOBAL coordinates, which is what we need. Whole-object selections are
-  transformed by the object's Placement so their edges are global too.
+Key ideas
+---------
+* Each member stores its *skeleton* (MemberStart/MemberEnd global points),
+  its profile name and twist. Every edit (lengthen, change profile) rebuilds
+  the solid from that skeleton, so operations stay robust and repeatable.
+* Members are oriented with an explicit, stable frame (not a shortest-arc
+  rotation), so profiles never randomly roll or flip — this is what makes
+  I-beams / angles / channels sit consistently along every edge.
 """
 
 import os
-import math
-
 import FreeCAD
 import FreeCADGui
 import Part
 
 import dynframe_profiles as profiles
 
-# ── Qt helpers (binding-agnostic through FreeCAD's PySide shim) ──
 from PySide import QtGui
 try:
     from PySide import QtWidgets as QW
-except Exception:  # older FreeCAD maps widgets into QtGui
+except Exception:
     QW = QtGui
 
 _ICON_DIR = os.path.join(os.path.dirname(__file__), "icons")
 TOL = 1e-6
+GROUP = "Frame"
 
 
+# ── UI helpers ───────────────────────────────────────────────────
 def _icon(name):
     p = os.path.join(_ICON_DIR, name + ".svg")
     return p if os.path.exists(p) else os.path.join(_ICON_DIR, "dynframe.svg")
@@ -45,140 +42,240 @@ def _mw():
         return None
 
 
-def info(msg):
-    QW.QMessageBox.information(_mw(), "DynFrame", msg)
+def info(m):
+    QW.QMessageBox.information(_mw(), "DynFrame", m)
 
 
-def warn(msg):
-    QW.QMessageBox.warning(_mw(), "DynFrame", msg)
+def warn(m):
+    QW.QMessageBox.warning(_mw(), "DynFrame", m)
 
 
-def err(msg):
-    QW.QMessageBox.critical(_mw(), "DynFrame", msg)
+def err(m):
+    QW.QMessageBox.critical(_mw(), "DynFrame", m)
 
 
 def get_item(title, label, items):
     return QW.QInputDialog.getItem(_mw(), title, label, items, 0, False)
 
 
-def get_double(title, label, value, lo, hi, decimals=2):
-    return QW.QInputDialog.getDouble(_mw(), title, label, value, lo, hi, decimals)
+def get_double(title, label, value, lo, hi, dec=2):
+    return QW.QInputDialog.getDouble(_mw(), title, label, value, lo, hi, dec)
 
 
-def save_filename(title, filt):
-    res = QW.QFileDialog.getSaveFileName(_mw(), title, "", filt)
-    return res[0] if isinstance(res, (tuple, list)) else res
+def save_name(title, filt):
+    r = QW.QFileDialog.getSaveFileName(_mw(), title, "", filt)
+    return r[0] if isinstance(r, (tuple, list)) else r
 
 
-def existing_dir(title):
+def choose_dir(title):
     return QW.QFileDialog.getExistingDirectory(_mw(), title, "")
 
 
-# ── Geometry helpers ─────────────────────────────────────────────
-def _edge_endpoints(edge, out):
+def pick_profile():
+    """Two-step family -> size picker. Returns (size_name, builder) or None."""
+    fams = profiles.families()
+    fam, ok = get_item("Frame Generator  (1/2)", "Profile family:", list(fams.keys()))
+    if not ok:
+        return None
+    sizes = fams[fam]
+    name, ok = get_item("Frame Generator  (2/2)  -  " + fam, "Size:", [s[0] for s in sizes])
+    if not ok:
+        return None
+    return name, dict(sizes)[name]
+
+
+# ── geometry helpers ─────────────────────────────────────────────
+def orient_placement(p1, direction, twist_deg=0.0):
+    """Stable placement: local +Z -> member direction, with a consistent
+    'up' so the profile never rolls arbitrarily. twist_deg rotates the
+    profile about its own axis."""
+    z = FreeCAD.Vector(direction)
+    if z.Length < TOL:
+        return FreeCAD.Placement(p1, FreeCAD.Rotation())
+    z.normalize()
+    wz = FreeCAD.Vector(0, 0, 1)
+    ref = wz if abs(z.dot(wz)) < 0.9 else FreeCAD.Vector(1, 0, 0)
+    x = ref.cross(z)
+    if x.Length < TOL:
+        x = FreeCAD.Vector(0, 1, 0).cross(z)
+    x.normalize()
+    y = z.cross(x)
+    y.normalize()
+    if abs(twist_deg) > 1e-9:
+        tw = FreeCAD.Rotation(z, twist_deg)
+        x = tw.multVec(x)
+        y = tw.multVec(y)
+    m = FreeCAD.Matrix(x.x, y.x, z.x, p1.x,
+                       x.y, y.y, z.y, p1.y,
+                       x.z, y.z, z.z, p1.z,
+                       0, 0, 0, 1)
+    return FreeCAD.Placement(m)
+
+
+def _edge_pts(edge, out):
     try:
         if len(edge.Vertexes) >= 2:
-            p1 = edge.Vertexes[0].Point
-            p2 = edge.Vertexes[-1].Point
-            if p1.distanceToPoint(p2) > TOL:
-                out.append((FreeCAD.Vector(p1), FreeCAD.Vector(p2)))
+            a = edge.Vertexes[0].Point
+            b = edge.Vertexes[-1].Point
+            if a.distanceToPoint(b) > TOL:
+                out.append((FreeCAD.Vector(a), FreeCAD.Vector(b)))
     except Exception:
         pass
 
 
-def _edges_from_shape(shp, out):
+def _edges_of(shp, out):
     try:
         if shp.ShapeType == "Edge":
-            _edge_endpoints(shp, out)
+            _edge_pts(shp, out)
         else:
             for e in shp.Edges:
-                _edge_endpoints(e, out)
+                _edge_pts(e, out)
     except Exception:
         pass
 
 
 def collect_edges():
-    """Return a list of (p1, p2) global endpoint pairs for straight edges
-    in the current selection (sub-selected edges, or all edges of a whole
-    selected object such as a sketch)."""
     out = []
     for so in FreeCADGui.Selection.getSelectionEx():
         subs = list(getattr(so, "SubObjects", []) or [])
         if subs:
-            for sub in subs:
-                _edges_from_shape(sub, out)
+            for s in subs:
+                _edges_of(s, out)
         else:
             obj = so.Object
-            if hasattr(obj, "Shape") and obj.Shape is not None:
+            if getattr(obj, "Shape", None) is not None:
                 try:
-                    gshape = obj.Shape.copy()
-                    gshape.Placement = obj.Placement.multiply(gshape.Placement)
+                    g = obj.Shape.copy()
+                    g.Placement = obj.Placement.multiply(g.Placement)
                 except Exception:
-                    gshape = obj.Shape
-                _edges_from_shape(gshape, out)
+                    g = obj.Shape
+                _edges_of(g, out)
+    # de-duplicate coincident edges
+    uniq = []
+    for a, b in out:
+        dup = False
+        for c, d in uniq:
+            if (a.distanceToPoint(c) < 1e-4 and b.distanceToPoint(d) < 1e-4) or \
+               (a.distanceToPoint(d) < 1e-4 and b.distanceToPoint(c) < 1e-4):
+                dup = True
+                break
+        if not dup:
+            uniq.append((a, b))
+    return uniq
+
+
+def group(doc):
+    for o in doc.Objects:
+        if o.Name == GROUP and o.TypeId == "App::DocumentObjectGroup":
+            return o
+    return doc.addObject("App::DocumentObjectGroup", GROUP)
+
+
+def is_member(o):
+    return hasattr(o, "MemberProfile")
+
+
+def selected_members():
+    out = []
+    for s in FreeCADGui.Selection.getSelectionEx():
+        o = s.Object
+        if o not in out and getattr(o, "Shape", None) is not None:
+            out.append(o)
     return out
 
 
-def get_or_make_group(doc, name):
-    for o in doc.Objects:
-        if o.Name == name and o.TypeId == "App::DocumentObjectGroup":
-            return o
-    grp = doc.addObject("App::DocumentObjectGroup", name)
-    return grp
+def skeleton(obj):
+    """Return (start, end) global points of a member's centre-line."""
+    s = getattr(obj, "MemberStart", None)
+    e = getattr(obj, "MemberEnd", None)
+    if s is not None and e is not None and FreeCAD.Vector(e).sub(FreeCAD.Vector(s)).Length > TOL:
+        return FreeCAD.Vector(s), FreeCAD.Vector(e)
+    L = float(getattr(obj, "MemberLength", 0.0) or 0.0)
+    base = obj.Placement.Base
+    z = obj.Placement.Rotation.multVec(FreeCAD.Vector(0, 0, 1))
+    if L <= 0:
+        bb = obj.Shape.BoundBox
+        L = max(bb.XLength, bb.YLength, bb.ZLength)
+    return FreeCAD.Vector(base), base.add(z.multiply(L))
 
 
-def make_member(doc, face, p1, p2, profname, twist_deg):
-    """Extrude `face` from p1 to p2; return the new Part::Feature."""
+def global_shape(obj):
+    g = obj.Shape.copy()
+    g.Placement = obj.Placement.multiply(g.Placement)
+    return g
+
+
+def _set_prop(obj, typ, name, val):
+    try:
+        if not hasattr(obj, name):
+            obj.addProperty(typ, name, "DynFrame", name)
+        setattr(obj, name, val)
+    except Exception:
+        pass
+
+
+def make_member(doc, face, p1, p2, profname, twist):
     d = p2.sub(p1)
     L = d.Length
     if L < TOL:
         return None
-    dirn = FreeCAD.Vector(d)
-    dirn.normalize()
     try:
         solid = face.extrude(FreeCAD.Vector(0, 0, L))
     except Exception as e:
         FreeCAD.Console.PrintError("DynFrame: extrude failed (%s)\n" % e)
         return None
-
-    rot = FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), dirn)
-    if abs(twist_deg) > 1e-9:
-        rot = rot.multiply(FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), twist_deg))
-
     obj = doc.addObject("Part::Feature", "Member")
     obj.Shape = solid
-    obj.Placement = FreeCAD.Placement(p1, rot)
-    try:
-        obj.addProperty("App::PropertyString", "MemberProfile", "DynFrame",
-                        "Structural section").MemberProfile = profname
-        obj.addProperty("App::PropertyLength", "MemberLength", "DynFrame",
-                        "Cut length").MemberLength = L
-    except Exception:
-        pass
-    obj.Label = "%s (%.1f mm)" % (profname, L)
+    obj.Placement = orient_placement(p1, d, twist)
+    _set_prop(obj, "App::PropertyString", "MemberProfile", profname)
+    _set_prop(obj, "App::PropertyVector", "MemberStart", p1)
+    _set_prop(obj, "App::PropertyVector", "MemberEnd", p2)
+    _set_prop(obj, "App::PropertyLength", "MemberLength", L)
+    _set_prop(obj, "App::PropertyFloat", "MemberTwist", float(twist))
+    obj.Label = "%s (%.0f mm)" % (profname, L)
     return obj
 
 
-def _member_axis(obj):
-    """Return (corner_a, corner_b, length) in global coords for a member."""
-    L = float(getattr(obj, "MemberLength", 0.0) or 0.0)
-    if L <= 0:
-        # fall back to bounding box longest dimension
-        bb = obj.Shape.BoundBox
-        L = max(bb.XLength, bb.YLength, bb.ZLength)
-    base = obj.Placement.Base
-    axis = obj.Placement.Rotation.multVec(FreeCAD.Vector(0, 0, 1))
-    axis.normalize()
-    return FreeCAD.Vector(base), base.add(axis.multiply(L)), L
+def rebuild_member(obj, p1, p2, profname, twist):
+    """Replace a member's solid from a (possibly new) skeleton/profile."""
+    b = profiles.builder_for(profname)
+    if b is None:
+        return False
+    d = p2.sub(p1)
+    L = d.Length
+    if L < TOL:
+        return False
+    try:
+        solid = b().extrude(FreeCAD.Vector(0, 0, L))
+    except Exception as e:
+        FreeCAD.Console.PrintError("DynFrame: rebuild failed (%s)\n" % e)
+        return False
+    obj.Shape = solid
+    obj.Placement = orient_placement(p1, d, twist)
+    _set_prop(obj, "App::PropertyString", "MemberProfile", profname)
+    _set_prop(obj, "App::PropertyVector", "MemberStart", p1)
+    _set_prop(obj, "App::PropertyVector", "MemberEnd", p2)
+    _set_prop(obj, "App::PropertyLength", "MemberLength", L)
+    _set_prop(obj, "App::PropertyFloat", "MemberTwist", float(twist))
+    obj.Label = "%s (%.0f mm)" % (profname, L)
+    return True
 
 
-# ── Commands ─────────────────────────────────────────────────────
+def _halfspace_box(point, remove_dir, size):
+    """A big box filling the half-space on the +remove_dir side of the plane
+    through `point` (normal = remove_dir)."""
+    rd = FreeCAD.Vector(remove_dir)
+    rd.normalize()
+    box = Part.makeBox(2 * size, 2 * size, 2 * size, FreeCAD.Vector(-size, -size, 0))
+    box.Placement = FreeCAD.Placement(FreeCAD.Vector(point), FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), rd))
+    return box
+
+
+# ═══════════════════════════ COMMANDS ════════════════════════════
 class InsertMembers:
     def GetResources(self):
-        return {"Pixmap": _icon("member"),
-                "MenuText": "Insert Frame Members",
-                "ToolTip": "Create structural members along the selected "
-                           "sketch lines or edges (choose a profile).",
+        return {"Pixmap": _icon("member"), "MenuText": "Insert Frame Members",
+                "ToolTip": "Place structural members along selected sketch lines or edges.",
                 "Accel": "F, M"}
 
     def IsActive(self):
@@ -187,28 +284,27 @@ class InsertMembers:
     def Activated(self):
         edges = collect_edges()
         if not edges:
-            info("Select one or more straight edges or sketch lines first,\n"
-                 "then run Insert Frame Members.")
+            info("Select one or more straight edges or sketch lines first.\n\n"
+                 "Tip: draw the frame centre-lines (a sketch rectangle, Draft "
+                 "wire, or 3D skeleton), select them, then run this.")
             return
-        plist = profiles.build_profiles()
-        names = [p[0] for p in plist]
-        item, ok = get_item("Frame Generator", "Structural profile:", names)
-        if not ok:
+        picked = pick_profile()
+        if not picked:
             return
-        builder = dict(plist)[item]
-        twist, _ = get_double("Frame Generator",
-                              "Rotation about member axis (deg):", 0.0, -360.0, 360.0)
+        name, builder = picked
+        twist, _ = get_double("Frame Generator", "Rotate profile about its axis (deg):",
+                              0.0, -360.0, 360.0)
         try:
             face = builder()
         except Exception as e:
-            err("Could not build profile '%s':\n%s" % (item, e))
+            err("Could not build profile '%s':\n%s" % (name, e))
             return
         doc = FreeCAD.ActiveDocument
         doc.openTransaction("DynFrame: insert members")
-        grp = get_or_make_group(doc, "Frame")
+        grp = group(doc)
         n = 0
-        for (p1, p2) in edges:
-            m = make_member(doc, face, p1, p2, item, twist)
+        for p1, p2 in edges:
+            m = make_member(doc, face, p1, p2, name, twist)
             if m:
                 grp.addObject(m)
                 n += 1
@@ -222,39 +318,100 @@ class InsertMembers:
         FreeCAD.Console.PrintMessage("DynFrame: created %d member(s)\n" % n)
 
 
-class TrimButt:
+class ChangeProfile:
     def GetResources(self):
-        return {"Pixmap": _icon("trim"),
-                "MenuText": "Trim Members (Butt Joint)",
-                "ToolTip": "Cut the FIRST selected member against the others "
-                           "to form clean butt joints.",
-                "Accel": "F, T"}
+        return {"Pixmap": _icon("member"), "MenuText": "Change Profile",
+                "ToolTip": "Replace the profile (and/or twist) of the selected members.",
+                "Accel": "F, P"}
 
     def IsActive(self):
-        return FreeCAD.ActiveDocument is not None
+        return bool(selected_members())
 
     def Activated(self):
-        sel = [s.Object for s in FreeCADGui.Selection.getSelectionEx()]
-        members = [o for o in sel if hasattr(o, "Shape") and o.Shape]
+        members = [m for m in selected_members() if is_member(m)]
+        if not members:
+            info("Select one or more frame members first.")
+            return
+        picked = pick_profile()
+        if not picked:
+            return
+        name, _ = picked
+        twist, _ = get_double("Change Profile", "Rotate profile about its axis (deg):",
+                              float(getattr(members[0], "MemberTwist", 0.0)), -360.0, 360.0)
+        doc = FreeCAD.ActiveDocument
+        doc.openTransaction("DynFrame: change profile")
+        for m in members:
+            s, e = skeleton(m)
+            rebuild_member(m, s, e, name, twist)
+        doc.commitTransaction()
+        doc.recompute()
+
+
+class LengthenShorten:
+    def GetResources(self):
+        return {"Pixmap": _icon("lengthen"), "MenuText": "Lengthen / Shorten",
+                "ToolTip": "Extend (+) or shorten (-) the selected members at each end.",
+                "Accel": "F, L"}
+
+    def IsActive(self):
+        return bool(selected_members())
+
+    def Activated(self):
+        members = [m for m in selected_members() if is_member(m)]
+        if not members:
+            info("Select one or more frame members first.")
+            return
+        d_start, ok = get_double("Lengthen / Shorten",
+                                 "Change at START end (mm, + extend / - shorten):", 0.0, -1e6, 1e6)
+        if not ok:
+            return
+        d_end, ok = get_double("Lengthen / Shorten",
+                               "Change at END end (mm, + extend / - shorten):", 0.0, -1e6, 1e6)
+        if not ok:
+            return
+        doc = FreeCAD.ActiveDocument
+        doc.openTransaction("DynFrame: lengthen/shorten")
+        for m in members:
+            s, e = skeleton(m)
+            d = e.sub(s)
+            d.normalize()
+            ns = s.sub(d.multiply(d_start))      # +start extends backwards past start
+            ne = e.add(d.multiply(d_end))
+            rebuild_member(m, ns, ne, getattr(m, "MemberProfile", ""), float(getattr(m, "MemberTwist", 0.0)))
+        doc.commitTransaction()
+        doc.recompute()
+
+
+class TrimButt:
+    def GetResources(self):
+        return {"Pixmap": _icon("trim"), "MenuText": "Trim / Notch (to members)",
+                "ToolTip": "Cut the FIRST selected member against the others "
+                           "(butt joint / cope).", "Accel": "F, T"}
+
+    def IsActive(self):
+        return len(selected_members()) >= 2
+
+    def Activated(self):
+        members = selected_members()
         if len(members) < 2:
-            info("Select the member to trim FIRST, then the member(s) it "
-                 "butts against (at least two total).")
+            info("Select the member to trim FIRST, then the member(s) it meets.")
             return
         target, tools = members[0], members[1:]
         doc = FreeCAD.ActiveDocument
-        doc.openTransaction("DynFrame: trim butt")
+        doc.openTransaction("DynFrame: trim")
         try:
-            result = target.Shape.copy()
-            result.Placement = target.Placement.multiply(result.Placement)
+            res = global_shape(target)
             for t in tools:
-                ts = t.Shape.copy()
-                ts.Placement = t.Placement.multiply(ts.Placement)
-                result = result.cut(ts)
-            target.Shape = result
-            target.Placement = FreeCAD.Placement()  # geometry now global
+                res = res.cut(global_shape(t))
+            if res.Volume < TOL:
+                doc.abortTransaction()
+                warn("Trim would remove the whole member — check your selection "
+                     "(first = the one being trimmed).")
+                return
+            target.Shape = res
+            target.Placement = FreeCAD.Placement()
             doc.commitTransaction()
             doc.recompute()
-            FreeCAD.Console.PrintMessage("DynFrame: trimmed %s\n" % target.Label)
         except Exception as e:
             doc.abortTransaction()
             err("Trim failed:\n%s" % e)
@@ -262,75 +419,113 @@ class TrimButt:
 
 class Miter:
     def GetResources(self):
-        return {"Pixmap": _icon("miter"),
-                "MenuText": "Miter Two Members (experimental)",
+        return {"Pixmap": _icon("miter"), "MenuText": "Miter Two Members",
                 "ToolTip": "Trim two members that meet at a corner on their "
-                           "angle bisector. Experimental — verify the result.",
-                "Accel": "F, I"}
+                           "shared angle bisector.", "Accel": "F, I"}
+
+    def IsActive(self):
+        return len(selected_members()) == 2
+
+    def Activated(self):
+        members = selected_members()
+        if len(members) != 2:
+            info("Select exactly two members that meet at a corner.")
+            return
+        m1, m2 = members
+        s1, e1 = skeleton(m1)
+        s2, e2 = skeleton(m2)
+        # shared corner = closest pair of skeleton endpoints
+        pairs = [(s1, e1, s2, e2), (s1, e1, e2, s2), (e1, s1, s2, e2), (e1, s1, e2, s2)]
+        c1, f1, c2, f2 = min(pairs, key=lambda p: p[0].distanceToPoint(p[2]))
+        gap = c1.distanceToPoint(c2)
+        if gap > 5.0:
+            warn("Those members don't meet at a corner (ends are %.1f mm apart)." % gap)
+            return
+        C = c1
+        d1 = f1.sub(c1)
+        d2 = f2.sub(c2)
+        if d1.Length < TOL or d2.Length < TOL:
+            return
+        d1.normalize()
+        d2.normalize()
+        n = d1.sub(d2)                       # bisector-plane normal, points to d1 side
+        if n.Length < 1e-4:
+            warn("Members are collinear — nothing to miter.")
+            return
+        n.normalize()
+        L1 = s1.distanceToPoint(e1)
+        L2 = s2.distanceToPoint(e2)
+        S = max(L1, L2, 100.0) * 4.0 + 200.0
+        doc = FreeCAD.ActiveDocument
+        doc.openTransaction("DynFrame: miter")
+        try:
+            g1 = global_shape(m1).cut(_halfspace_box(C, n.multiply(-1.0), S))   # keep d1 side
+            g2 = global_shape(m2).cut(_halfspace_box(C, n, S))                  # keep d2 side
+            if g1.Volume < TOL or g2.Volume < TOL:
+                doc.abortTransaction()
+                warn("Miter produced an empty result — check the two members share a corner.")
+                return
+            m1.Shape, m1.Placement = g1, FreeCAD.Placement()
+            m2.Shape, m2.Placement = g2, FreeCAD.Placement()
+            doc.commitTransaction()
+            doc.recompute()
+        except Exception as e:
+            doc.abortTransaction()
+            err("Miter failed:\n%s" % e)
+
+
+class TrimToFace:
+    def GetResources(self):
+        return {"Pixmap": _icon("trim"), "MenuText": "Trim to Face / Plane",
+                "ToolTip": "Trim the selected member(s) at a selected planar face.",
+                "Accel": "F, F"}
 
     def IsActive(self):
         return FreeCAD.ActiveDocument is not None
 
     def Activated(self):
-        sel = [s.Object for s in FreeCADGui.Selection.getSelectionEx()]
-        members = [o for o in sel if hasattr(o, "Shape") and o.Shape]
-        if len(members) != 2:
-            info("Select exactly two members that share a corner.")
+        face = None
+        members = []
+        for so in FreeCADGui.Selection.getSelectionEx():
+            for sub, name in zip(getattr(so, "SubObjects", []) or [],
+                                 getattr(so, "SubElementNames", []) or []):
+                if getattr(sub, "ShapeType", "") == "Face" and face is None:
+                    face = sub
+            if is_member(so.Object) and so.Object not in members:
+                members.append(so.Object)
+        if face is None or not members:
+            info("Select the member(s) to trim AND one planar face to trim them to.")
             return
-        m1, m2 = members
-        a1, b1, L1 = _member_axis(m1)
-        a2, b2, L2 = _member_axis(m2)
-        # find the shared corner (closest pair of endpoints)
-        pairs = [(a1, a2), (a1, b2), (b1, a2), (b1, b2)]
-        corner_pair = min(pairs, key=lambda pr: pr[0].distanceToPoint(pr[1]))
-        if corner_pair[0].distanceToPoint(corner_pair[1]) > 1.0:
-            warn("Those members do not appear to share a corner "
-                 "(endpoints are > 1 mm apart).")
-            return
-        C = corner_pair[0]
-        far1 = b1 if corner_pair[0].isEqual(a1, 1e-3) else a1
-        far2 = b2 if corner_pair[1].isEqual(a2, 1e-3) else a2
-        d1 = far1.sub(C); d1.normalize()
-        d2 = far2.sub(C); d2.normalize()
-        normal = d1.sub(d2)            # miter-plane normal (points to d1 side)
-        if normal.Length < 1e-6:
-            warn("Members are collinear — nothing to miter.")
-            return
-        normal.normalize()
-        doc = FreeCAD.ActiveDocument
-        doc.openTransaction("DynFrame: miter")
         try:
-            self._cut_halfspace(m1, C, normal.multiply(-1.0))  # remove d2 side of m1
-            self._cut_halfspace(m2, C, normal)                 # remove d1 side of m2
+            pt = face.Surface.Position if hasattr(face.Surface, "Position") else face.CenterOfMass
+            nrm = face.normalAt(0, 0)
+        except Exception:
+            warn("That face isn't planar / usable. Pick a flat face.")
+            return
+        doc = FreeCAD.ActiveDocument
+        doc.openTransaction("DynFrame: trim to face")
+        try:
+            for m in members:
+                g = global_shape(m)
+                s, e = skeleton(m)
+                mid = s.add(e).multiply(0.5)
+                # remove the side of the plane that does NOT contain the member's midpoint
+                rd = FreeCAD.Vector(nrm) if (mid.sub(pt)).dot(nrm) < 0 else FreeCAD.Vector(nrm).multiply(-1.0)
+                S = s.distanceToPoint(e) * 4.0 + 200.0
+                r = g.cut(_halfspace_box(pt, rd, S))
+                if r.Volume > TOL:
+                    m.Shape, m.Placement = r, FreeCAD.Placement()
             doc.commitTransaction()
             doc.recompute()
-            FreeCAD.Console.PrintMessage("DynFrame: mitered %s / %s\n"
-                                         % (m1.Label, m2.Label))
         except Exception as e:
             doc.abortTransaction()
-            err("Miter failed:\n%s" % e)
-
-    def _cut_halfspace(self, member, point, remove_dir):
-        """Cut away the part of `member` lying on the +remove_dir side of the
-        plane through `point` with normal `remove_dir`."""
-        gshape = member.Shape.copy()
-        gshape.Placement = member.Placement.multiply(gshape.Placement)
-        bb = gshape.BoundBox
-        S = max(bb.XLength, bb.YLength, bb.ZLength) * 3.0 + 10.0
-        rd = FreeCAD.Vector(remove_dir); rd.normalize()
-        box = Part.makeBox(S, S, S, FreeCAD.Vector(-S / 2.0, -S / 2.0, 0))
-        rot = FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), rd)
-        box.Placement = FreeCAD.Placement(FreeCAD.Vector(point), rot)
-        member.Shape = gshape.cut(box)
-        member.Placement = FreeCAD.Placement()
+            err("Trim to face failed:\n%s" % e)
 
 
 class CutList:
     def GetResources(self):
-        return {"Pixmap": _icon("cutlist"),
-                "MenuText": "Generate Cut List",
-                "ToolTip": "Tabulate every frame member (profile + length) "
-                           "into a spreadsheet, with optional CSV export.",
+        return {"Pixmap": _icon("cutlist"), "MenuText": "Generate Cut List",
+                "ToolTip": "Spreadsheet + CSV of every member (profile, length).",
                 "Accel": "F, C"}
 
     def IsActive(self):
@@ -338,82 +533,68 @@ class CutList:
 
     def Activated(self):
         doc = FreeCAD.ActiveDocument
-        members = [o for o in doc.Objects if hasattr(o, "MemberProfile")]
+        members = [o for o in doc.Objects if is_member(o)]
         if not members:
-            info("No frame members found. Create some with Insert Frame "
-                 "Members first.")
+            info("No frame members found yet.")
             return
         rows = []
-        summary = {}
+        summ = {}
         for m in members:
             prof = getattr(m, "MemberProfile", "?")
-            length = float(getattr(m, "MemberLength", 0.0) or 0.0)
+            s, e = skeleton(m)
+            length = s.distanceToPoint(e)
             rows.append((m.Label, prof, length))
-            key = prof
-            agg = summary.setdefault(key, [0, 0.0])
+            agg = summ.setdefault(prof, [0, 0.0])
             agg[0] += 1
             agg[1] += length
-
-        # Spreadsheet
         try:
             sheet = doc.getObject("CutList") or doc.addObject("Spreadsheet::Sheet", "CutList")
             sheet.clearAll()
             sheet.set("A1", "DynFrame Cut List")
             sheet.set("A3", "Label"); sheet.set("B3", "Profile"); sheet.set("C3", "Length (mm)")
             r = 4
-            for (label, prof, length) in rows:
-                sheet.set("A%d" % r, str(label))
-                sheet.set("B%d" % r, str(prof))
-                sheet.set("C%d" % r, "%.2f" % length)
-                r += 1
+            for label, prof, length in rows:
+                sheet.set("A%d" % r, str(label)); sheet.set("B%d" % r, str(prof))
+                sheet.set("C%d" % r, "%.1f" % length); r += 1
             r += 1
-            sheet.set("A%d" % r, "SUMMARY"); sheet.set("B%d" % r, "Qty"); sheet.set("C%d" % r, "Total (mm)")
-            r += 1
-            for prof, (qty, total) in sorted(summary.items()):
-                sheet.set("A%d" % r, str(prof))
-                sheet.set("B%d" % r, str(qty))
-                sheet.set("C%d" % r, "%.2f" % total)
-                r += 1
+            sheet.set("A%d" % r, "SUMMARY"); sheet.set("B%d" % r, "Qty"); sheet.set("C%d" % r, "Total (mm)"); r += 1
+            for prof, (qty, total) in sorted(summ.items()):
+                sheet.set("A%d" % r, str(prof)); sheet.set("B%d" % r, str(qty))
+                sheet.set("C%d" % r, "%.1f" % total); r += 1
             doc.recompute()
         except Exception as e:
             FreeCAD.Console.PrintError("DynFrame: spreadsheet failed (%s)\n" % e)
-
-        # Optional CSV
-        fn = save_filename("Export cut list as CSV", "CSV files (*.csv)")
+        fn = save_name("Export cut list CSV", "CSV files (*.csv)")
         if fn:
             if not fn.lower().endswith(".csv"):
                 fn += ".csv"
             try:
                 with open(fn, "w", encoding="utf-8") as f:
                     f.write("Label,Profile,Length_mm\n")
-                    for (label, prof, length) in rows:
-                        f.write('"%s","%s",%.2f\n' % (label, prof, length))
+                    for label, prof, length in rows:
+                        f.write('"%s","%s",%.1f\n' % (label, prof, length))
                     f.write("\nProfile,Qty,Total_mm\n")
-                    for prof, (qty, total) in sorted(summary.items()):
-                        f.write('"%s",%d,%.2f\n' % (prof, qty, total))
-                info("Cut list written to:\n%s\n\nSpreadsheet 'CutList' also "
-                     "added to the document." % fn)
+                    for prof, (qty, total) in sorted(summ.items()):
+                        f.write('"%s",%d,%.1f\n' % (prof, qty, total))
+                info("Cut list written to:\n%s" % fn)
             except Exception as e:
-                err("Could not write CSV:\n%s" % e)
+                err("CSV failed:\n%s" % e)
         else:
             info("Spreadsheet 'CutList' added to the document.")
 
 
 class QuickFillet:
     def GetResources(self):
-        return {"Pixmap": _icon("fillet"),
-                "MenuText": "Quick Fillet (selected edges)",
-                "ToolTip": "Fillet the selected solid edges by a radius.",
-                "Accel": "M, F"}
+        return {"Pixmap": _icon("fillet"), "MenuText": "Quick Fillet (edges)",
+                "ToolTip": "Fillet the selected solid edges by a radius.", "Accel": "M, F"}
 
     def IsActive(self):
         return FreeCAD.ActiveDocument is not None
 
     def Activated(self):
-        sel = FreeCADGui.Selection.getSelectionEx()
         base = None
         idxs = []
-        for so in sel:
+        for so in FreeCADGui.Selection.getSelectionEx():
             for name in getattr(so, "SubElementNames", []) or []:
                 if name.startswith("Edge"):
                     base = so.Object
@@ -422,23 +603,22 @@ class QuickFillet:
                     except Exception:
                         pass
         if base is None or not idxs:
-            info("Select one or more edges of a single solid, then run "
-                 "Quick Fillet.")
+            info("Select one or more edges of a single solid, then run Quick Fillet.")
             return
         r, ok = get_double("Quick Fillet", "Radius (mm):", 2.0, 0.01, 1e6)
         if not ok:
             return
         try:
             edges = [base.Shape.Edges[i - 1] for i in idxs]
-            filleted = base.Shape.makeFillet(r, edges)
+            res = base.Shape.makeFillet(r, edges)
         except Exception as e:
-            err("Fillet failed (edges may be unfilletable):\n%s" % e)
+            err("Fillet failed (those edges may be unfilletable):\n%s" % e)
             return
         doc = FreeCAD.ActiveDocument
-        doc.openTransaction("DynFrame: quick fillet")
-        obj = doc.addObject("Part::Feature", base.Label + "_Fillet")
-        obj.Shape = filleted
-        obj.Placement = base.Placement
+        doc.openTransaction("DynFrame: fillet")
+        o = doc.addObject("Part::Feature", base.Label + "_Fillet")
+        o.Shape = res
+        o.Placement = base.Placement
         try:
             base.ViewObject.Visibility = False
         except Exception:
@@ -449,26 +629,22 @@ class QuickFillet:
 
 class ExportStep:
     def GetResources(self):
-        return {"Pixmap": _icon("export"),
-                "MenuText": "Export to STEP",
-                "ToolTip": "Export the selected objects (or all solids) to a "
-                           "single STEP file.",
-                "Accel": "E, S"}
+        return {"Pixmap": _icon("export"), "MenuText": "Export to STEP",
+                "ToolTip": "Export selected objects (or all) to one STEP file.", "Accel": "E, S"}
 
     def IsActive(self):
         return FreeCAD.ActiveDocument is not None
 
     def Activated(self):
         doc = FreeCAD.ActiveDocument
-        sel = [s.Object for s in FreeCADGui.Selection.getSelectionEx()]
-        objs = [o for o in sel if hasattr(o, "Shape") and o.Shape]
+        objs = [s.Object for s in FreeCADGui.Selection.getSelectionEx() if getattr(s.Object, "Shape", None)]
         if not objs:
-            objs = [o for o in doc.Objects if hasattr(o, "Shape") and o.Shape
-                    and o.TypeId not in ("App::DocumentObjectGroup",)]
+            objs = [o for o in doc.Objects if getattr(o, "Shape", None) is not None
+                    and o.TypeId != "App::DocumentObjectGroup"]
         if not objs:
             info("Nothing with geometry to export.")
             return
-        fn = save_filename("Export STEP", "STEP files (*.step *.stp)")
+        fn = save_name("Export STEP", "STEP files (*.step *.stp)")
         if not fn:
             return
         if not fn.lower().endswith((".step", ".stp")):
@@ -482,10 +658,8 @@ class ExportStep:
 
 class ExportStl:
     def GetResources(self):
-        return {"Pixmap": _icon("export"),
-                "MenuText": "Export each body to STL",
-                "ToolTip": "Export the selected objects (or all solids) to "
-                           "individual STL files in a chosen folder.",
+        return {"Pixmap": _icon("export"), "MenuText": "Export each body to STL",
+                "ToolTip": "Export selected objects (or all) to individual STL files.",
                 "Accel": "E, L"}
 
     def IsActive(self):
@@ -493,65 +667,98 @@ class ExportStl:
 
     def Activated(self):
         doc = FreeCAD.ActiveDocument
-        sel = [s.Object for s in FreeCADGui.Selection.getSelectionEx()]
-        objs = [o for o in sel if hasattr(o, "Shape") and o.Shape]
+        objs = [s.Object for s in FreeCADGui.Selection.getSelectionEx() if getattr(s.Object, "Shape", None)]
         if not objs:
-            objs = [o for o in doc.Objects if hasattr(o, "Shape") and o.Shape
-                    and o.TypeId not in ("App::DocumentObjectGroup",)]
+            objs = [o for o in doc.Objects if getattr(o, "Shape", None) is not None
+                    and o.TypeId != "App::DocumentObjectGroup"]
         if not objs:
             info("Nothing with geometry to export.")
             return
-        folder = existing_dir("Choose a folder for the STL files")
+        folder = choose_dir("Choose a folder for the STL files")
         if not folder:
             return
         n = 0
         for o in objs:
             try:
                 safe = "".join(c if c.isalnum() or c in "-_ ." else "_" for c in o.Label)
-                shp = o.Shape.copy()
-                shp.Placement = o.Placement.multiply(shp.Placement)
-                shp.exportStl(os.path.join(folder, safe + ".stl"))
+                global_shape(o).exportStl(os.path.join(folder, safe + ".stl"))
                 n += 1
             except Exception as e:
-                FreeCAD.Console.PrintError("DynFrame: STL export of %s failed (%s)\n"
-                                           % (o.Label, e))
+                FreeCAD.Console.PrintError("DynFrame: STL of %s failed (%s)\n" % (o.Label, e))
         info("Exported %d STL file(s) to:\n%s" % (n, folder))
 
 
-class InventorNav:
+class Skeleton3D:
     def GetResources(self):
-        return {"Pixmap": _icon("nav"),
-                "MenuText": "Use Inventor Navigation",
-                "ToolTip": "Switch the 3D navigation style to the Inventor "
-                           "preset (orbit/pan/zoom like Autodesk Inventor)."}
+        return {"Pixmap": _icon("sketch3d"), "MenuText": "3D Skeleton (Draft Wire)",
+                "ToolTip": "Draw a 3D centre-line skeleton with the Draft Wire "
+                           "tool, then insert members along it.", "Accel": "F, 3"}
 
     def IsActive(self):
         return True
 
     def Activated(self):
+        info("A 3D skeleton is drawn with FreeCAD's Draft 'Wire' (polyline) "
+             "tool, which works in 3D.\n\n"
+             "After you click OK:\n"
+             "1. The Draft workbench opens and the Wire tool starts.\n"
+             "2. Click points in 3D (type coordinates for exact points, or snap "
+             "to vertices). Double-click or press Esc to finish.\n"
+             "3. Switch back to DynFrame, select the wire, and run "
+             "Insert Frame Members.")
         try:
-            grp = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/View")
-            grp.SetString("NavigationStyle", "Gui::InventorNavigationStyle")
-            info("Navigation style set to Inventor.\n\nIf an existing 3D view "
-                 "does not update immediately, close and reopen it, or "
-                 "restart FreeCAD.")
+            FreeCADGui.activateWorkbench("DraftWorkbench")
+            if FreeCAD.ActiveDocument is None:
+                FreeCAD.newDocument()
+            FreeCADGui.runCommand("Draft_Wire")
+        except Exception as e:
+            err("Could not start the Draft Wire tool:\n%s\n\nOpen the Draft "
+                "workbench manually and use the Polyline/Wire tool." % e)
+
+
+class InventorNav:
+    def GetResources(self):
+        return {"Pixmap": _icon("nav"), "MenuText": "Navigation: SolidWorks / Inventor",
+                "ToolTip": "Set the 3D mouse navigation preset."}
+
+    def IsActive(self):
+        return True
+
+    def Activated(self):
+        style, ok = get_item("Navigation style", "Mouse navigation preset:",
+                             ["SolidWorks", "Inventor (OpenInventor)", "CAD", "Revit", "Blender", "Touchpad"])
+        if not ok:
+            return
+        mapping = {"SolidWorks": "Gui::SolidWorksNavigationStyle",
+                   "Inventor (OpenInventor)": "Gui::InventorNavigationStyle",
+                   "CAD": "Gui::CADNavigationStyle", "Revit": "Gui::RevitNavigationStyle",
+                   "Blender": "Gui::BlenderNavigationStyle", "Touchpad": "Gui::TouchpadNavigationStyle"}
+        try:
+            FreeCAD.ParamGet("User parameter:BaseApp/Preferences/View").SetString(
+                "NavigationStyle", mapping[style])
+            info("Navigation set to %s.\nIf a 3D view is already open, close and "
+                 "reopen it (or restart FreeCAD)." % style)
         except Exception as e:
             err("Could not set navigation style:\n%s" % e)
 
 
-# ── Register all commands ────────────────────────────────────────
+# ── register ─────────────────────────────────────────────────────
 def _add(name, cls):
     try:
         FreeCADGui.addCommand(name, cls())
     except Exception as e:
-        FreeCAD.Console.PrintError("DynFrame: could not add %s (%s)\n" % (name, e))
+        FreeCAD.Console.PrintError("DynFrame: add %s failed (%s)\n" % (name, e))
 
 
 _add("DynFrame_InsertMembers", InsertMembers)
+_add("DynFrame_ChangeProfile", ChangeProfile)
+_add("DynFrame_LengthenShorten", LengthenShorten)
 _add("DynFrame_TrimButt", TrimButt)
 _add("DynFrame_Miter", Miter)
+_add("DynFrame_TrimToFace", TrimToFace)
 _add("DynFrame_CutList", CutList)
 _add("DynFrame_QuickFillet", QuickFillet)
 _add("DynFrame_ExportStep", ExportStep)
 _add("DynFrame_ExportStl", ExportStl)
+_add("DynFrame_Skeleton3D", Skeleton3D)
 _add("DynFrame_InventorNav", InventorNav)

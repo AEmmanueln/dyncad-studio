@@ -21,30 +21,42 @@ macOS/Linux).
 
 **Frame Generator**
 - **Insert Frame Members** — select straight sketch lines or model edges,
-  choose a structural profile (SHS, RHS, CHS, angle, channel, I/IPE, flat
-  bar, round bar), optionally rotate the profile about the member axis,
-  and DynFrame sweeps a real solid member down each edge. Members land in
-  a `Frame` group and remember their profile + cut length.
-- **Trim Members (Butt Joint)** — cut the first selected member against
-  the others for clean butt joints. Reliable.
-- **Miter Two Members (experimental)** — trim two members that meet at a
-  corner on their angle bisector. Best-effort; check the result.
-- **Generate Cut List** — tabulate every member (label, profile, length)
-  into a `CutList` spreadsheet, with per-profile quantity/total and an
-  optional CSV export. (This is the frame "BOM / cut list.")
+  pick a profile (two-step **family → size** picker), optionally rotate it
+  about the member axis, and DynFrame sweeps a real solid member down each
+  edge. Members use a **stable orientation frame**, so I-beams / angles /
+  channels no longer roll or flip randomly. Each member stores its
+  *skeleton* (centre-line), profile and twist, so later edits stay robust.
+- **Change Profile** — swap the profile/twist of selected members in place.
+- **Lengthen / Shorten** — extend (+) or shorten (-) members at each end.
+- **Trim / Notch (to members)** — cut the first selected member against the
+  others (butt joint / cope).
+- **Miter Two Members** — trim two members meeting at a corner on their
+  shared angle bisector. Rewritten to work regardless of member lengths.
+- **Trim to Face / Plane** — trim selected members at a selected flat face.
+- **Generate Cut List** — `CutList` spreadsheet + CSV of every member
+  (label, profile, length) with per-profile quantity and total.
 
-**Modeling helper**
-- **Quick Fillet** — fillet the selected solid edges by a radius.
+**Profile library (~196 sizes, 12 families)**
+I-beam **IPE**, H-beam **HEA** / **HEB**, channel **UPN**, equal & unequal
+**angles (L)**, **square (SHS)**, **rectangular (RHS)** and **round (CHS)**
+tube, **T** sections, **flat bar**, **round bar**. Edit
+`dynframe_profiles.py` to add sizes or families.
 
-**Export / automation**
-- **Export to STEP** — selected objects (or all solids) to one STEP file.
-- **Export each body to STL** — one STL per body into a chosen folder.
+**3D skeleton**
+- **3D Skeleton (Draft Wire)** — launches FreeCAD's Draft Wire tool to draw
+  centre-lines in 3D, then insert members along them. (FreeCAD's Draft
+  polyline is its 3D-sketch equivalent.)
 
-**Setup**
-- **Use Inventor Navigation** — switches FreeCAD's 3D navigation preset to
-  Inventor-style orbit/pan/zoom.
+**Modeling / export / setup**
+- **Quick Fillet** — fillet selected solid edges by a radius.
+- **Export to STEP** / **Export each body to STL**.
+- **Navigation: SolidWorks / Inventor** — pick a mouse-navigation preset.
 
-Each command also has a keyboard accelerator (shown in its menu entry).
+Each command has a keyboard accelerator (shown in its menu entry).
+
+> **Scale tip:** draw your skeleton at real size. A 40 mm SHS on a 60 mm
+> rectangle looks like a solid blob — that "distortion" is just members
+> overlapping. For a 1 m frame, draw the lines ~1000 mm long.
 
 ---
 

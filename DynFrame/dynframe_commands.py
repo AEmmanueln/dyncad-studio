@@ -1542,12 +1542,26 @@ class BOM:
             info("Spreadsheet 'BOM' added (total steel mass %.1f kg)." % tot_mass)
 
 
-_PLANE_TO_3D = {"XY": lambda u, v: (u, v, 0.0),
-                "XZ": lambda u, v: (u, 0.0, v),
-                "YZ": lambda u, v: (0.0, u, v)}
-_PLANE_TO_UV = {"XY": lambda p: (p.x, p.y),
-                "XZ": lambda p: (p.x, p.z),
-                "YZ": lambda p: (p.y, p.z)}
+_PLANE_AXES = {"XY": (FreeCAD.Vector(1, 0, 0), FreeCAD.Vector(0, 1, 0), FreeCAD.Vector(0, 0, 1)),
+               "XZ": (FreeCAD.Vector(1, 0, 0), FreeCAD.Vector(0, 0, 1), FreeCAD.Vector(0, 1, 0)),
+               "YZ": (FreeCAD.Vector(0, 1, 0), FreeCAD.Vector(0, 0, 1), FreeCAD.Vector(1, 0, 0))}
+
+
+def _plane_frame(name, offset=0.0):
+    """Return (origin, U, V) for a principal plane, shifted by `offset` along
+    its normal — so the sketch can sit anywhere in 3D."""
+    U, V, N = _PLANE_AXES[name]
+    return vscale(N, offset), FreeCAD.Vector(U), FreeCAD.Vector(V)
+
+
+def _face_frame(face):
+    """Return (origin, U, V) for a selected planar face."""
+    N = unit(face.normalAt(0, 0))
+    O = face.CenterOfMass
+    ref = FreeCAD.Vector(0, 0, 1) if abs(N.dot(FreeCAD.Vector(0, 0, 1))) < 0.9 else FreeCAD.Vector(1, 0, 0)
+    U = unit(ref.cross(N))
+    V = unit(N.cross(U))
+    return FreeCAD.Vector(O), U, V
 
 
 def solve_profile(pts, close, dims=None, slope=0.36):
@@ -1603,27 +1617,49 @@ class ConstrainedSketch:
                 "'python-solvespace'])\nthen restart FreeCAD.")
             return
 
-        # gather a rough profile: selected wire's vertices, else typed points
+        # gather a rough profile (selected wire's vertices) and a face if picked
         verts3d = []
+        sel_face = None
         for so in FreeCADGui.Selection.getSelectionEx():
+            for sub in getattr(so, "SubObjects", []) or []:
+                if getattr(sub, "ShapeType", "") == "Face" and sel_face is None:
+                    sel_face = sub
             obj = so.Object
-            if getattr(obj, "Shape", None) is not None:
+            if not verts3d and getattr(obj, "Shape", None) is not None:
                 try:
                     g = global_shape(obj)
                     if g.Wires:
                         verts3d = [FreeCAD.Vector(v.Point) for v in g.Wires[0].OrderedVertexes]
-                    else:
+                    elif g.Vertexes:
                         verts3d = [FreeCAD.Vector(v.Point) for v in g.Vertexes]
                 except Exception:
                     verts3d = []
-                if verts3d:
-                    break
 
-        plane, ok = get_item("Constrained Sketch", "Sketch plane:", ["XY", "XZ", "YZ"], 0)
+        # choose the sketch plane (anywhere in 3D)
+        choices = ["XY", "XZ", "YZ", "XY + offset", "XZ + offset", "YZ + offset"]
+        if sel_face is not None:
+            choices = ["Selected face"] + choices
+        plane, ok = get_item("Constrained Sketch", "Sketch plane:", choices, 0)
         if not ok:
             return
-        to3d = _PLANE_TO_3D[plane]
-        touv = _PLANE_TO_UV[plane]
+        if plane == "Selected face":
+            O, U, V = _face_frame(sel_face)
+        elif plane.endswith("offset"):
+            base = plane.split()[0]
+            off, ok = get_double("Constrained Sketch", "Plane offset along its normal (mm):",
+                                 0.0, -1e6, 1e6)
+            if not ok:
+                return
+            O, U, V = _plane_frame(base, off)
+        else:
+            O, U, V = _plane_frame(plane, 0.0)
+
+        def touv(p):
+            d = p - O
+            return (d.dot(U), d.dot(V))
+
+        def to3d(u, v):
+            return (O + vscale(U, u) + vscale(V, v))
 
         if verts3d:
             pts = [touv(v) for v in verts3d]
@@ -1679,7 +1715,7 @@ class ConstrainedSketch:
             warn("The solver could not satisfy the constraints — try a rougher "
                  "profile that is clearly near right angles.")
             return
-        pts3d = [FreeCAD.Vector(*to3d(u, v)) for (u, v) in solved]
+        pts3d = [to3d(u, v) for (u, v) in solved]
         if close:
             pts3d.append(pts3d[0])
         doc = FreeCAD.ActiveDocument
@@ -1697,6 +1733,236 @@ class ConstrainedSketch:
             pass
         info("Constrained sketch created (squared-up profile). Select it and run "
              "Insert Frame Members, or use it as a profile.")
+
+
+# ═══════════════════════════ FRAME ANALYSIS ═══════════════════════
+#  Linear-static 3D frame analysis (direct stiffness / Euler-Bernoulli
+#  beam elements). Validated against the textbook cantilever.
+E_STEEL = 210000.0     # N/mm^2
+G_STEEL = 80769.0      # N/mm^2
+FY_STEEL = 250.0       # N/mm^2 (yield, for utilisation colour)
+RHO_STEEL = 7.85e-6    # kg/mm^3
+GRAV = 9.81            # m/s^2
+
+
+def _beam_k_local(E, G, A, Iy, Iz, J, L):
+    import numpy as np
+    k = np.zeros((12, 12))
+    a = E * A / L
+    t = G * J / L
+    z1 = 12 * E * Iz / L**3; z2 = 6 * E * Iz / L**2; z3 = 4 * E * Iz / L; z4 = 2 * E * Iz / L
+    y1 = 12 * E * Iy / L**3; y2 = 6 * E * Iy / L**2; y3 = 4 * E * Iy / L; y4 = 2 * E * Iy / L
+    k[0, 0] = a; k[0, 6] = -a; k[6, 0] = -a; k[6, 6] = a
+    k[3, 3] = t; k[3, 9] = -t; k[9, 3] = -t; k[9, 9] = t
+    for i, j, v in [(1, 1, z1), (1, 5, z2), (1, 7, -z1), (1, 11, z2), (5, 5, z3),
+                    (5, 7, -z2), (5, 11, z4), (7, 7, z1), (7, 11, -z2), (11, 11, z3)]:
+        k[i, j] = v; k[j, i] = v
+    for i, j, v in [(2, 2, y1), (2, 4, -y2), (2, 8, -y1), (2, 10, -y2), (4, 4, y3),
+                    (4, 8, y2), (4, 10, y4), (8, 8, y1), (8, 10, y2), (10, 10, y3)]:
+        k[i, j] = v; k[j, i] = v
+    return k
+
+
+def _beam_T(n1, n2):
+    import numpy as np
+    x = np.array([n2.x - n1.x, n2.y - n1.y, n2.z - n1.z])
+    L = float(np.linalg.norm(x))
+    x = x / L
+    ref = np.array([0.0, 0.0, 1.0]) if abs(x @ np.array([0.0, 0.0, 1.0])) < 0.99 else np.array([0.0, 1.0, 0.0])
+    y = np.cross(ref, x); y /= np.linalg.norm(y)
+    z = np.cross(x, y)
+    R = np.array([x, y, z])
+    T = np.zeros((12, 12))
+    for bk in range(4):
+        T[bk * 3:bk * 3 + 3, bk * 3:bk * 3 + 3] = R
+    return T, L
+
+
+def _section_props(obj):
+    face = build_face(getattr(obj, "MemberProfile", ""), "Center", 0.0, 0.0)
+    if face is None:
+        return None
+    A = face.Area
+    try:
+        m = face.MatrixOfInertia
+        Iz = abs(m.A11); Iy = abs(m.A22)
+    except Exception:
+        bb = face.BoundBox
+        Iz = A * bb.YLength ** 2 / 12.0; Iy = A * bb.XLength ** 2 / 12.0
+    bb = face.BoundBox
+    c = max(bb.XLength, bb.YLength) / 2.0
+    J = Iy + Iz
+    return A, Iy, Iz, J, c
+
+
+def _fea_solve(nodes, members, fixed, loads):
+    import numpy as np
+    nn = len(nodes); ndof = 6 * nn
+    K = np.zeros((ndof, ndof)); F = np.zeros(ndof)
+    edata = []
+    for (n1, n2, A, Iy, Iz, J) in members:
+        T, L = _beam_T(nodes[n1], nodes[n2])
+        kl = _beam_k_local(E_STEEL, G_STEEL, A, Iy, Iz, J, L)
+        kg = T.T @ kl @ T
+        dofs = [6 * n1 + i for i in range(6)] + [6 * n2 + i for i in range(6)]
+        ix = np.ix_(dofs, dofs)
+        K[ix] += kg
+        edata.append((dofs, T, kl))
+    for d, v in loads.items():
+        F[d] += v
+    free = [d for d in range(ndof) if d not in fixed]
+    u = np.zeros(ndof)
+    try:
+        u[free] = np.linalg.solve(K[np.ix_(free, free)], F[free])
+    except Exception:
+        return None
+    R = K @ u - F
+    mend = [kl @ (T @ u[dofs]) for (dofs, T, kl) in edata]
+    return u, R, mend
+
+
+class FrameAnalysis:
+    def GetResources(self):
+        return {"Pixmap": _icon("analysis"), "MenuText": "Frame Analysis (static)",
+                "ToolTip": "Linear-static 3D frame analysis: supports at the base "
+                           "(or selected vertices), self-weight + a vertical load; "
+                           "reports deflection, reactions, member stress and colours "
+                           "the frame by utilisation.", "Accel": "F, A"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        doc = FreeCAD.ActiveDocument
+        members = [o for o in doc.Objects if is_member(o)]
+        if len(members) < 1:
+            info("No frame members found. Build a frame first.")
+            return
+        # pre-selected vertices define supports
+        sel_pts = []
+        for so in FreeCADGui.Selection.getSelectionEx():
+            for sub in getattr(so, "SubObjects", []) or []:
+                if getattr(sub, "ShapeType", "") == "Vertex":
+                    sel_pts.append(FreeCAD.Vector(sub.Point))
+
+        # build nodes (merge coincident) + elements with section properties
+        nodes = []
+
+        def nid(p):
+            for i, q in enumerate(nodes):
+                if q.distanceToPoint(p) <= 1.0:
+                    return i
+            nodes.append(FreeCAD.Vector(p)); return len(nodes) - 1
+
+        elems = []
+        sect = []
+        for m in members:
+            sp = _section_props(m)
+            if sp is None:
+                continue
+            A, Iy, Iz, J, c = sp
+            s, e = skeleton(m)
+            n1, n2 = nid(s), nid(e)
+            if n1 == n2:
+                continue
+            elems.append((n1, n2, A, Iy, Iz, J))
+            sect.append((m, A, c, min(Iy, Iz)))
+        if not elems:
+            info("Could not build an analysis model from the members.")
+            return
+
+        # supports: selected vertices, else all nodes at the lowest Z
+        if sel_pts:
+            supp = set(nid(p) for p in sel_pts)
+        else:
+            zmin = min(n.z for n in nodes)
+            supp = set(i for i, n in enumerate(nodes) if abs(n.z - zmin) <= 1.0)
+        if not supp:
+            warn("No supports found. Select base vertices to fix, then re-run.")
+            return
+        fixed = set()
+        for i in supp:
+            for k in range(6):
+                fixed.add(6 * i + k)
+
+        # loads
+        sw, ok = get_item("Frame Analysis", "Include self-weight?", ["Yes", "No"], 0)
+        if not ok:
+            return
+        pl, ok = get_double("Frame Analysis",
+                            "Extra vertical load at each non-support node (N, downward):",
+                            1000.0, 0.0, 1e9)
+        if not ok:
+            return
+        loads = {}
+        if sw == "Yes":
+            for (n1, n2, A, Iy, Iz, J) in elems:
+                L = nodes[n1].distanceToPoint(nodes[n2])
+                w = A * L * RHO_STEEL * GRAV      # N, total member weight
+                loads[6 * n1 + 2] = loads.get(6 * n1 + 2, 0.0) - w / 2.0
+                loads[6 * n2 + 2] = loads.get(6 * n2 + 2, 0.0) - w / 2.0
+        for i in range(len(nodes)):
+            if i not in supp:
+                loads[6 * i + 2] = loads.get(6 * i + 2, 0.0) - pl
+
+        res = _fea_solve(nodes, elems, fixed, loads)
+        if res is None:
+            err("The model is unstable (singular) — it needs more supports. "
+                "Select base vertices to fix and re-run.")
+            return
+        u, R, mend = res
+        import numpy as np
+
+        # results
+        maxd = 0.0
+        for i in range(len(nodes)):
+            d = (u[6 * i] ** 2 + u[6 * i + 1] ** 2 + u[6 * i + 2] ** 2) ** 0.5
+            maxd = max(maxd, d)
+        rx = sum(R[6 * i] for i in supp); ry = sum(R[6 * i + 1] for i in supp); rz = sum(R[6 * i + 2] for i in supp)
+
+        rows = []
+        max_util = 0.0
+        doc.openTransaction("DynFrame: analysis colour")
+        for k, (m, A, c, Imin) in enumerate(sect):
+            fl = mend[k]
+            N = max(abs(fl[0]), abs(fl[6]))
+            M = max(abs(fl[4]), abs(fl[5]), abs(fl[10]), abs(fl[11]))
+            sigma = N / A + (M * c / Imin if Imin > 1e-9 else 0.0)
+            util = sigma / FY_STEEL
+            max_util = max(max_util, util)
+            rows.append((m.Label, N, M, sigma, util))
+            try:
+                uc = max(0.0, min(1.0, util))
+                m.ViewObject.ShapeColor = (float(uc), float(1.0 - uc), 0.2)
+            except Exception:
+                pass
+        doc.commitTransaction()
+
+        try:
+            sheet = doc.getObject("Analysis") or doc.addObject("Spreadsheet::Sheet", "Analysis")
+            sheet.clearAll()
+            sheet.set("A1", "DynFrame Frame Analysis (linear static, steel)")
+            sheet.set("A3", "Member"); sheet.set("B3", "Axial N (N)"); sheet.set("C3", "Moment (N.mm)")
+            sheet.set("D3", "Stress (MPa)"); sheet.set("E3", "Utilisation")
+            r = 4
+            for label, N, M, sg, ut in rows:
+                sheet.set("A%d" % r, str(label)); sheet.set("B%d" % r, "%.1f" % N)
+                sheet.set("C%d" % r, "%.1f" % M); sheet.set("D%d" % r, "%.1f" % sg)
+                sheet.set("E%d" % r, "%.2f" % ut); r += 1
+            doc.recompute()
+        except Exception as e:
+            FreeCAD.Console.PrintError("DynFrame: analysis sheet failed (%s)\n" % e)
+
+        info("Frame Analysis (linear static)\n\n"
+             "Nodes: %d   Members: %d   Supports: %d\n"
+             "Max displacement: %.3f mm\n"
+             "Max stress: %.1f MPa   Max utilisation: %.2f  (vs %.0f MPa yield)\n"
+             "Total reaction: Rz = %.0f N  (Rx=%.0f, Ry=%.0f)\n\n"
+             "Members are coloured green->red by utilisation; full table in the "
+             "'Analysis' spreadsheet.\n\nNote: linear static only (no modal, "
+             "buckling, seismic or code checks yet)." %
+             (len(nodes), len(elems), len(supp), maxd,
+              max_util * FY_STEEL, max_util, FY_STEEL, rz, rx, ry))
 
 
 class RebuildFromSketch:
@@ -1768,6 +2034,7 @@ _add("DynFrame_MirrorMembers", MirrorMembers)
 _add("DynFrame_RectPattern", RectPattern)
 _add("DynFrame_CircPattern", CircPattern)
 _add("DynFrame_BOM", BOM)
+_add("DynFrame_FrameAnalysis", FrameAnalysis)
 _add("DynFrame_TrimToFace", TrimToFace)
 _add("DynFrame_ExtendToFace", ExtendToFace)
 _add("DynFrame_CutList", CutList)

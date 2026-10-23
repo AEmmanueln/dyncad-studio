@@ -49,7 +49,7 @@ class DynFrameWorkbench(FreeCADGui.Workbench):
                    "DynFrame_CircPattern"]
         skel = ["DynFrame_Skeleton3D", "DynFrame_ConstrainedSketch"]
         model = ["DynFrame_Hole", "DynFrame_QuickFillet"]
-        report = ["DynFrame_CutList", "DynFrame_BOM"]
+        report = ["DynFrame_CutList", "DynFrame_BOM", "DynFrame_FrameAnalysis"]
         io = ["DynFrame_ExportStep", "DynFrame_ExportStl"]
         setup = ["DynFrame_InventorNav"]
 

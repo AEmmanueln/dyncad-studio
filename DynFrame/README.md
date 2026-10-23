@@ -47,6 +47,36 @@ tube, **T** sections, **flat bar**, **round bar**. Edit
   centre-lines in 3D, then insert members along them. (FreeCAD's Draft
   polyline is its 3D-sketch equivalent.)
 
+**Frame Analysis (Robot-style workflow)**
+A step-by-step linear-static solver modelled on the way Autodesk Robot
+Structural Analysis works — you define supports and loads explicitly, run
+the calculation, then read the results. Commands live on the
+**DynFrame · Analysis** toolbar/menu:
+
+1. **Define Support** — select the joint vertices to restrain and pick a
+   support type (Fixed, Pinned, or a Roller freeing specific directions).
+   Each support shows as a blue cone.
+2. **Add Nodal Load** — select joint vertices and enter a point force
+   (Fx, Fy, Fz in N). Shows as an orange arrow.
+3. **Add Member Load** — select members and apply a uniform distributed
+   load (N/mm along global Z) — e.g. a line load or snow load.
+4. **Calculate** — assembles a 3D Euler–Bernoulli direct-stiffness model
+   (6 DOF/node), applies self-weight (optional) plus your loads, and solves.
+   It then produces:
+   - a green **Deformed shape** (auto-scaled),
+   - a red **Bending-moment diagram** drawn along each member,
+   - an **AnalysisResults** spreadsheet of support reactions (Rx…Mz) and
+     per-member forces (axial, shears, peak My/Mz, stress, utilisation),
+   - members **coloured green→red by utilisation** against steel yield.
+5. **Clear Analysis** — removes the supports, loads and results and resets
+   the member colours.
+
+> The solver is validated to zero error against textbook cases in both
+> bending planes — cantilever (point and UDL), simply-supported and
+> fixed-fixed beams (tip = wL⁴/8EI, mid = 5wL⁴/384EI, M = wL²/8, end =
+> wL²/12) — and solves portal/space frames. It is **linear static only**;
+> modal, buckling, seismic and code-checks are later phases.
+
 **Modeling / export / setup**
 - **Quick Fillet** — fillet selected solid edges by a radius.
 - **Export to STEP** / **Export each body to STL**.

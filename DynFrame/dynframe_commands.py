@@ -1795,67 +1795,228 @@ def _section_props(obj):
     return A, Iy, Iz, J, c
 
 
-def _fea_solve(nodes, members, fixed, loads):
+# ── Frame analysis — Robot-style workflow ────────────────────────
+# Define Supports → Add Loads (nodal + member) → Calculate → Results
+# (reactions, deformed shape, bending-moment diagram, results table).
+SUPPORT_TYPES = {"Fixed (all 6)": "111111", "Pinned (Ux Uy Uz)": "111000",
+                 "Roller Z (Uz only)": "001000", "Roller X (Ux only)": "100000",
+                 "Roller Y (Uy only)": "010000"}
+SUP_GROUP = "Supports"
+LOAD_GROUP = "Loads"
+RES_GROUP = "Results"          # kept distinct from the "AnalysisResults" sheet
+
+
+def _fef_udl(w_global, R, L):
+    """Local 12-dof consistent nodal-load vector for a uniform load given in
+    GLOBAL coords, on an element whose rotation R (3x3, rows = local axes
+    expressed in global) comes from _beam_T. The local-z-bending moment terms
+    (f[4], f[10]) are negated relative to the usual textbook vector because that
+    plane of _beam_k_local uses the opposite transverse-rotation sign
+    (k[uz, ry] = -6EIy/L^2, while k[uy, rz] = +6EIz/L^2). With these signs the
+    nodal deflections are exact for one element per member; validated to zero
+    error against cantilever, simply-supported and fixed-fixed UDL beams in both
+    planes (tip wL^4/8EI, mid 5wL^4/384EI, M = wL^2/8, end wL^2/12)."""
     import numpy as np
-    nn = len(nodes); ndof = 6 * nn
-    K = np.zeros((ndof, ndof)); F = np.zeros(ndof)
-    edata = []
-    for (n1, n2, A, Iy, Iz, J) in members:
-        T, L = _beam_T(nodes[n1], nodes[n2])
-        kl = _beam_k_local(E_STEEL, G_STEEL, A, Iy, Iz, J, L)
-        kg = T.T @ kl @ T
-        dofs = [6 * n1 + i for i in range(6)] + [6 * n2 + i for i in range(6)]
-        ix = np.ix_(dofs, dofs)
-        K[ix] += kg
-        edata.append((dofs, T, kl))
-    for d, v in loads.items():
-        F[d] += v
-    free = [d for d in range(ndof) if d not in fixed]
-    u = np.zeros(ndof)
-    try:
-        u[free] = np.linalg.solve(K[np.ix_(free, free)], F[free])
-    except Exception:
-        return None
-    R = K @ u - F
-    mend = [kl @ (T @ u[dofs]) for (dofs, T, kl) in edata]
-    return u, R, mend
+    wl = R @ np.array([w_global.x, w_global.y, w_global.z])
+    wx, wy, wz = float(wl[0]), float(wl[1]), float(wl[2])
+    f = np.zeros(12)
+    f[0] += wx * L / 2.0; f[6] += wx * L / 2.0
+    f[1] += wy * L / 2.0; f[7] += wy * L / 2.0
+    f[5] += wy * L ** 2 / 12.0; f[11] += -wy * L ** 2 / 12.0
+    f[2] += wz * L / 2.0; f[8] += wz * L / 2.0
+    f[4] += -wz * L ** 2 / 12.0; f[10] += wz * L ** 2 / 12.0
+    return f
 
 
-class FrameAnalysis:
+def _grp(doc, label):
+    """Find (by Label) or create a document group."""
+    for o in doc.Objects:
+        if o.TypeId == "App::DocumentObjectGroup" and o.Label == label:
+            return o
+    g = doc.addObject("App::DocumentObjectGroup", label.replace(" ", ""))
+    g.Label = label
+    return g
+
+
+def _model_size(members):
+    bb = None
+    for m in members:
+        b = m.Shape.BoundBox
+        bb = b if bb is None else bb.united(b)
+    if bb is None:
+        return 1000.0
+    return max(bb.XLength, bb.YLength, bb.ZLength, 1.0)
+
+
+def _sel_vertices():
+    pts = []
+    for so in FreeCADGui.Selection.getSelectionEx():
+        for sub in getattr(so, "SubObjects", []) or []:
+            if getattr(sub, "ShapeType", "") == "Vertex":
+                pts.append(FreeCAD.Vector(sub.Point))
+    return pts
+
+
+class DefineSupport:
     def GetResources(self):
-        return {"Pixmap": _icon("analysis"), "MenuText": "Frame Analysis (static)",
-                "ToolTip": "Linear-static 3D frame analysis: supports at the base "
-                           "(or selected vertices), self-weight + a vertical load; "
-                           "reports deflection, reactions, member stress and colours "
-                           "the frame by utilisation.", "Accel": "F, A"}
+        return {"Pixmap": _icon("support"), "MenuText": "Define Support",
+                "ToolTip": "Step 1. Select one or more joint vertices, then apply a "
+                           "support (Fixed / Pinned / Roller). Shown as a blue cone.",
+                "Accel": "A, S"}
 
     def IsActive(self):
         return FreeCAD.ActiveDocument is not None
 
     def Activated(self):
+        pts = _sel_vertices()
+        if not pts:
+            info("Select one or more joint vertices (click a corner point of a "
+                 "member), then run Define Support.")
+            return
+        t, ok = get_item("Define Support", "Support type:",
+                         list(SUPPORT_TYPES.keys()), 0)
+        if not ok:
+            return
+        restr = SUPPORT_TYPES[t]
+        doc = FreeCAD.ActiveDocument
+        doc.openTransaction("DynFrame: support")
+        grp = _grp(doc, SUP_GROUP)
+        sz = _model_size([o for o in doc.Objects if is_member(o)]) * 0.02 + 20.0
+        for p in pts:
+            cone = Part.makeCone(sz, 0.0, sz * 2.0,
+                                 FreeCAD.Vector(p.x, p.y, p.z - sz * 2.0),
+                                 FreeCAD.Vector(0, 0, 1))
+            o = doc.addObject("Part::Feature", "Support")
+            o.Shape = cone
+            o.Label = "Support %s" % t.split(" (")[0]
+            _set(o, "App::PropertyString", "Restrain", restr)
+            _set(o, "App::PropertyVector", "AtNode", p)
+            try:
+                o.ViewObject.ShapeColor = (0.1, 0.4, 1.0)
+            except Exception:
+                pass
+            grp.addObject(o)
+        doc.commitTransaction()
+        doc.recompute()
+        info("Support applied to %d node(s): %s." % (len(pts), t))
+
+
+class AddNodalLoad:
+    def GetResources(self):
+        return {"Pixmap": _icon("load"), "MenuText": "Add Nodal Load",
+                "ToolTip": "Step 2. Select joint vertices, then add a point force "
+                           "(Fx, Fy, Fz in N). Shown as an orange arrow.",
+                "Accel": "A, L"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        pts = _sel_vertices()
+        if not pts:
+            info("Select one or more joint vertices, then add a nodal load.")
+            return
+        fz, ok = get_double("Add Nodal Load", "Fz  (N, + up / - down):",
+                            -1000.0, -1e12, 1e12)
+        if not ok:
+            return
+        fx, ok = get_double("Add Nodal Load", "Fx  (N):", 0.0, -1e12, 1e12)
+        if not ok:
+            return
+        fy, ok = get_double("Add Nodal Load", "Fy  (N):", 0.0, -1e12, 1e12)
+        if not ok:
+            return
+        if abs(fx) + abs(fy) + abs(fz) < 1e-9:
+            warn("Load is zero - nothing added.")
+            return
+        doc = FreeCAD.ActiveDocument
+        doc.openTransaction("DynFrame: nodal load")
+        grp = _grp(doc, LOAD_GROUP)
+        ln = _model_size([o for o in doc.Objects if is_member(o)]) * 0.15 + 100.0
+        fvec = FreeCAD.Vector(fx, fy, fz)
+        dirn = unit(fvec)
+        for p in pts:
+            tail = p - vscale(dirn, ln)
+            shaft = Part.makeLine(FreeCAD.Vector(tail), FreeCAD.Vector(p))
+            head = Part.makeCone(ln * 0.12, 0.0, ln * 0.25,
+                                 p - vscale(dirn, ln * 0.25), dirn)
+            o = doc.addObject("Part::Feature", "NodalLoad")
+            o.Shape = Part.makeCompound([shaft, head])
+            o.Label = "Load (%.0f,%.0f,%.0f)N" % (fx, fy, fz)
+            _set(o, "App::PropertyVector", "Force", fvec)
+            _set(o, "App::PropertyVector", "AtNode", p)
+            try:
+                o.ViewObject.ShapeColor = (1.0, 0.3, 0.0)
+                o.ViewObject.LineWidth = 3
+            except Exception:
+                pass
+            grp.addObject(o)
+        doc.commitTransaction()
+        doc.recompute()
+        info("Nodal load (%.0f, %.0f, %.0f) N applied to %d node(s)."
+             % (fx, fy, fz, len(pts)))
+
+
+class AddMemberLoad:
+    def GetResources(self):
+        return {"Pixmap": _icon("load"), "MenuText": "Add Member Load",
+                "ToolTip": "Step 2. Select members, then apply a uniform "
+                           "distributed load (N/mm along global Z).", "Accel": "A, M"}
+
+    def IsActive(self):
+        return bool(selected_members())
+
+    def Activated(self):
+        members = [m for m in selected_members() if is_member(m)]
+        if not members:
+            info("Select one or more members, then add a distributed load.")
+            return
+        w, ok = get_double("Add Member Load",
+                           "Uniform load  (N/mm, global Z, + up / - down):",
+                           -5.0, -1e9, 1e9)
+        if not ok:
+            return
+        doc = FreeCAD.ActiveDocument
+        doc.openTransaction("DynFrame: member load")
+        for m in members:
+            _set(m, "App::PropertyVector", "DistLoad", FreeCAD.Vector(0, 0, w))
+        doc.commitTransaction()
+        doc.recompute()
+        info("Distributed load %.3f N/mm (Z) applied to %d member(s)."
+             % (w, len(members)))
+
+
+class RunAnalysis:
+    def GetResources(self):
+        return {"Pixmap": _icon("analysis"), "MenuText": "Calculate",
+                "ToolTip": "Step 3. Linear-static solve with the defined supports "
+                           "and loads, then show reactions, the deformed shape, a "
+                           "bending-moment diagram and a results table.",
+                "Accel": "A, C"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        import numpy as np
         doc = FreeCAD.ActiveDocument
         members = [o for o in doc.Objects if is_member(o)]
-        if len(members) < 1:
+        if not members:
             info("No frame members found. Build a frame first.")
             return
-        # pre-selected vertices define supports
-        sel_pts = []
-        for so in FreeCADGui.Selection.getSelectionEx():
-            for sub in getattr(so, "SubObjects", []) or []:
-                if getattr(sub, "ShapeType", "") == "Vertex":
-                    sel_pts.append(FreeCAD.Vector(sub.Point))
 
-        # build nodes (merge coincident) + elements with section properties
         nodes = []
 
-        def nid(p):
+        def nid(p, make=True):
             for i, q in enumerate(nodes):
                 if q.distanceToPoint(p) <= 1.0:
                     return i
-            nodes.append(FreeCAD.Vector(p)); return len(nodes) - 1
+            if not make:
+                return -1
+            nodes.append(FreeCAD.Vector(p))
+            return len(nodes) - 1
 
         elems = []
-        sect = []
         for m in members:
             sp = _section_props(m)
             if sp is None:
@@ -1865,104 +2026,304 @@ class FrameAnalysis:
             n1, n2 = nid(s), nid(e)
             if n1 == n2:
                 continue
-            elems.append((n1, n2, A, Iy, Iz, J))
-            sect.append((m, A, c, min(Iy, Iz)))
+            dl = getattr(m, "DistLoad", None)
+            elems.append({"m": m, "n1": n1, "n2": n2, "A": A, "Iy": Iy, "Iz": Iz,
+                          "J": J, "c": c,
+                          "w": FreeCAD.Vector(dl) if dl else FreeCAD.Vector(0, 0, 0)})
         if not elems:
             info("Could not build an analysis model from the members.")
             return
 
-        # supports: selected vertices, else all nodes at the lowest Z
-        if sel_pts:
-            supp = set(nid(p) for p in sel_pts)
-        else:
-            zmin = min(n.z for n in nodes)
-            supp = set(i for i, n in enumerate(nodes) if abs(n.z - zmin) <= 1.0)
-        if not supp:
-            warn("No supports found. Select base vertices to fix, then re-run.")
-            return
+        # supports (blue cones carry a Restrain string + AtNode)
         fixed = set()
-        for i in supp:
-            for k in range(6):
-                fixed.add(6 * i + k)
+        sup_nodes = []
+        for o in doc.Objects:
+            r = getattr(o, "Restrain", None)
+            at = getattr(o, "AtNode", None)
+            if r and at is not None:
+                i = nid(FreeCAD.Vector(at), make=False)
+                if i >= 0:
+                    sup_nodes.append(i)
+                    for k, ch in enumerate(r):
+                        if ch == "1":
+                            fixed.add(6 * i + k)
+        if not fixed:
+            err("No supports defined.\n\nStep 1: select the base joint vertices "
+                "and run 'Define Support' (e.g. Fixed or Pinned), then Calculate.")
+            return
 
-        # loads
-        sw, ok = get_item("Frame Analysis", "Include self-weight?", ["Yes", "No"], 0)
+        sw, ok = get_item("Calculate", "Include self-weight of the members?",
+                          ["Yes", "No"], 0)
         if not ok:
             return
-        pl, ok = get_double("Frame Analysis",
-                            "Extra vertical load at each non-support node (N, downward):",
-                            1000.0, 0.0, 1e9)
-        if not ok:
+
+        ndof = 6 * len(nodes)
+        K = np.zeros((ndof, ndof))
+        F = np.zeros(ndof)
+
+        for el in elems:
+            T, L = _beam_T(nodes[el["n1"]], nodes[el["n2"]])
+            el["T"] = T
+            el["L"] = L
+            kl = _beam_k_local(E_STEEL, G_STEEL, el["A"], el["Iy"], el["Iz"],
+                               el["J"], L)
+            el["kl"] = kl
+            kg = T.T @ kl @ T
+            dofs = ([6 * el["n1"] + i for i in range(6)]
+                    + [6 * el["n2"] + i for i in range(6)])
+            el["dofs"] = dofs
+            K[np.ix_(dofs, dofs)] += kg
+            w = FreeCAD.Vector(el["w"])
+            if sw == "Yes":
+                w = w + FreeCAD.Vector(0, 0, -el["A"] * RHO_STEEL * GRAV)
+            el["wtot"] = w
+            if w.Length > 1e-12:
+                fl = _fef_udl(w, T[0:3, 0:3], L)
+                el["fef"] = fl
+                # equivalent joint loads {P} = + T^T {fef}  (fef holds the lumped
+                # span load, so the applied nodal load keeps its sign)
+                F[dofs] += T.T @ fl
+            else:
+                el["fef"] = np.zeros(12)
+
+        # nodal loads (orange arrows carry a Force vector + AtNode)
+        for o in doc.Objects:
+            fv = getattr(o, "Force", None)
+            at = getattr(o, "AtNode", None)
+            if fv is not None and at is not None:
+                i = nid(FreeCAD.Vector(at), make=False)
+                if i >= 0:
+                    F[6 * i + 0] += fv.x
+                    F[6 * i + 1] += fv.y
+                    F[6 * i + 2] += fv.z
+
+        free = [d for d in range(ndof) if d not in fixed]
+        u = np.zeros(ndof)
+        try:
+            u[free] = np.linalg.solve(K[np.ix_(free, free)], F[free])
+        except Exception:
+            err("The structure is a mechanism (unstable): it can move or spin "
+                "freely with the supports given.\n\nAdd more supports (or restrain "
+                "more directions) so it is fully held, then Calculate again.")
             return
-        loads = {}
-        if sw == "Yes":
-            for (n1, n2, A, Iy, Iz, J) in elems:
-                L = nodes[n1].distanceToPoint(nodes[n2])
-                w = A * L * RHO_STEEL * GRAV      # N, total member weight
-                loads[6 * n1 + 2] = loads.get(6 * n1 + 2, 0.0) - w / 2.0
-                loads[6 * n2 + 2] = loads.get(6 * n2 + 2, 0.0) - w / 2.0
-        for i in range(len(nodes)):
-            if i not in supp:
-                loads[6 * i + 2] = loads.get(6 * i + 2, 0.0) - pl
+        Rreac = K @ u - F
 
-        res = _fea_solve(nodes, elems, fixed, loads)
-        if res is None:
-            err("The model is unstable (singular) — it needs more supports. "
-                "Select base vertices to fix and re-run.")
-            return
-        u, R, mend = res
-        import numpy as np
+        msize = _model_size(members)
+        maxd = max((u[6 * i] ** 2 + u[6 * i + 1] ** 2 + u[6 * i + 2] ** 2) ** 0.5
+                   for i in range(len(nodes)))
+        dscale = (0.08 * msize / maxd) if maxd > 1e-9 else 1.0
 
-        # results
-        maxd = 0.0
-        for i in range(len(nodes)):
-            d = (u[6 * i] ** 2 + u[6 * i + 1] ** 2 + u[6 * i + 2] ** 2) ** 0.5
-            maxd = max(maxd, d)
-        rx = sum(R[6 * i] for i in supp); ry = sum(R[6 * i + 1] for i in supp); rz = sum(R[6 * i + 2] for i in supp)
-
-        rows = []
-        max_util = 0.0
-        doc.openTransaction("DynFrame: analysis colour")
-        for k, (m, A, c, Imin) in enumerate(sect):
-            fl = mend[k]
-            N = max(abs(fl[0]), abs(fl[6]))
-            M = max(abs(fl[4]), abs(fl[5]), abs(fl[10]), abs(fl[11]))
-            sigma = N / A + (M * c / Imin if Imin > 1e-9 else 0.0)
+        # member internal forces + peak bending moment, sampled along the span.
+        # fend = member-end forces in local axes (recovery uses -fef). The internal
+        # bending moment at section x is the linear chord of the two end moments
+        # plus the simply-supported parabola of the span load:
+        #   My(x) =  fend[4](1-x/L) - fend[10](x/L) - wz*x(L-x)/2
+        #   Mz(x) = -fend[5](1-x/L) + fend[11](x/L) - wy*x(L-x)/2
+        # Both were calibrated to 0 error against simply-supported and fixed-fixed
+        # UDL beams in each plane (chord signs differ because the local-y and
+        # local-z stiffness couplings have opposite sign).
+        max_M = 0.0
+        erows = []
+        NS = 12
+        for el in elems:
+            fend = el["kl"] @ (el["T"] @ u[el["dofs"]]) - el["fef"]
+            el["fend"] = fend
+            L = el["L"]
+            wloc = el["T"][0:3, 0:3] @ np.array([el["wtot"].x, el["wtot"].y,
+                                                 el["wtot"].z])
+            wy, wz = float(wloc[1]), float(wloc[2])
+            el["wy"] = wy
+            el["wz"] = wz
+            N = -fend[0]
+            Vy = fend[1]
+            Vz = fend[2]
+            pkMy = pkMz = pkComb = 0.0
+            for sidx in range(NS + 1):
+                x = L * sidx / NS
+                My = fend[4] * (1 - x / L) - fend[10] * (x / L) - wz * x * (L - x) / 2.0
+                Mz = -fend[5] * (1 - x / L) + fend[11] * (x / L) - wy * x * (L - x) / 2.0
+                pkMy = max(pkMy, abs(My))
+                pkMz = max(pkMz, abs(Mz))
+                pkComb = max(pkComb, (My * My + Mz * Mz) ** 0.5)
+            max_M = max(max_M, pkMy, pkMz)
+            Imin = min(el["Iy"], el["Iz"])
+            sigma = abs(N) / el["A"] + (pkComb * el["c"] / Imin if Imin > 1e-9 else 0.0)
             util = sigma / FY_STEEL
-            max_util = max(max_util, util)
-            rows.append((m.Label, N, M, sigma, util))
+            erows.append((el["m"], N, Vy, Vz, pkMy, pkMz, sigma, util))
             try:
                 uc = max(0.0, min(1.0, util))
-                m.ViewObject.ShapeColor = (float(uc), float(1.0 - uc), 0.2)
+                el["m"].ViewObject.ShapeColor = (float(uc), float(1.0 - uc), 0.2)
+            except Exception:
+                pass
+        mscale = (0.12 * msize / max_M) if max_M > 1e-9 else 0.0
+
+        # result visuals
+        doc.openTransaction("DynFrame: results")
+        rg = _grp(doc, RES_GROUP)
+        dlines = []
+        for el in elems:
+            n1, n2 = el["n1"], el["n2"]
+            p1 = nodes[n1] + FreeCAD.Vector(u[6 * n1] * dscale,
+                                            u[6 * n1 + 1] * dscale,
+                                            u[6 * n1 + 2] * dscale)
+            p2 = nodes[n2] + FreeCAD.Vector(u[6 * n2] * dscale,
+                                            u[6 * n2 + 1] * dscale,
+                                            u[6 * n2 + 2] * dscale)
+            dlines.append(Part.makeLine(p1, p2))
+        dob = doc.getObject("DeformedShape") or doc.addObject("Part::Feature",
+                                                              "DeformedShape")
+        dob.Shape = Part.makeCompound(dlines)
+        dob.Label = "Deformed shape (x%.0f)" % dscale
+        try:
+            dob.ViewObject.ShapeColor = (0.1, 0.8, 0.3)
+            dob.ViewObject.LineWidth = 2
+        except Exception:
+            pass
+        rg.addObject(dob)
+
+        if mscale > 0:
+            mlines = []
+            for el in elems:
+                T = el["T"]
+                L = el["L"]
+                fend = el["fend"]
+                R3 = T[0:3, 0:3]
+                lx = FreeCAD.Vector(float(R3[0][0]), float(R3[0][1]), float(R3[0][2]))
+                ly = FreeCAD.Vector(float(R3[1][0]), float(R3[1][1]), float(R3[1][2]))
+                lz = FreeCAD.Vector(float(R3[2][0]), float(R3[2][1]), float(R3[2][2]))
+                wl = R3 @ np.array([el["wtot"].x, el["wtot"].y, el["wtot"].z])
+                wy, wz = float(wl[1]), float(wl[2])
+                base = nodes[el["n1"]]
+                pts = [base]
+                ns = 10
+                for s in range(ns + 1):
+                    x = L * s / ns
+                    My = fend[4] * (1 - x / L) - fend[10] * (x / L) - wz * x * (L - x) / 2.0
+                    Mz = -fend[5] * (1 - x / L) + fend[11] * (x / L) - wy * x * (L - x) / 2.0
+                    pos = base + vscale(lx, x)
+                    off = vscale(lz, My * mscale) + vscale(ly, Mz * mscale)
+                    pts.append(pos + off)
+                pts.append(base + vscale(lx, L))
+                mlines.append(Part.makePolygon(pts))
+            mob = doc.getObject("MomentDiagram") or doc.addObject("Part::Feature",
+                                                                 "MomentDiagram")
+            mob.Shape = Part.makeCompound(mlines)
+            mob.Label = "Bending-moment diagram"
+            try:
+                mob.ViewObject.ShapeColor = (0.9, 0.1, 0.1)
+                mob.ViewObject.LineWidth = 2
+            except Exception:
+                pass
+            rg.addObject(mob)
+        doc.commitTransaction()
+
+        # results spreadsheet (reactions + member forces)
+        maxu = max((ut for (_, _, _, _, _, _, _, ut) in erows), default=0.0)
+        try:
+            sh = doc.getObject("AnalysisResults") or doc.addObject(
+                "Spreadsheet::Sheet", "AnalysisResults")
+            sh.Label = "AnalysisResults"
+            sh.clearAll()
+            sh.set("A1", "DynFrame - linear static results (steel, E=210 GPa)")
+            sh.set("A3", "REACTIONS AT SUPPORTS")
+            for col, head in zip("ABCDEFG",
+                                 ["Node", "Rx (N)", "Ry (N)", "Rz (N)",
+                                  "Mx (N.mm)", "My (N.mm)", "Mz (N.mm)"]):
+                sh.set("%s4" % col, head)
+            r = 5
+            for i in sorted(set(sup_nodes)):
+                sh.set("A%d" % r, "N%d (%.0f,%.0f,%.0f)"
+                       % (i, nodes[i].x, nodes[i].y, nodes[i].z))
+                for c, col in enumerate("BCDEFG"):
+                    sh.set("%s%d" % (col, r), "%.1f" % Rreac[6 * i + c])
+                r += 1
+            r += 1
+            sh.set("A%d" % r, "MEMBER END FORCES")
+            r += 1
+            for col, head in zip("ABCDEFGH",
+                                 ["Member", "Axial N (N)", "Shear Vy (N)",
+                                  "Shear Vz (N)", "Moment My (N.mm)",
+                                  "Moment Mz (N.mm)", "Stress (MPa)", "Utilisation"]):
+                sh.set("%s%d" % (col, r), head)
+            r += 1
+            for (m, N, Vy, Vz, My, Mz, sg, ut) in erows:
+                sh.set("A%d" % r, str(m.Label))
+                sh.set("B%d" % r, "%.1f" % N)
+                sh.set("C%d" % r, "%.1f" % Vy)
+                sh.set("D%d" % r, "%.1f" % Vz)
+                sh.set("E%d" % r, "%.0f" % My)
+                sh.set("F%d" % r, "%.0f" % Mz)
+                sh.set("G%d" % r, "%.1f" % sg)
+                sh.set("H%d" % r, "%.2f" % ut)
+                r += 1
+            if rg is not None and sh not in rg.Group:
+                rg.addObject(sh)
+            doc.recompute()
+        except Exception as e:
+            FreeCAD.Console.PrintError("DynFrame: results sheet failed (%s)\n" % e)
+
+        try:
+            FreeCADGui.activeDocument().activeView().viewAxonometric()
+            FreeCADGui.SendMsgToActiveView("ViewFit")
+        except Exception:
+            pass
+        info("Analysis complete (linear static).\n\n"
+             "Nodes: %d    Members: %d    Restrained DOFs: %d\n"
+             "Max displacement:  %.3f mm\n"
+             "Max bending moment:  %.0f N.mm\n"
+             "Max stress / utilisation:  %.1f MPa / %.2f  (yield %.0f MPa)\n\n"
+             "Created: green 'Deformed shape' (x%.0f), red 'Bending-moment "
+             "diagram', and the 'AnalysisResults' spreadsheet (reactions + member "
+             "forces). Members are coloured green->red by utilisation.\n\n"
+             "This is the linear-static case. Modal, buckling, seismic and "
+             "code-checks are later phases." %
+             (len(nodes), len(elems), len(fixed), maxd, max_M,
+              maxu * FY_STEEL, maxu, FY_STEEL, dscale))
+
+
+class ClearAnalysis:
+    def GetResources(self):
+        return {"Pixmap": _icon("analysis"), "MenuText": "Clear Analysis",
+                "ToolTip": "Remove all supports, loads and results, and reset the "
+                           "member colours to plain steel.", "Accel": "A, X"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        doc = FreeCAD.ActiveDocument
+        doc.openTransaction("DynFrame: clear analysis")
+        to_del = []
+        for o in list(doc.Objects):
+            if getattr(o, "Restrain", None) is not None:          # supports
+                to_del.append(o.Name)
+            elif getattr(o, "Force", None) is not None and \
+                    getattr(o, "AtNode", None) is not None:        # nodal loads
+                to_del.append(o.Name)
+            elif o.Name in ("DeformedShape", "MomentDiagram", "AnalysisResults"):
+                to_del.append(o.Name)
+            elif o.TypeId == "App::DocumentObjectGroup" and \
+                    o.Label in (SUP_GROUP, LOAD_GROUP, RES_GROUP):
+                to_del.append(o.Name)
+        # reset member distributed loads + colours
+        for m in [o for o in doc.Objects if is_member(o)]:
+            if hasattr(m, "DistLoad"):
+                try:
+                    m.DistLoad = FreeCAD.Vector(0, 0, 0)
+                except Exception:
+                    pass
+            try:
+                m.ViewObject.ShapeColor = (0.8, 0.8, 0.82)
+            except Exception:
+                pass
+        for name in to_del:
+            try:
+                doc.removeObject(name)
             except Exception:
                 pass
         doc.commitTransaction()
-
-        try:
-            sheet = doc.getObject("Analysis") or doc.addObject("Spreadsheet::Sheet", "Analysis")
-            sheet.clearAll()
-            sheet.set("A1", "DynFrame Frame Analysis (linear static, steel)")
-            sheet.set("A3", "Member"); sheet.set("B3", "Axial N (N)"); sheet.set("C3", "Moment (N.mm)")
-            sheet.set("D3", "Stress (MPa)"); sheet.set("E3", "Utilisation")
-            r = 4
-            for label, N, M, sg, ut in rows:
-                sheet.set("A%d" % r, str(label)); sheet.set("B%d" % r, "%.1f" % N)
-                sheet.set("C%d" % r, "%.1f" % M); sheet.set("D%d" % r, "%.1f" % sg)
-                sheet.set("E%d" % r, "%.2f" % ut); r += 1
-            doc.recompute()
-        except Exception as e:
-            FreeCAD.Console.PrintError("DynFrame: analysis sheet failed (%s)\n" % e)
-
-        info("Frame Analysis (linear static)\n\n"
-             "Nodes: %d   Members: %d   Supports: %d\n"
-             "Max displacement: %.3f mm\n"
-             "Max stress: %.1f MPa   Max utilisation: %.2f  (vs %.0f MPa yield)\n"
-             "Total reaction: Rz = %.0f N  (Rx=%.0f, Ry=%.0f)\n\n"
-             "Members are coloured green->red by utilisation; full table in the "
-             "'Analysis' spreadsheet.\n\nNote: linear static only (no modal, "
-             "buckling, seismic or code checks yet)." %
-             (len(nodes), len(elems), len(supp), maxd,
-              max_util * FY_STEEL, max_util, FY_STEEL, rz, rx, ry))
+        doc.recompute()
+        info("Cleared supports, loads and results; member colours reset.")
 
 
 class RebuildFromSketch:
@@ -2034,7 +2395,11 @@ _add("DynFrame_MirrorMembers", MirrorMembers)
 _add("DynFrame_RectPattern", RectPattern)
 _add("DynFrame_CircPattern", CircPattern)
 _add("DynFrame_BOM", BOM)
-_add("DynFrame_FrameAnalysis", FrameAnalysis)
+_add("DynFrame_DefineSupport", DefineSupport)
+_add("DynFrame_AddNodalLoad", AddNodalLoad)
+_add("DynFrame_AddMemberLoad", AddMemberLoad)
+_add("DynFrame_RunAnalysis", RunAnalysis)
+_add("DynFrame_ClearAnalysis", ClearAnalysis)
 _add("DynFrame_TrimToFace", TrimToFace)
 _add("DynFrame_ExtendToFace", ExtendToFace)
 _add("DynFrame_CutList", CutList)

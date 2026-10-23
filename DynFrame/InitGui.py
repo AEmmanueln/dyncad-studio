@@ -49,7 +49,10 @@ class DynFrameWorkbench(FreeCADGui.Workbench):
                    "DynFrame_CircPattern"]
         skel = ["DynFrame_Skeleton3D", "DynFrame_ConstrainedSketch"]
         model = ["DynFrame_Hole", "DynFrame_QuickFillet"]
-        report = ["DynFrame_CutList", "DynFrame_BOM", "DynFrame_FrameAnalysis"]
+        report = ["DynFrame_CutList", "DynFrame_BOM"]
+        analysis = ["DynFrame_DefineSupport", "DynFrame_AddNodalLoad",
+                    "DynFrame_AddMemberLoad", "DynFrame_RunAnalysis",
+                    "DynFrame_ClearAnalysis"]
         io = ["DynFrame_ExportStep", "DynFrame_ExportStl"]
         setup = ["DynFrame_InventorNav"]
 
@@ -58,8 +61,11 @@ class DynFrameWorkbench(FreeCADGui.Workbench):
         self.appendToolbar("DynFrame · Skeleton", skel)
         self.appendToolbar("DynFrame · Model", model)
         self.appendToolbar("DynFrame · Report", report)
+        self.appendToolbar("DynFrame · Analysis", analysis)
         self.appendToolbar("DynFrame · Export", io)
-        self.appendMenu("DynFrame", frame + pattern + skel + model + report + io + setup)
+        self.appendMenu("DynFrame · Analysis", analysis)
+        self.appendMenu("DynFrame", frame + pattern + skel + model + report
+                        + analysis + io + setup)
         FreeCAD.Console.PrintMessage("DynFrame workbench loaded\n")
 
     def Activated(self):

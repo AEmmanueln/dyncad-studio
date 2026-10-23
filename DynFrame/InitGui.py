@@ -47,7 +47,7 @@ class DynFrameWorkbench(FreeCADGui.Workbench):
                  "DynFrame_TrimToFace"]
         pattern = ["DynFrame_MirrorMembers", "DynFrame_RectPattern",
                    "DynFrame_CircPattern"]
-        skel = ["DynFrame_Skeleton3D"]
+        skel = ["DynFrame_Skeleton3D", "DynFrame_ConstrainedSketch"]
         model = ["DynFrame_Hole", "DynFrame_QuickFillet"]
         report = ["DynFrame_CutList", "DynFrame_BOM"]
         io = ["DynFrame_ExportStep", "DynFrame_ExportStl"]

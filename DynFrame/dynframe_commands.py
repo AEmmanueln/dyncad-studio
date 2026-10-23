@@ -1527,6 +1527,137 @@ class BOM:
             info("Spreadsheet 'BOM' added (total steel mass %.1f kg)." % tot_mass)
 
 
+_PLANE_TO_3D = {"XY": lambda u, v: (u, v, 0.0),
+                "XZ": lambda u, v: (u, 0.0, v),
+                "YZ": lambda u, v: (0.0, u, v)}
+_PLANE_TO_UV = {"XY": lambda p: (p.x, p.y),
+                "XZ": lambda p: (p.x, p.z),
+                "YZ": lambda p: (p.y, p.z)}
+
+
+def solve_profile(pts, close, slope=0.36):
+    """Square up a rough 2D profile with the constraint solver: segments
+    within ~20deg of an axis are constrained horizontal/vertical, then
+    solved. Returns the cleaned [(u, v), ...] or None. Validated against
+    python-solvespace."""
+    from python_solvespace import SolverSystem, ResultFlag
+    ss = SolverSystem()
+    wp = ss.create_2d_base()
+    P = [ss.add_point_2d(x, y, wp) for (x, y) in pts]
+    ss.dragged(P[0], wp)
+    n = len(P)
+    for i in range(n if close else n - 1):
+        a, b = i, (i + 1) % n
+        ln = ss.add_line_2d(P[a], P[b], wp)
+        dx = pts[b][0] - pts[a][0]
+        dy = pts[b][1] - pts[a][1]
+        if abs(dy) <= slope * abs(dx):
+            ss.horizontal(ln, wp)
+        elif abs(dx) <= slope * abs(dy):
+            ss.vertical(ln, wp)
+    if ss.solve() != ResultFlag.OKAY:
+        return None
+    return [tuple(ss.params(p.params)) for p in P]
+
+
+class ConstrainedSketch:
+    def GetResources(self):
+        return {"Pixmap": _icon("csketch"), "MenuText": "Constrained Sketch",
+                "ToolTip": "Square up a rough profile (selected wire, or typed "
+                           "points) with the constraint solver, on a chosen plane.",
+                "Accel": "F, S"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        try:
+            import python_solvespace  # noqa: F401
+        except Exception:
+            err("The constraint solver isn't installed.\n\nIn the Python Console "
+                "run:\n  import sys,os,subprocess; subprocess.check_call("
+                "[os.path.join(sys.prefix,'python.exe'),'-m','pip','install',"
+                "'python-solvespace'])\nthen restart FreeCAD.")
+            return
+
+        # gather a rough profile: selected wire's vertices, else typed points
+        verts3d = []
+        for so in FreeCADGui.Selection.getSelectionEx():
+            obj = so.Object
+            if getattr(obj, "Shape", None) is not None:
+                try:
+                    g = global_shape(obj)
+                    if g.Wires:
+                        verts3d = [FreeCAD.Vector(v.Point) for v in g.Wires[0].OrderedVertexes]
+                    else:
+                        verts3d = [FreeCAD.Vector(v.Point) for v in g.Vertexes]
+                except Exception:
+                    verts3d = []
+                if verts3d:
+                    break
+
+        plane, ok = get_item("Constrained Sketch", "Sketch plane:", ["XY", "XZ", "YZ"], 0)
+        if not ok:
+            return
+        to3d = _PLANE_TO_3D[plane]
+        touv = _PLANE_TO_UV[plane]
+
+        if verts3d:
+            pts = [touv(v) for v in verts3d]
+            # drop a duplicate closing vertex if present
+            if len(pts) > 2 and abs(pts[0][0] - pts[-1][0]) < 1e-6 and abs(pts[0][1] - pts[-1][1]) < 1e-6:
+                pts = pts[:-1]
+        else:
+            try:
+                text, ok = QW.QInputDialog.getMultiLineText(
+                    _mw(), "Constrained Sketch",
+                    "No wire selected. Enter rough profile points, one 'U V' per "
+                    "line (in the chosen plane, mm):", "0 0\n100 4\n96 60\n-3 58")
+            except Exception:
+                ok = False
+            if not ok or not text.strip():
+                return
+            pts = []
+            for line in text.splitlines():
+                p = line.replace(",", " ").split()
+                if len(p) >= 2:
+                    try:
+                        pts.append((float(p[0]), float(p[1])))
+                    except Exception:
+                        pass
+        if len(pts) < 3:
+            warn("Need at least three points (a selected wire or typed profile).")
+            return
+        cl, ok = get_item("Constrained Sketch", "Closed profile?", ["Yes", "No"], 0)
+        if not ok:
+            return
+        close = cl == "Yes"
+
+        solved = solve_profile(pts, close)
+        if solved is None:
+            warn("The solver could not satisfy the constraints — try a rougher "
+                 "profile that is clearly near right angles.")
+            return
+        pts3d = [FreeCAD.Vector(*to3d(u, v)) for (u, v) in solved]
+        if close:
+            pts3d.append(pts3d[0])
+        doc = FreeCAD.ActiveDocument
+        doc.openTransaction("DynFrame: constrained sketch")
+        o = doc.addObject("Part::Feature", "ConstrainedSketch")
+        o.Shape = Part.makePolygon(pts3d)
+        doc.commitTransaction()
+        doc.recompute()
+        try:
+            FreeCADGui.Selection.clearSelection()
+            FreeCADGui.Selection.addSelection(o)
+            FreeCADGui.activeDocument().activeView().viewAxonometric()
+            FreeCADGui.SendMsgToActiveView("ViewFit")
+        except Exception:
+            pass
+        info("Constrained sketch created (squared-up profile). Select it and run "
+             "Insert Frame Members, or use it as a profile.")
+
+
 class RebuildFromSketch:
     def GetResources(self):
         return {"Pixmap": _icon("rebuild"), "MenuText": "Rebuild Members from Sketch",
@@ -1604,4 +1735,5 @@ _add("DynFrame_QuickFillet", QuickFillet)
 _add("DynFrame_ExportStep", ExportStep)
 _add("DynFrame_ExportStl", ExportStl)
 _add("DynFrame_Skeleton3D", Skeleton3D)
+_add("DynFrame_ConstrainedSketch", ConstrainedSketch)
 _add("DynFrame_InventorNav", InventorNav)

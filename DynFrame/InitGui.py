@@ -50,9 +50,10 @@ class DynFrameWorkbench(FreeCADGui.Workbench):
         skel = ["DynFrame_Skeleton3D", "DynFrame_ConstrainedSketch"]
         model = ["DynFrame_Hole", "DynFrame_QuickFillet"]
         report = ["DynFrame_CutList", "DynFrame_BOM"]
-        analysis = ["DynFrame_DefineSupport", "DynFrame_AddNodalLoad",
-                    "DynFrame_AddMemberLoad", "DynFrame_RunAnalysis",
-                    "DynFrame_ClearAnalysis"]
+        analysis = ["DynFrame_NewLoadCase", "DynFrame_DefineSupport",
+                    "DynFrame_AddNodalLoad", "DynFrame_AddMemberLoad",
+                    "DynFrame_Combinations", "DynFrame_RunAnalysis",
+                    "DynFrame_ShowDiagram", "DynFrame_ClearAnalysis"]
         io = ["DynFrame_ExportStep", "DynFrame_ExportStl"]
         setup = ["DynFrame_InventorNav"]
 

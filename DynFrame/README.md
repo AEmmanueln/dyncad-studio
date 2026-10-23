@@ -48,34 +48,48 @@ tube, **T** sections, **flat bar**, **round bar**. Edit
   polyline is its 3D-sketch equivalent.)
 
 **Frame Analysis (Robot-style workflow)**
-A step-by-step linear-static solver modelled on the way Autodesk Robot
-Structural Analysis works — you define supports and loads explicitly, run
-the calculation, then read the results. Commands live on the
-**DynFrame · Analysis** toolbar/menu:
+A linear-static solver modelled on Autodesk Robot Structural Analysis:
+organise loads into named **load cases**, build **combinations**, run a
+chosen case or combination, then read the results as switchable **N/V/M
+diagrams** and reaction / displacement / bar-force tables. Commands live on
+the **DynFrame · Analysis** toolbar/menu, in workflow order:
 
-1. **Define Support** — select the joint vertices to restrain and pick a
-   support type (Fixed, Pinned, or a Roller freeing specific directions).
-   Each support shows as a blue cone.
-2. **Add Nodal Load** — select joint vertices and enter a point force
-   (Fx, Fy, Fz in N). Shows as an orange arrow.
-3. **Add Member Load** — select members and apply a uniform distributed
-   load (N/mm along global Z) — e.g. a line load or snow load.
-4. **Calculate** — assembles a 3D Euler–Bernoulli direct-stiffness model
-   (6 DOF/node), applies self-weight (optional) plus your loads, and solves.
-   It then produces:
-   - a green **Deformed shape** (auto-scaled),
-   - a red **Bending-moment diagram** drawn along each member,
-   - an **AnalysisResults** spreadsheet of support reactions (Rx…Mz) and
-     per-member forces (axial, shears, peak My/Mz, stress, utilisation),
+1. **New Load Case** — create a named case with a nature (Dead, Live, Wind,
+   Snow, Other). Loads you add belong to a case, and combinations are built
+   from the cases. (A default `DL1` Dead case is created if you add a load
+   before making one.)
+2. **Define Support** — select joint vertices and pick a support type
+   (Fixed, Pinned, or a Roller freeing specific directions). Blue cone.
+   Supports are global (shared by every case).
+3. **Add Nodal Load** — select joint vertices, pick a case, enter a point
+   force (Fx, Fy, Fz in N). Orange arrow.
+4. **Add Member Load** — select members, pick a case, apply a uniform
+   distributed load (N/mm along global Z). Row of arrows along the member.
+5. **Load Combinations** — auto-generate simplified EN 1990 combinations
+   (**ULS** = 1.35·G + 1.5·Q, **SLS** = G + Q) from the defined cases, or
+   enter your own factored combination (e.g. `1.35*DL1 + 1.5*LL1`). Stored
+   in the `Combinations` spreadsheet.
+6. **Calculate** — choose a single case, a combination, or *All loads*, and
+   whether to add member self-weight (as Dead). Assembles a 3D
+   Euler–Bernoulli direct-stiffness model (6 DOF/node) and solves. Produces:
+   - a green **Deformed shape** — the real bent curve inside each member
+     (cubic shape functions), so even single-span members show their sag;
+   - six internal-force diagrams **N, Vy, Vz, Mx, My, Mz**, one visible at a
+     time, with the peak value labelled on each member;
+   - **Reactions**, **Displacements** and **BarForces** (start/end N, Vy,
+     Vz, Mx, My, Mz, stress, utilisation) spreadsheets;
    - members **coloured green→red by utilisation** against steel yield.
-5. **Clear Analysis** — removes the supports, loads and results and resets
-   the member colours.
+7. **Show Force Diagram** — switch which component (N / Vy / Vz / Mx / My /
+   Mz) is displayed, Robot "NTM"-style.
+8. **Clear Analysis** — remove supports, loads, combinations, diagrams and
+   tables, and reset member colours.
 
 > The solver is validated to zero error against textbook cases in both
 > bending planes — cantilever (point and UDL), simply-supported and
 > fixed-fixed beams (tip = wL⁴/8EI, mid = 5wL⁴/384EI, M = wL²/8, end =
-> wL²/12) — and solves portal/space frames. It is **linear static only**;
-> modal, buckling, seismic and code-checks are later phases.
+> wL²/12), all six force components, and load-case superposition — and
+> solves portal/space frames. It is **linear static only**; modal,
+> buckling, seismic and code-checks are later phases.
 
 **Modeling / export / setup**
 - **Quick Fillet** — fillet selected solid edges by a radius.

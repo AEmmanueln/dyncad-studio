@@ -15,6 +15,18 @@ try:
     _DIR = os.path.dirname(__file__)
 except Exception:
     _DIR = os.path.join(FreeCAD.getUserAppDataDir(), "Mod", "DynFrame")
+
+
+def _log(msg):
+    try:
+        import time
+        with open(os.path.join(_DIR, "_load.log"), "a") as f:
+            f.write("%s  InitGui: %s\n" % (time.ctime(), msg))
+    except Exception:
+        pass
+
+
+_log("InitGui.py started")
 _ICON = os.path.join(_DIR, "icons", "dynframe.svg")
 
 
@@ -63,8 +75,11 @@ class DynFrameWorkbench(FreeCADGui.Workbench):
 
 
 try:
+    _log("calling addWorkbench")
     FreeCADGui.addWorkbench(DynFrameWorkbench())
+    _log("addWorkbench returned OK")
 except Exception:
     import traceback
+    _log("addWorkbench FAILED:\n" + traceback.format_exc())
     FreeCAD.Console.PrintError("DynFrame: addWorkbench failed at startup\n"
                                + traceback.format_exc())

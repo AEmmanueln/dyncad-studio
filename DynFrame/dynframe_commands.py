@@ -642,24 +642,32 @@ class Miter:
             return
         n = unit(n)
 
-        # Extend each member past the corner so the solids fully overlap across
-        # the bisector plane; the cut then leaves faces that actually meet
-        # (otherwise an I-beam miter leaves a gap at the corner).
+        # Extend each member past the corner so the solids overlap across the
+        # bisector (otherwise an I-beam miter leaves a gap). CRUCIAL: we fuse a
+        # short extension piece onto the member's CURRENT shape rather than
+        # regenerating it from the skeleton — so an already-mitered other end
+        # is preserved when mitering the second corner.
         ext = max(_prof_diag(m1), _prof_diag(m2)) * 1.5 + 20.0
 
-        def extend(s, e):
-            # push whichever endpoint is the corner outward, past C, by ext
-            if s.distanceToPoint(C) <= e.distanceToPoint(C):
-                return s + vscale(unit(s - e), ext), e
-            return s, e + vscale(unit(e - s), ext)
+        def extended_current(m, s, e, corner, far):
+            cur = global_shape(m)                     # keep prior cuts/miters
+            u = unit(e - s)                           # original member direction
+            outward = unit(corner - far)              # past-corner direction
+            L = s.distanceToPoint(e)
+            overlap = min(_prof_diag(m) + 5.0, max(5.0, L * 0.5))
+            pa = corner + vscale(outward, ext)        # past the corner
+            pb = corner - vscale(outward, overlap)    # a little inside the member
+            p1, p2 = (pa, pb) if (pb - pa).dot(u) > 0 else (pb, pa)
+            piece = member_solid_global(m, p1, p2)
+            if piece is None:
+                return cur
+            try:
+                return cur.fuse(piece)
+            except Exception:
+                return cur
 
-        es1, ee1 = extend(s1, e1)
-        es2, ee2 = extend(s2, e2)
-        g1 = member_solid_global(m1, es1, ee1)
-        g2 = member_solid_global(m2, es2, ee2)
-        if g1 is None or g2 is None:
-            err("Could not rebuild the members for mitering.")
-            return
+        g1 = extended_current(m1, s1, e1, c1, f1)
+        g2 = extended_current(m2, s2, e2, c2, f2)
         S = (max(s1.distanceToPoint(e1), s2.distanceToPoint(e2)) + ext) * 2.0 + 200.0
         doc = FreeCAD.ActiveDocument
         doc.openTransaction("DynFrame: miter")
@@ -678,6 +686,66 @@ class Miter:
         except Exception as e:
             doc.abortTransaction()
             err("Miter failed:\n%s" % e)
+
+
+class MirrorMembers:
+    def GetResources(self):
+        return {"Pixmap": _icon("mirror"), "MenuText": "Mirror Members",
+                "ToolTip": "Mirror the selected members across a selected planar "
+                           "face, or an XY/XZ/YZ plane.", "Accel": "F, R"}
+
+    def IsActive(self):
+        return bool(selected_members())
+
+    def Activated(self):
+        face = None
+        members = []
+        for so in FreeCADGui.Selection.getSelectionEx():
+            for sub in getattr(so, "SubObjects", []) or []:
+                if getattr(sub, "ShapeType", "") == "Face" and face is None:
+                    face = sub
+            if is_member(so.Object) and so.Object not in members:
+                members.append(so.Object)
+        members = [m for m in members if is_member(m)]
+        if not members:
+            info("Select the member(s) to mirror (and optionally a planar face "
+                 "to mirror across).")
+            return
+        if face is not None:
+            try:
+                pt = face.CenterOfMass
+                nrm = unit(face.normalAt(0, 0))
+            except Exception:
+                warn("Pick a flat face to mirror across.")
+                return
+        else:
+            pl, ok = get_item("Mirror Members", "Mirror plane:", ["XY", "XZ", "YZ"], 0)
+            if not ok:
+                return
+            pt = FreeCAD.Vector(0, 0, 0)
+            nrm = {"XY": FreeCAD.Vector(0, 0, 1), "XZ": FreeCAD.Vector(0, 1, 0),
+                   "YZ": FreeCAD.Vector(1, 0, 0)}[pl]
+
+        def mir(P):
+            return P - vscale(nrm, 2.0 * (P - pt).dot(nrm))
+
+        doc = FreeCAD.ActiveDocument
+        doc.openTransaction("DynFrame: mirror members")
+        grp = group(doc)
+        n = 0
+        for m in members:
+            s, e = skeleton(m)
+            nm = make_member(doc, getattr(m, "MemberProfile", ""), mir(s), mir(e),
+                             float(getattr(m, "MemberTwist", 0.0)),
+                             getattr(m, "MemberAlign", "Center"),
+                             float(getattr(m, "MemberOffX", 0.0)),
+                             float(getattr(m, "MemberOffY", 0.0)))
+            if nm:
+                grp.addObject(nm)
+                n += 1
+        doc.commitTransaction()
+        doc.recompute()
+        FreeCAD.Console.PrintMessage("DynFrame: mirrored %d member(s)\n" % n)
 
 
 class TrimToFace:
@@ -1227,6 +1295,7 @@ _add("DynFrame_ChangeProfile", ChangeProfile)
 _add("DynFrame_LengthenShorten", LengthenShorten)
 _add("DynFrame_TrimButt", TrimButt)
 _add("DynFrame_Miter", Miter)
+_add("DynFrame_MirrorMembers", MirrorMembers)
 _add("DynFrame_TrimToFace", TrimToFace)
 _add("DynFrame_ExtendToFace", ExtendToFace)
 _add("DynFrame_CutList", CutList)

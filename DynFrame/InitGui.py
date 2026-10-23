@@ -43,18 +43,22 @@ class DynFrameWorkbench(FreeCADGui.Workbench):
 
         frame = ["DynFrame_InsertMembers", "DynFrame_ChangeProfile",
                  "DynFrame_LengthenShorten", "DynFrame_ExtendToFace",
-                 "DynFrame_TrimButt", "DynFrame_Miter", "DynFrame_TrimToFace",
-                 "DynFrame_MirrorMembers", "DynFrame_CutList"]
+                 "DynFrame_TrimButt", "DynFrame_Miter", "DynFrame_TrimToFace"]
+        pattern = ["DynFrame_MirrorMembers", "DynFrame_RectPattern",
+                   "DynFrame_CircPattern"]
         skel = ["DynFrame_Skeleton3D"]
         model = ["DynFrame_Hole", "DynFrame_QuickFillet"]
+        report = ["DynFrame_CutList", "DynFrame_BOM"]
         io = ["DynFrame_ExportStep", "DynFrame_ExportStl"]
         setup = ["DynFrame_InventorNav"]
 
         self.appendToolbar("DynFrame · Frame", frame)
+        self.appendToolbar("DynFrame · Pattern", pattern)
         self.appendToolbar("DynFrame · Skeleton", skel)
         self.appendToolbar("DynFrame · Model", model)
+        self.appendToolbar("DynFrame · Report", report)
         self.appendToolbar("DynFrame · Export", io)
-        self.appendMenu("DynFrame", frame + skel + model + io + setup)
+        self.appendMenu("DynFrame", frame + pattern + skel + model + report + io + setup)
         FreeCAD.Console.PrintMessage("DynFrame workbench loaded\n")
 
     def Activated(self):

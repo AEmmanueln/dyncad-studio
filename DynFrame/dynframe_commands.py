@@ -73,6 +73,23 @@ def get_double(title, label, value, lo, hi, dec=2):
     return QW.QInputDialog.getDouble(_mw(), title, label, value, lo, hi, dec)
 
 
+def get_int(title, label, value, lo, hi):
+    return QW.QInputDialog.getInt(_mw(), title, label, value, lo, hi, 1)
+
+
+def selected_edge_dir():
+    """Return (base_point, unit_direction) of the first straight edge in the
+    selection, or (None, None)."""
+    for so in FreeCADGui.Selection.getSelectionEx():
+        for sub in getattr(so, "SubObjects", []) or []:
+            if getattr(sub, "ShapeType", "") == "Edge" and len(sub.Vertexes) >= 2:
+                a = FreeCAD.Vector(sub.Vertexes[0].Point)
+                b = FreeCAD.Vector(sub.Vertexes[-1].Point)
+                if (b - a).Length > TOL:
+                    return a, unit(b - a)
+    return None, None
+
+
 def save_name(title, filt):
     r = QW.QFileDialog.getSaveFileName(_mw(), title, "", filt)
     return r[0] if isinstance(r, (tuple, list)) else r
@@ -1282,6 +1299,216 @@ class InventorNav:
             err("Could not set navigation style:\n%s" % e)
 
 
+def _dup_member(doc, grp, m, xf):
+    s, e = skeleton(m)
+    nm = make_member(doc, getattr(m, "MemberProfile", ""), xf(s), xf(e),
+                     float(getattr(m, "MemberTwist", 0.0)),
+                     getattr(m, "MemberAlign", "Center"),
+                     float(getattr(m, "MemberOffX", 0.0)),
+                     float(getattr(m, "MemberOffY", 0.0)))
+    if nm and grp:
+        grp.addObject(nm)
+    return nm
+
+
+def _dup_generic(doc, o, xf_shape):
+    try:
+        sh = global_shape(o)
+    except Exception:
+        sh = o.Shape.copy()
+    xf_shape(sh)
+    no = doc.addObject("Part::Feature", o.Label + "_copy")
+    no.Shape = sh
+    return no
+
+
+class RectPattern:
+    def GetResources(self):
+        return {"Pixmap": _icon("rectpattern"), "MenuText": "Rectangular Pattern",
+                "ToolTip": "Copy the selected members/solids along a direction "
+                           "(X/Y/Z, or a selected straight edge).", "Accel": "F, X"}
+
+    def IsActive(self):
+        return bool(selected_members())
+
+    def Activated(self):
+        items = [o for o in selected_members() if getattr(o, "Shape", None) is not None]
+        if not items:
+            info("Select member(s) or solid(s) to pattern.")
+            return
+        _, adir = selected_edge_dir()
+        if adir is None:
+            ax, ok = get_item("Rectangular Pattern", "Direction:", ["X", "Y", "Z"], 0)
+            if not ok:
+                return
+            adir = {"X": FreeCAD.Vector(1, 0, 0), "Y": FreeCAD.Vector(0, 1, 0),
+                    "Z": FreeCAD.Vector(0, 0, 1)}[ax]
+        count, ok = get_int("Rectangular Pattern", "Total count (incl. original):", 3, 2, 2000)
+        if not ok:
+            return
+        spacing, ok = get_double("Rectangular Pattern", "Spacing (mm):", 100.0, -1e6, 1e6)
+        if not ok:
+            return
+        doc = FreeCAD.ActiveDocument
+        doc.openTransaction("DynFrame: rectangular pattern")
+        grp = group(doc)
+        n = 0
+        for o in items:
+            mem = is_member(o)
+            for k in range(1, count):
+                off = vscale(adir, k * spacing)
+                if mem:
+                    if _dup_member(doc, grp, o, lambda P, off=off: P + off):
+                        n += 1
+                else:
+                    _dup_generic(doc, o, lambda sh, off=off: sh.translate(off))
+                    n += 1
+        doc.commitTransaction()
+        doc.recompute()
+        FreeCAD.Console.PrintMessage("DynFrame: created %d copies\n" % n)
+
+
+class CircPattern:
+    def GetResources(self):
+        return {"Pixmap": _icon("circpattern"), "MenuText": "Circular Pattern",
+                "ToolTip": "Copy the selected members/solids around an axis "
+                           "(Z/X/Y, or a selected straight edge as the axis).",
+                "Accel": "F, O"}
+
+    def IsActive(self):
+        return bool(selected_members())
+
+    def Activated(self):
+        items = [o for o in selected_members() if getattr(o, "Shape", None) is not None]
+        if not items:
+            info("Select member(s) or solid(s) to pattern.")
+            return
+        apt, adir = selected_edge_dir()
+        if adir is None:
+            ax, ok = get_item("Circular Pattern", "Axis:", ["Z", "X", "Y"], 0)
+            if not ok:
+                return
+            adir = {"Z": FreeCAD.Vector(0, 0, 1), "X": FreeCAD.Vector(1, 0, 0),
+                    "Y": FreeCAD.Vector(0, 1, 0)}[ax]
+            apt = FreeCAD.Vector(0, 0, 0)
+        count, ok = get_int("Circular Pattern", "Total count (incl. original):", 4, 2, 2000)
+        if not ok:
+            return
+        total, ok = get_double("Circular Pattern", "Total angle (deg, 360 = full):", 360.0, -3600.0, 3600.0)
+        if not ok:
+            return
+        step = total / count if abs(abs(total) - 360.0) < 1e-6 else total / (count - 1)
+        doc = FreeCAD.ActiveDocument
+        doc.openTransaction("DynFrame: circular pattern")
+        grp = group(doc)
+        n = 0
+        for o in items:
+            mem = is_member(o)
+            for k in range(1, count):
+                ang = step * k
+
+                def rot_pt(P, ang=ang):
+                    return apt + FreeCAD.Rotation(adir, ang).multVec(P - apt)
+
+                if mem:
+                    if _dup_member(doc, grp, o, rot_pt):
+                        n += 1
+                else:
+                    _dup_generic(doc, o, lambda sh, ang=ang: sh.rotate(apt, adir, ang))
+                    n += 1
+        doc.commitTransaction()
+        doc.recompute()
+        FreeCAD.Console.PrintMessage("DynFrame: created %d copies\n" % n)
+
+
+class BOM:
+    def GetResources(self):
+        return {"Pixmap": _icon("cutlist"), "MenuText": "Bill of Materials",
+                "ToolTip": "Parts list of every solid (grouped by type, with "
+                           "quantity, volume and estimated steel mass).",
+                "Accel": "F, B"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        doc = FreeCAD.ActiveDocument
+        DENS = 7.85e-6  # kg per mm^3 (structural steel)
+        groups = {}
+        order = []
+        for o in doc.Objects:
+            sh = getattr(o, "Shape", None)
+            if sh is None or o.TypeId == "App::DocumentObjectGroup":
+                continue
+            try:
+                vol = sh.Volume
+            except Exception:
+                vol = 0.0
+            if vol <= TOL:
+                continue
+            try:
+                vis = o.ViewObject.Visibility
+            except Exception:
+                vis = True
+            if not vis:
+                continue
+            if is_member(o):
+                s, e = skeleton(o)
+                L = s.distanceToPoint(e)
+                key = ("M", getattr(o, "MemberProfile", "?"), round(L, 1))
+                desc = "%s  L=%.1f mm" % (getattr(o, "MemberProfile", "?"), L)
+            else:
+                bb = sh.BoundBox
+                key = ("P", round(vol, 1), round(bb.XLength, 1), round(bb.YLength, 1), round(bb.ZLength, 1))
+                desc = "%s  %.0f x %.0f x %.0f mm" % (o.Label.split("_")[0],
+                                                      bb.XLength, bb.YLength, bb.ZLength)
+            if key not in groups:
+                groups[key] = {"desc": desc, "qty": 0, "vol": vol}
+                order.append(key)
+            groups[key]["qty"] += 1
+        if not order:
+            info("No solids found to list.")
+            return
+        rows = []
+        tot_mass = 0.0
+        for i, key in enumerate(order, 1):
+            g = groups[key]
+            mass = g["vol"] * DENS
+            tot_mass += mass * g["qty"]
+            rows.append((i, g["desc"], g["qty"], mass, mass * g["qty"]))
+        try:
+            sheet = doc.getObject("BOM") or doc.addObject("Spreadsheet::Sheet", "BOM")
+            sheet.clearAll()
+            sheet.set("A1", "DynFrame Bill of Materials  (steel, %.0f kg/m3)" % (DENS * 1e9))
+            sheet.set("A3", "Item"); sheet.set("B3", "Description"); sheet.set("C3", "Qty")
+            sheet.set("D3", "Unit mass (kg)"); sheet.set("E3", "Total mass (kg)")
+            r = 4
+            for item, desc, qty, um, tm in rows:
+                sheet.set("A%d" % r, str(item)); sheet.set("B%d" % r, str(desc))
+                sheet.set("C%d" % r, str(qty)); sheet.set("D%d" % r, "%.3f" % um)
+                sheet.set("E%d" % r, "%.3f" % tm); r += 1
+            sheet.set("B%d" % (r + 1), "TOTAL MASS (kg)")
+            sheet.set("E%d" % (r + 1), "%.3f" % tot_mass)
+            doc.recompute()
+        except Exception as e:
+            FreeCAD.Console.PrintError("DynFrame: BOM sheet failed (%s)\n" % e)
+        fn = save_name("Export BOM CSV", "CSV files (*.csv)")
+        if fn:
+            if not fn.lower().endswith(".csv"):
+                fn += ".csv"
+            try:
+                with open(fn, "w", encoding="utf-8") as f:
+                    f.write("Item,Description,Qty,Unit_mass_kg,Total_mass_kg\n")
+                    for item, desc, qty, um, tm in rows:
+                        f.write('%d,"%s",%d,%.3f,%.3f\n' % (item, desc, qty, um, tm))
+                    f.write(',,,TOTAL,%.3f\n' % tot_mass)
+                info("BOM written to:\n%s" % fn)
+            except Exception as e:
+                err("CSV failed:\n%s" % e)
+        else:
+            info("Spreadsheet 'BOM' added (total steel mass %.1f kg)." % tot_mass)
+
+
 # ── register ─────────────────────────────────────────────────────
 def _add(name, cls):
     try:
@@ -1296,6 +1523,9 @@ _add("DynFrame_LengthenShorten", LengthenShorten)
 _add("DynFrame_TrimButt", TrimButt)
 _add("DynFrame_Miter", Miter)
 _add("DynFrame_MirrorMembers", MirrorMembers)
+_add("DynFrame_RectPattern", RectPattern)
+_add("DynFrame_CircPattern", CircPattern)
+_add("DynFrame_BOM", BOM)
 _add("DynFrame_TrimToFace", TrimToFace)
 _add("DynFrame_ExtendToFace", ExtendToFace)
 _add("DynFrame_CutList", CutList)

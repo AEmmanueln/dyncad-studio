@@ -46,7 +46,7 @@ class DynFrameWorkbench(FreeCADGui.Workbench):
                  "DynFrame_TrimButt", "DynFrame_Miter", "DynFrame_TrimToFace",
                  "DynFrame_CutList"]
         skel = ["DynFrame_Skeleton3D"]
-        model = ["DynFrame_QuickFillet"]
+        model = ["DynFrame_Hole", "DynFrame_QuickFillet"]
         io = ["DynFrame_ExportStep", "DynFrame_ExportStl"]
         setup = ["DynFrame_InventorNav"]
 

@@ -725,6 +725,177 @@ class TrimToFace:
             err("Trim to face failed:\n%s" % e)
 
 
+STD_HOLES = [("Custom", 0.0),
+             ("M3 clearance (3.4)", 3.4), ("M4 clearance (4.5)", 4.5),
+             ("M5 clearance (5.5)", 5.5), ("M6 clearance (6.6)", 6.6),
+             ("M8 clearance (9.0)", 9.0), ("M10 clearance (11.0)", 11.0),
+             ("M12 clearance (13.5)", 13.5), ("M16 clearance (17.5)", 17.5),
+             ("M20 clearance (22.0)", 22.0),
+             ("M3 tapping (2.5)", 2.5), ("M4 tapping (3.3)", 3.3),
+             ("M5 tapping (4.2)", 4.2), ("M6 tapping (5.0)", 5.0),
+             ("M8 tapping (6.8)", 6.8), ("M10 tapping (8.5)", 8.5),
+             ("M12 tapping (10.2)", 10.2)]
+
+
+def hole_dialog():
+    dlg = QW.QDialog(_mw())
+    dlg.setWindowTitle("DynFrame - Hole")
+    lay = QW.QFormLayout(dlg)
+    typ = QW.QComboBox(); typ.addItems(["Simple / Clearance", "Counterbore", "Countersink", "Tapped"])
+    size = QW.QComboBox(); size.addItems([s[0] for s in STD_HOLES]); size.setCurrentIndex(4)
+    dia = QW.QDoubleSpinBox(); dia.setRange(0.1, 1000.0); dia.setValue(6.6); dia.setSuffix("  mm")
+    through = QW.QCheckBox("Through all"); through.setChecked(True)
+    depth = QW.QDoubleSpinBox(); depth.setRange(0.1, 1e5); depth.setValue(20.0); depth.setSuffix("  mm")
+    cb_d = QW.QDoubleSpinBox(); cb_d.setRange(0.1, 1000.0); cb_d.setValue(11.0); cb_d.setSuffix("  mm")
+    cb_dep = QW.QDoubleSpinBox(); cb_dep.setRange(0.1, 1000.0); cb_dep.setValue(6.6); cb_dep.setSuffix("  mm")
+    cs_d = QW.QDoubleSpinBox(); cs_d.setRange(0.1, 1000.0); cs_d.setValue(12.0); cs_d.setSuffix("  mm")
+    cs_ang = QW.QDoubleSpinBox(); cs_ang.setRange(1.0, 179.0); cs_ang.setValue(90.0); cs_ang.setSuffix("  deg")
+
+    def on_size():
+        v = dict(STD_HOLES).get(size.currentText(), 0.0)
+        if v > 0:
+            dia.setValue(v)
+    size.currentIndexChanged.connect(lambda *a: on_size())
+    on_size()
+
+    lay.addRow("Type:", typ)
+    lay.addRow("Standard size:", size)
+    lay.addRow("Hole diameter:", dia)
+    lay.addRow(through)
+    lay.addRow("Blind depth:", depth)
+    lay.addRow("Counterbore diameter:", cb_d)
+    lay.addRow("Counterbore depth:", cb_dep)
+    lay.addRow("Countersink diameter:", cs_d)
+    lay.addRow("Countersink angle:", cs_ang)
+    bb = QW.QDialogButtonBox(QW.QDialogButtonBox.Ok | QW.QDialogButtonBox.Cancel)
+    bb.accepted.connect(dlg.accept)
+    bb.rejected.connect(dlg.reject)
+    lay.addRow(bb)
+    if not _exec(dlg):
+        return None
+    return {"type": typ.currentText(), "dia": dia.value(), "through": through.isChecked(),
+            "depth": depth.value(), "cb_d": cb_d.value(), "cb_dep": cb_dep.value(),
+            "cs_d": cs_d.value(), "cs_ang": cs_ang.value()}
+
+
+def _hole_fallback():
+    dia, ok = get_double("Hole", "Hole diameter (mm):", 6.6, 0.1, 1000.0)
+    if not ok:
+        return None
+    thru, ok = get_item("Hole", "Termination:", ["Through all", "Blind"], 0)
+    if not ok:
+        return None
+    depth = 20.0
+    if thru == "Blind":
+        depth, ok = get_double("Hole", "Blind depth (mm):", 20.0, 0.1, 1e5)
+        if not ok:
+            return None
+    return {"type": "Simple / Clearance", "dia": dia, "through": thru == "Through all",
+            "depth": depth, "cb_d": dia * 1.8, "cb_dep": dia, "cs_d": dia * 1.8, "cs_ang": 90.0}
+
+
+def get_hole_settings():
+    try:
+        return hole_dialog()
+    except Exception as e:
+        FreeCAD.Console.PrintError("DynFrame: hole dialog unavailable (%s)\n" % e)
+        return _hole_fallback()
+
+
+class HoleFeature:
+    def GetResources(self):
+        return {"Pixmap": _icon("hole"), "MenuText": "Hole",
+                "ToolTip": "Cut a hole (simple / counterbore / countersink / tapped) "
+                           "into a solid at a selected face or vertices.",
+                "Accel": "M, H"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        import math
+        face = None
+        owner = None
+        pts = []
+        for so in FreeCADGui.Selection.getSelectionEx():
+            for sub in getattr(so, "SubObjects", []) or []:
+                st = getattr(sub, "ShapeType", "")
+                if st == "Face" and face is None:
+                    face = sub
+                    owner = so.Object
+                elif st == "Vertex":
+                    pts.append(FreeCAD.Vector(sub.Point))
+        if face is None or owner is None:
+            info("Select a flat face to drill into (optionally also select "
+                 "vertices / sketch points for the hole centres).")
+            return
+        try:
+            nrm = unit(face.normalAt(0, 0))
+            fpt = face.CenterOfMass
+        except Exception:
+            warn("Pick a flat (planar) face.")
+            return
+        if not pts:
+            pts = [fpt]
+        # project chosen points onto the face plane
+        centres = [c - vscale(nrm, (c - fpt).dot(nrm)) for c in pts]
+
+        res = get_hole_settings()
+        if not res:
+            return
+        into = vscale(nrm, -1.0)
+        try:
+            base = global_shape(owner)
+        except Exception:
+            base = owner.Shape
+        bb = base.BoundBox
+        big = (bb.XLength + bb.YLength + bb.ZLength) + 100.0
+
+        tools = []
+        for c in centres:
+            start = c + vscale(nrm, 0.5)       # start just above the face
+            h = (big if res["through"] else res["depth"] + 0.5) + 0.5
+            try:
+                tools.append(Part.makeCylinder(res["dia"] / 2.0, h, start, into))
+                if res["type"] == "Counterbore":
+                    tools.append(Part.makeCylinder(res["cb_d"] / 2.0, res["cb_dep"] + 0.5, start, into))
+                elif res["type"] == "Countersink":
+                    half = math.radians(res["cs_ang"] / 2.0)
+                    cdep = ((res["cs_d"] - res["dia"]) / 2.0) / math.tan(half) if half > 1e-6 else res["cs_d"]
+                    tools.append(Part.makeCone(res["cs_d"] / 2.0, res["dia"] / 2.0, cdep + 0.5, start, into))
+            except Exception as e:
+                FreeCAD.Console.PrintError("DynFrame: hole tool build failed (%s)\n" % e)
+        if not tools:
+            warn("Could not build the hole geometry.")
+            return
+        tool = tools[0]
+        for t in tools[1:]:
+            tool = tool.fuse(t)
+        doc = FreeCAD.ActiveDocument
+        doc.openTransaction("DynFrame: hole")
+        try:
+            result = base.cut(tool)
+            if result.Volume < TOL:
+                doc.abortTransaction()
+                warn("The hole removed the whole part — check the diameter/position.")
+                return
+            try:
+                owner.Shape = result
+                owner.Placement = FreeCAD.Placement()
+            except Exception:
+                o = doc.addObject("Part::Feature", owner.Label + "_Hole")
+                o.Shape = result
+                try:
+                    owner.ViewObject.Visibility = False
+                except Exception:
+                    pass
+            doc.commitTransaction()
+            doc.recompute()
+        except Exception as e:
+            doc.abortTransaction()
+            err("Hole failed:\n%s" % e)
+
+
 class ExtendToFace:
     def GetResources(self):
         return {"Pixmap": _icon("lengthen"), "MenuText": "Lengthen / Shorten to Face",
@@ -1059,6 +1230,7 @@ _add("DynFrame_Miter", Miter)
 _add("DynFrame_TrimToFace", TrimToFace)
 _add("DynFrame_ExtendToFace", ExtendToFace)
 _add("DynFrame_CutList", CutList)
+_add("DynFrame_Hole", HoleFeature)
 _add("DynFrame_QuickFillet", QuickFillet)
 _add("DynFrame_ExportStep", ExportStep)
 _add("DynFrame_ExportStl", ExportStl)

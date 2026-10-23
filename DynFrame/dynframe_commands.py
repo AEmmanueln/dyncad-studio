@@ -1,14 +1,9 @@
 # -*- coding: utf-8 -*-
 """DynFrame commands — an Inventor-style Frame Generator for FreeCAD.
 
-Key ideas
----------
-* Each member stores its *skeleton* (MemberStart/MemberEnd global points),
-  its profile name and twist. Every edit (lengthen, change profile) rebuilds
-  the solid from that skeleton, so operations stay robust and repeatable.
-* Members are oriented with an explicit, stable frame (not a shortest-arc
-  rotation), so profiles never randomly roll or flip — this is what makes
-  I-beams / angles / channels sit consistently along every edge.
+Members store their skeleton (MemberStart/MemberEnd), profile, twist and
+alignment, so every edit rebuilds the solid robustly. Members are oriented
+with an explicit, stable frame (no arbitrary roll).
 """
 
 import os
@@ -27,6 +22,22 @@ except Exception:
 _ICON_DIR = os.path.join(os.path.dirname(__file__), "icons")
 TOL = 1e-6
 GROUP = "Frame"
+
+# 9-point alignment (which point of the profile sits on the skeleton line)
+ALIGN_OPTIONS = ["Center",
+                 "Top-Left", "Top-Center", "Top-Right",
+                 "Middle-Left", "Middle-Right",
+                 "Bottom-Left", "Bottom-Center", "Bottom-Right"]
+
+
+# ── vector helpers (operator-based: always return NEW vectors) ──
+def unit(v):
+    L = v.Length
+    return FreeCAD.Vector(v.x / L, v.y / L, v.z / L) if L > TOL else FreeCAD.Vector(v)
+
+
+def vscale(v, k):
+    return FreeCAD.Vector(v.x * k, v.y * k, v.z * k)
 
 
 # ── UI helpers ───────────────────────────────────────────────────
@@ -54,8 +65,8 @@ def err(m):
     QW.QMessageBox.critical(_mw(), "DynFrame", m)
 
 
-def get_item(title, label, items):
-    return QW.QInputDialog.getItem(_mw(), title, label, items, 0, False)
+def get_item(title, label, items, cur=0):
+    return QW.QInputDialog.getItem(_mw(), title, label, items, cur, False)
 
 
 def get_double(title, label, value, lo, hi, dec=2):
@@ -72,44 +83,59 @@ def choose_dir(title):
 
 
 def pick_profile():
-    """Two-step family -> size picker. Returns (size_name, builder) or None."""
     fams = profiles.families()
-    fam, ok = get_item("Frame Generator  (1/2)", "Profile family:", list(fams.keys()))
+    fam, ok = get_item("Frame Generator  (1/3)", "Profile family:", list(fams.keys()))
     if not ok:
         return None
     sizes = fams[fam]
-    name, ok = get_item("Frame Generator  (2/2)  -  " + fam, "Size:", [s[0] for s in sizes])
+    name, ok = get_item("Frame Generator  (2/3)  -  " + fam, "Size:", [s[0] for s in sizes])
     if not ok:
         return None
-    return name, dict(sizes)[name]
+    return name
 
 
 # ── geometry helpers ─────────────────────────────────────────────
-def orient_placement(p1, direction, twist_deg=0.0):
-    """Stable placement: local +Z -> member direction, with a consistent
-    'up' so the profile never rolls arbitrarily. twist_deg rotates the
-    profile about its own axis."""
-    z = FreeCAD.Vector(direction)
-    if z.Length < TOL:
-        return FreeCAD.Placement(p1, FreeCAD.Rotation())
-    z.normalize()
-    wz = FreeCAD.Vector(0, 0, 1)
-    ref = wz if abs(z.dot(wz)) < 0.9 else FreeCAD.Vector(1, 0, 0)
-    x = ref.cross(z)
-    if x.Length < TOL:
-        x = FreeCAD.Vector(0, 1, 0).cross(z)
-    x.normalize()
-    y = z.cross(x)
-    y.normalize()
-    if abs(twist_deg) > 1e-9:
-        tw = FreeCAD.Rotation(z, twist_deg)
-        x = tw.multVec(x)
-        y = tw.multVec(y)
-    m = FreeCAD.Matrix(x.x, y.x, z.x, p1.x,
-                       x.y, y.y, z.y, p1.y,
-                       x.z, y.z, z.z, p1.z,
-                       0, 0, 0, 1)
-    return FreeCAD.Placement(m)
+def global_shape(obj):
+    """Return the object's shape in global coords with identity placement.
+
+    IMPORTANT: FreeCAD's obj.Shape already carries obj.Placement, so we must
+    strip it and bake the placement into the geometry — not multiply it in
+    again (that double-places the shape and makes booleans jump)."""
+    g = obj.Shape.copy()
+    g.Placement = FreeCAD.Placement()
+    g.transformShape(obj.Placement.toMatrix())
+    return g
+
+
+def apply_align(face, align):
+    """Translate the (bbox-centred) profile so the chosen 9-point anchor sits
+    at the origin, i.e. on the skeleton line."""
+    if not align:
+        align = "Center"
+    bb = face.BoundBox
+    xmap = {"Left": bb.XMin, "Center": (bb.XMin + bb.XMax) / 2.0, "Right": bb.XMax}
+    ymap = {"Bottom": bb.YMin, "Middle": (bb.YMin + bb.YMax) / 2.0, "Top": bb.YMax}
+    parts = align.split("-")
+    if len(parts) == 2:
+        yk, xk = parts[0], parts[1]
+    else:
+        yk, xk = "Middle", "Center"
+    ax = xmap.get(xk, (bb.XMin + bb.XMax) / 2.0)
+    ay = ymap.get(yk, (bb.YMin + bb.YMax) / 2.0)
+    f = face.copy()
+    f.translate(FreeCAD.Vector(-ax, -ay, 0))
+    return f
+
+
+def build_face(profname, align):
+    b = profiles.builder_for(profname)
+    if b is None:
+        return None
+    try:
+        return apply_align(b(), align)
+    except Exception as e:
+        FreeCAD.Console.PrintError("DynFrame: profile build failed (%s)\n" % e)
+        return None
 
 
 def _edge_pts(edge, out):
@@ -145,21 +171,14 @@ def collect_edges():
             obj = so.Object
             if getattr(obj, "Shape", None) is not None:
                 try:
-                    g = obj.Shape.copy()
-                    g.Placement = obj.Placement.multiply(g.Placement)
+                    _edges_of(global_shape(obj), out)
                 except Exception:
-                    g = obj.Shape
-                _edges_of(g, out)
-    # de-duplicate coincident edges
+                    _edges_of(obj.Shape, out)
     uniq = []
     for a, b in out:
-        dup = False
-        for c, d in uniq:
-            if (a.distanceToPoint(c) < 1e-4 and b.distanceToPoint(d) < 1e-4) or \
-               (a.distanceToPoint(d) < 1e-4 and b.distanceToPoint(c) < 1e-4):
-                dup = True
-                break
-        if not dup:
+        if not any((a.distanceToPoint(c) < 1e-4 and b.distanceToPoint(d) < 1e-4) or
+                   (a.distanceToPoint(d) < 1e-4 and b.distanceToPoint(c) < 1e-4)
+                   for c, d in uniq):
             uniq.append((a, b))
     return uniq
 
@@ -185,27 +204,20 @@ def selected_members():
 
 
 def skeleton(obj):
-    """Return (start, end) global points of a member's centre-line."""
     s = getattr(obj, "MemberStart", None)
     e = getattr(obj, "MemberEnd", None)
-    if s is not None and e is not None and FreeCAD.Vector(e).sub(FreeCAD.Vector(s)).Length > TOL:
+    if s is not None and e is not None and (FreeCAD.Vector(e) - FreeCAD.Vector(s)).Length > TOL:
         return FreeCAD.Vector(s), FreeCAD.Vector(e)
     L = float(getattr(obj, "MemberLength", 0.0) or 0.0)
-    base = obj.Placement.Base
-    z = obj.Placement.Rotation.multVec(FreeCAD.Vector(0, 0, 1))
+    base = FreeCAD.Vector(obj.Placement.Base)
+    z = unit(obj.Placement.Rotation.multVec(FreeCAD.Vector(0, 0, 1)))
     if L <= 0:
         bb = obj.Shape.BoundBox
         L = max(bb.XLength, bb.YLength, bb.ZLength)
-    return FreeCAD.Vector(base), base.add(z.multiply(L))
+    return base, base + vscale(z, L)
 
 
-def global_shape(obj):
-    g = obj.Shape.copy()
-    g.Placement = obj.Placement.multiply(g.Placement)
-    return g
-
-
-def _set_prop(obj, typ, name, val):
+def _set(obj, typ, name, val):
     try:
         if not hasattr(obj, name):
             obj.addProperty(typ, name, "DynFrame", name)
@@ -214,8 +226,42 @@ def _set_prop(obj, typ, name, val):
         pass
 
 
-def make_member(doc, face, p1, p2, profname, twist):
-    d = p2.sub(p1)
+def orient_placement(p1, direction, twist_deg=0.0):
+    z = unit(direction)
+    if z.Length < TOL:
+        return FreeCAD.Placement(p1, FreeCAD.Rotation())
+    wz = FreeCAD.Vector(0, 0, 1)
+    ref = wz if abs(z.dot(wz)) < 0.9 else FreeCAD.Vector(1, 0, 0)
+    x = unit(ref.cross(z))
+    if x.Length < TOL:
+        x = unit(FreeCAD.Vector(0, 1, 0).cross(z))
+    y = unit(z.cross(x))
+    if abs(twist_deg) > 1e-9:
+        tw = FreeCAD.Rotation(z, twist_deg)
+        x = tw.multVec(x)
+        y = tw.multVec(y)
+    m = FreeCAD.Matrix(x.x, y.x, z.x, p1.x,
+                       x.y, y.y, z.y, p1.y,
+                       x.z, y.z, z.z, p1.z,
+                       0, 0, 0, 1)
+    return FreeCAD.Placement(m)
+
+
+def _store(obj, profname, p1, p2, twist, align, L):
+    _set(obj, "App::PropertyString", "MemberProfile", profname)
+    _set(obj, "App::PropertyVector", "MemberStart", p1)
+    _set(obj, "App::PropertyVector", "MemberEnd", p2)
+    _set(obj, "App::PropertyLength", "MemberLength", L)
+    _set(obj, "App::PropertyFloat", "MemberTwist", float(twist))
+    _set(obj, "App::PropertyString", "MemberAlign", align)
+    obj.Label = "%s (%.0f mm)" % (profname, L)
+
+
+def make_member(doc, profname, p1, p2, twist, align):
+    face = build_face(profname, align)
+    if face is None:
+        return None
+    d = p2 - p1
     L = d.Length
     if L < TOL:
         return None
@@ -227,47 +273,34 @@ def make_member(doc, face, p1, p2, profname, twist):
     obj = doc.addObject("Part::Feature", "Member")
     obj.Shape = solid
     obj.Placement = orient_placement(p1, d, twist)
-    _set_prop(obj, "App::PropertyString", "MemberProfile", profname)
-    _set_prop(obj, "App::PropertyVector", "MemberStart", p1)
-    _set_prop(obj, "App::PropertyVector", "MemberEnd", p2)
-    _set_prop(obj, "App::PropertyLength", "MemberLength", L)
-    _set_prop(obj, "App::PropertyFloat", "MemberTwist", float(twist))
-    obj.Label = "%s (%.0f mm)" % (profname, L)
+    _store(obj, profname, p1, p2, twist, align, L)
     return obj
 
 
-def rebuild_member(obj, p1, p2, profname, twist):
-    """Replace a member's solid from a (possibly new) skeleton/profile."""
-    b = profiles.builder_for(profname)
-    if b is None:
+def rebuild_member(obj, p1, p2, profname, twist, align):
+    face = build_face(profname, align)
+    if face is None:
         return False
-    d = p2.sub(p1)
+    d = p2 - p1
     L = d.Length
     if L < TOL:
         return False
     try:
-        solid = b().extrude(FreeCAD.Vector(0, 0, L))
+        solid = face.extrude(FreeCAD.Vector(0, 0, L))
     except Exception as e:
         FreeCAD.Console.PrintError("DynFrame: rebuild failed (%s)\n" % e)
         return False
     obj.Shape = solid
     obj.Placement = orient_placement(p1, d, twist)
-    _set_prop(obj, "App::PropertyString", "MemberProfile", profname)
-    _set_prop(obj, "App::PropertyVector", "MemberStart", p1)
-    _set_prop(obj, "App::PropertyVector", "MemberEnd", p2)
-    _set_prop(obj, "App::PropertyLength", "MemberLength", L)
-    _set_prop(obj, "App::PropertyFloat", "MemberTwist", float(twist))
-    obj.Label = "%s (%.0f mm)" % (profname, L)
+    _store(obj, profname, p1, p2, twist, align, L)
     return True
 
 
 def _halfspace_box(point, remove_dir, size):
-    """A big box filling the half-space on the +remove_dir side of the plane
-    through `point` (normal = remove_dir)."""
-    rd = FreeCAD.Vector(remove_dir)
-    rd.normalize()
+    rd = unit(remove_dir)
     box = Part.makeBox(2 * size, 2 * size, 2 * size, FreeCAD.Vector(-size, -size, 0))
-    box.Placement = FreeCAD.Placement(FreeCAD.Vector(point), FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), rd))
+    box.Placement = FreeCAD.Placement(FreeCAD.Vector(point),
+                                      FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), rd))
     return box
 
 
@@ -285,26 +318,25 @@ class InsertMembers:
         edges = collect_edges()
         if not edges:
             info("Select one or more straight edges or sketch lines first.\n\n"
-                 "Tip: draw the frame centre-lines (a sketch rectangle, Draft "
-                 "wire, or 3D skeleton), select them, then run this.")
+                 "Tip: draw the frame centre-lines at real size (e.g. a 1000 mm "
+                 "sketch rectangle), select them, then run this.")
             return
-        picked = pick_profile()
-        if not picked:
+        name = pick_profile()
+        if not name:
             return
-        name, builder = picked
+        align, ok = get_item("Frame Generator  (3/3)",
+                             "Alignment (which profile point sits on the line):",
+                             ALIGN_OPTIONS, 0)
+        if not ok:
+            return
         twist, _ = get_double("Frame Generator", "Rotate profile about its axis (deg):",
                               0.0, -360.0, 360.0)
-        try:
-            face = builder()
-        except Exception as e:
-            err("Could not build profile '%s':\n%s" % (name, e))
-            return
         doc = FreeCAD.ActiveDocument
         doc.openTransaction("DynFrame: insert members")
         grp = group(doc)
         n = 0
         for p1, p2 in edges:
-            m = make_member(doc, face, p1, p2, name, twist)
+            m = make_member(doc, name, p1, p2, twist, align)
             if m:
                 grp.addObject(m)
                 n += 1
@@ -320,8 +352,8 @@ class InsertMembers:
 
 class ChangeProfile:
     def GetResources(self):
-        return {"Pixmap": _icon("member"), "MenuText": "Change Profile",
-                "ToolTip": "Replace the profile (and/or twist) of the selected members.",
+        return {"Pixmap": _icon("member"), "MenuText": "Change Profile / Align",
+                "ToolTip": "Change the profile, alignment or twist of selected members.",
                 "Accel": "F, P"}
 
     def IsActive(self):
@@ -332,17 +364,21 @@ class ChangeProfile:
         if not members:
             info("Select one or more frame members first.")
             return
-        picked = pick_profile()
-        if not picked:
+        name = pick_profile()
+        if not name:
             return
-        name, _ = picked
-        twist, _ = get_double("Change Profile", "Rotate profile about its axis (deg):",
+        cur = getattr(members[0], "MemberAlign", "Center")
+        align, ok = get_item("Change Profile", "Alignment:", ALIGN_OPTIONS,
+                             ALIGN_OPTIONS.index(cur) if cur in ALIGN_OPTIONS else 0)
+        if not ok:
+            return
+        twist, _ = get_double("Change Profile", "Rotate about axis (deg):",
                               float(getattr(members[0], "MemberTwist", 0.0)), -360.0, 360.0)
         doc = FreeCAD.ActiveDocument
         doc.openTransaction("DynFrame: change profile")
         for m in members:
             s, e = skeleton(m)
-            rebuild_member(m, s, e, name, twist)
+            rebuild_member(m, s, e, name, twist, align)
         doc.commitTransaction()
         doc.recompute()
 
@@ -350,7 +386,7 @@ class ChangeProfile:
 class LengthenShorten:
     def GetResources(self):
         return {"Pixmap": _icon("lengthen"), "MenuText": "Lengthen / Shorten",
-                "ToolTip": "Extend (+) or shorten (-) the selected members at each end.",
+                "ToolTip": "Extend (+) or shorten (-) selected members at each end.",
                 "Accel": "F, L"}
 
     def IsActive(self):
@@ -362,24 +398,32 @@ class LengthenShorten:
             info("Select one or more frame members first.")
             return
         d_start, ok = get_double("Lengthen / Shorten",
-                                 "Change at START end (mm, + extend / - shorten):", 0.0, -1e6, 1e6)
+                                 "Change at START end (mm, + extend / - shorten):",
+                                 0.0, -1e6, 1e6)
         if not ok:
             return
         d_end, ok = get_double("Lengthen / Shorten",
-                               "Change at END end (mm, + extend / - shorten):", 0.0, -1e6, 1e6)
+                               "Change at END end (mm, + extend / - shorten):",
+                               0.0, -1e6, 1e6)
         if not ok:
             return
         doc = FreeCAD.ActiveDocument
         doc.openTransaction("DynFrame: lengthen/shorten")
+        done = 0
         for m in members:
             s, e = skeleton(m)
-            d = e.sub(s)
-            d.normalize()
-            ns = s.sub(d.multiply(d_start))      # +start extends backwards past start
-            ne = e.add(d.multiply(d_end))
-            rebuild_member(m, ns, ne, getattr(m, "MemberProfile", ""), float(getattr(m, "MemberTwist", 0.0)))
+            d = unit(e - s)
+            ns = s - vscale(d, d_start)
+            ne = e + vscale(d, d_end)
+            if rebuild_member(m, ns, ne, getattr(m, "MemberProfile", ""),
+                              float(getattr(m, "MemberTwist", 0.0)),
+                              getattr(m, "MemberAlign", "Center")):
+                done += 1
         doc.commitTransaction()
         doc.recompute()
+        if done == 0:
+            warn("Could not resize the selected member(s) — are they DynFrame "
+                 "members with a known profile?")
 
 
 class TrimButt:
@@ -405,8 +449,8 @@ class TrimButt:
                 res = res.cut(global_shape(t))
             if res.Volume < TOL:
                 doc.abortTransaction()
-                warn("Trim would remove the whole member — check your selection "
-                     "(first = the one being trimmed).")
+                warn("Trim would remove the whole member — select the member to "
+                     "trim FIRST, then what it butts against.")
                 return
             target.Shape = res
             target.Placement = FreeCAD.Placement()
@@ -434,36 +478,32 @@ class Miter:
         m1, m2 = members
         s1, e1 = skeleton(m1)
         s2, e2 = skeleton(m2)
-        # shared corner = closest pair of skeleton endpoints
-        pairs = [(s1, e1, s2, e2), (s1, e1, e2, s2), (e1, s1, s2, e2), (e1, s1, e2, s2)]
-        c1, f1, c2, f2 = min(pairs, key=lambda p: p[0].distanceToPoint(p[2]))
+        cand = [(s1, e1, s2, e2), (s1, e1, e2, s2), (e1, s1, s2, e2), (e1, s1, e2, s2)]
+        c1, f1, c2, f2 = min(cand, key=lambda p: p[0].distanceToPoint(p[2]))
         gap = c1.distanceToPoint(c2)
         if gap > 5.0:
             warn("Those members don't meet at a corner (ends are %.1f mm apart)." % gap)
             return
         C = c1
-        d1 = f1.sub(c1)
-        d2 = f2.sub(c2)
-        if d1.Length < TOL or d2.Length < TOL:
-            return
-        d1.normalize()
-        d2.normalize()
-        n = d1.sub(d2)                       # bisector-plane normal, points to d1 side
+        d1 = unit(f1 - c1)
+        d2 = unit(f2 - c2)
+        n = d1 - d2
         if n.Length < 1e-4:
             warn("Members are collinear — nothing to miter.")
             return
-        n.normalize()
+        n = unit(n)
         L1 = s1.distanceToPoint(e1)
         L2 = s2.distanceToPoint(e2)
         S = max(L1, L2, 100.0) * 4.0 + 200.0
         doc = FreeCAD.ActiveDocument
         doc.openTransaction("DynFrame: miter")
         try:
-            g1 = global_shape(m1).cut(_halfspace_box(C, n.multiply(-1.0), S))   # keep d1 side
-            g2 = global_shape(m2).cut(_halfspace_box(C, n, S))                  # keep d2 side
+            g1 = global_shape(m1).cut(_halfspace_box(C, vscale(n, -1.0), S))
+            g2 = global_shape(m2).cut(_halfspace_box(C, n, S))
             if g1.Volume < TOL or g2.Volume < TOL:
                 doc.abortTransaction()
-                warn("Miter produced an empty result — check the two members share a corner.")
+                warn("Miter produced an empty result — check the two members "
+                     "share a corner.")
                 return
             m1.Shape, m1.Placement = g1, FreeCAD.Placement()
             m2.Shape, m2.Placement = g2, FreeCAD.Placement()
@@ -487,8 +527,7 @@ class TrimToFace:
         face = None
         members = []
         for so in FreeCADGui.Selection.getSelectionEx():
-            for sub, name in zip(getattr(so, "SubObjects", []) or [],
-                                 getattr(so, "SubElementNames", []) or []):
+            for sub in getattr(so, "SubObjects", []) or []:
                 if getattr(sub, "ShapeType", "") == "Face" and face is None:
                     face = sub
             if is_member(so.Object) and so.Object not in members:
@@ -497,22 +536,20 @@ class TrimToFace:
             info("Select the member(s) to trim AND one planar face to trim them to.")
             return
         try:
-            pt = face.Surface.Position if hasattr(face.Surface, "Position") else face.CenterOfMass
+            pt = face.CenterOfMass
             nrm = face.normalAt(0, 0)
         except Exception:
-            warn("That face isn't planar / usable. Pick a flat face.")
+            warn("Pick a flat (planar) face.")
             return
         doc = FreeCAD.ActiveDocument
         doc.openTransaction("DynFrame: trim to face")
         try:
             for m in members:
-                g = global_shape(m)
                 s, e = skeleton(m)
-                mid = s.add(e).multiply(0.5)
-                # remove the side of the plane that does NOT contain the member's midpoint
-                rd = FreeCAD.Vector(nrm) if (mid.sub(pt)).dot(nrm) < 0 else FreeCAD.Vector(nrm).multiply(-1.0)
+                mid = vscale(s + e, 0.5)
+                rd = FreeCAD.Vector(nrm) if (mid - pt).dot(nrm) < 0 else vscale(nrm, -1.0)
                 S = s.distanceToPoint(e) * 4.0 + 200.0
-                r = g.cut(_halfspace_box(pt, rd, S))
+                r = global_shape(m).cut(_halfspace_box(pt, rd, S))
                 if r.Volume > TOL:
                     m.Shape, m.Placement = r, FreeCAD.Placement()
             doc.commitTransaction()
@@ -537,8 +574,7 @@ class CutList:
         if not members:
             info("No frame members found yet.")
             return
-        rows = []
-        summ = {}
+        rows, summ = [], {}
         for m in members:
             prof = getattr(m, "MemberProfile", "?")
             s, e = skeleton(m)
@@ -592,8 +628,7 @@ class QuickFillet:
         return FreeCAD.ActiveDocument is not None
 
     def Activated(self):
-        base = None
-        idxs = []
+        base, idxs = None, []
         for so in FreeCADGui.Selection.getSelectionEx():
             for name in getattr(so, "SubElementNames", []) or []:
                 if name.startswith("Edge"):
@@ -690,30 +725,38 @@ class ExportStl:
 
 class Skeleton3D:
     def GetResources(self):
-        return {"Pixmap": _icon("sketch3d"), "MenuText": "3D Skeleton (Draft Wire)",
-                "ToolTip": "Draw a 3D centre-line skeleton with the Draft Wire "
-                           "tool, then insert members along it.", "Accel": "F, 3"}
+        return {"Pixmap": _icon("sketch3d"), "MenuText": "3D Skeleton (Draft)",
+                "ToolTip": "Switch to Draft to draw a 3D centre-line skeleton "
+                           "(Polyline), then insert members along it.", "Accel": "F, 3"}
 
     def IsActive(self):
         return True
 
     def Activated(self):
-        info("A 3D skeleton is drawn with FreeCAD's Draft 'Wire' (polyline) "
-             "tool, which works in 3D.\n\n"
-             "After you click OK:\n"
-             "1. The Draft workbench opens and the Wire tool starts.\n"
-             "2. Click points in 3D (type coordinates for exact points, or snap "
-             "to vertices). Double-click or press Esc to finish.\n"
-             "3. Switch back to DynFrame, select the wire, and run "
-             "Insert Frame Members.")
+        if FreeCAD.ActiveDocument is None:
+            FreeCAD.newDocument()
         try:
             FreeCADGui.activateWorkbench("DraftWorkbench")
-            if FreeCAD.ActiveDocument is None:
-                FreeCAD.newDocument()
-            FreeCADGui.runCommand("Draft_Wire")
         except Exception as e:
-            err("Could not start the Draft Wire tool:\n%s\n\nOpen the Draft "
-                "workbench manually and use the Polyline/Wire tool." % e)
+            err("Could not open the Draft workbench:\n%s" % e)
+            return
+        started = False
+        for cmd in ("Draft_Wire", "Draft_Polyline", "Draft_Line"):
+            try:
+                FreeCADGui.runCommand(cmd, 0)
+                started = True
+                break
+            except Exception:
+                continue
+        info("You're now in the Draft workbench.\n\n"
+             "Draw the 3D skeleton with the **Polyline** tool "
+             "(Drafting menu -> Polyline, or the polyline toolbar icon)%s:\n"
+             "  - click points in 3D (type X/Y/Z for exact points),\n"
+             "  - set the working plane or use snaps for other planes,\n"
+             "  - double-click or Esc to finish.\n\n"
+             "Then switch back to DynFrame, select the polyline(s), and run "
+             "Insert Frame Members."
+             % (" (it may already be active)" if started else ""))
 
 
 class InventorNav:
@@ -726,7 +769,8 @@ class InventorNav:
 
     def Activated(self):
         style, ok = get_item("Navigation style", "Mouse navigation preset:",
-                             ["SolidWorks", "Inventor (OpenInventor)", "CAD", "Revit", "Blender", "Touchpad"])
+                             ["SolidWorks", "Inventor (OpenInventor)", "CAD", "Revit",
+                              "Blender", "Touchpad"])
         if not ok:
             return
         mapping = {"SolidWorks": "Gui::SolidWorksNavigationStyle",

@@ -725,6 +725,64 @@ class TrimToFace:
             err("Trim to face failed:\n%s" % e)
 
 
+class ExtendToFace:
+    def GetResources(self):
+        return {"Pixmap": _icon("lengthen"), "MenuText": "Lengthen / Shorten to Face",
+                "ToolTip": "Extend or trim the selected member(s) along their axis "
+                           "so the nearest end lands on a selected planar face.",
+                "Accel": "F, E"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        face = None
+        members = []
+        for so in FreeCADGui.Selection.getSelectionEx():
+            for sub in getattr(so, "SubObjects", []) or []:
+                if getattr(sub, "ShapeType", "") == "Face" and face is None:
+                    face = sub
+            if is_member(so.Object) and so.Object not in members:
+                members.append(so.Object)
+        if face is None or not members:
+            info("Select the member(s) to resize AND one planar face to reach "
+                 "(click a flat face of another body/member).")
+            return
+        try:
+            pt = face.CenterOfMass
+            nrm = unit(face.normalAt(0, 0))
+        except Exception:
+            warn("Pick a flat (planar) face.")
+            return
+        doc = FreeCAD.ActiveDocument
+        doc.openTransaction("DynFrame: to face")
+        done = 0
+        for m in members:
+            if not is_member(m):
+                continue
+            s, e = skeleton(m)
+            axis = unit(e - s)
+            denom = axis.dot(nrm)
+            if abs(denom) < 1e-6:
+                continue  # member runs parallel to the face — can't reach it
+            t = (pt - s).dot(nrm) / denom
+            isect = s + vscale(axis, t)
+            if s.distanceToPoint(isect) <= e.distanceToPoint(isect):
+                np1, np2 = isect, e            # move the start end to the face
+            else:
+                np1, np2 = s, isect            # move the end to the face
+            if rebuild_member(m, np1, np2, getattr(m, "MemberProfile", ""),
+                              float(getattr(m, "MemberTwist", 0.0)),
+                              getattr(m, "MemberAlign", "Center"),
+                              float(getattr(m, "MemberOffX", 0.0)),
+                              float(getattr(m, "MemberOffY", 0.0))):
+                done += 1
+        doc.commitTransaction()
+        doc.recompute()
+        if done == 0:
+            warn("No member reached the face (they may be parallel to it).")
+
+
 class CutList:
     def GetResources(self):
         return {"Pixmap": _icon("cutlist"), "MenuText": "Generate Cut List",
@@ -999,6 +1057,7 @@ _add("DynFrame_LengthenShorten", LengthenShorten)
 _add("DynFrame_TrimButt", TrimButt)
 _add("DynFrame_Miter", Miter)
 _add("DynFrame_TrimToFace", TrimToFace)
+_add("DynFrame_ExtendToFace", ExtendToFace)
 _add("DynFrame_CutList", CutList)
 _add("DynFrame_QuickFillet", QuickFillet)
 _add("DynFrame_ExportStep", ExportStep)

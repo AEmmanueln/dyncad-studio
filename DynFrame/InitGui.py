@@ -42,8 +42,9 @@ class DynFrameWorkbench(FreeCADGui.Workbench):
             return
 
         frame = ["DynFrame_InsertMembers", "DynFrame_ChangeProfile",
-                 "DynFrame_LengthenShorten", "DynFrame_TrimButt",
-                 "DynFrame_Miter", "DynFrame_TrimToFace", "DynFrame_CutList"]
+                 "DynFrame_LengthenShorten", "DynFrame_ExtendToFace",
+                 "DynFrame_TrimButt", "DynFrame_Miter", "DynFrame_TrimToFace",
+                 "DynFrame_CutList"]
         skel = ["DynFrame_Skeleton3D"]
         model = ["DynFrame_QuickFillet"]
         io = ["DynFrame_ExportStep", "DynFrame_ExportStl"]

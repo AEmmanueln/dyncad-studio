@@ -82,16 +82,129 @@ def choose_dir(title):
     return QW.QFileDialog.getExistingDirectory(_mw(), title, "")
 
 
-def pick_profile():
+def _exec(dlg):
+    # PySide2 uses exec_(), PySide6 uses exec(); support both.
+    return dlg.exec_() if hasattr(dlg, "exec_") else dlg.exec()
+
+
+# 3x3 anchor grid (row = vertical, col = horizontal), matching apply_align.
+ANCHOR_GRID = [["Top-Left", "Top-Center", "Top-Right"],
+               ["Middle-Left", "Center", "Middle-Right"],
+               ["Bottom-Left", "Bottom-Center", "Bottom-Right"]]
+
+
+def frame_dialog(title, defaults=None):
+    """Single Inventor-style dialog: family + size + 9-point anchor +
+    rotation + offsets. Returns a dict or None (cancelled)."""
+    defaults = defaults or {}
     fams = profiles.families()
-    fam, ok = get_item("Frame Generator  (1/3)", "Profile family:", list(fams.keys()))
+    famnames = list(fams.keys())
+
+    dlg = QW.QDialog(_mw())
+    dlg.setWindowTitle(title)
+    outer = QW.QVBoxLayout(dlg)
+
+    # ---- Profile ----
+    pg = QW.QGroupBox("Profile")
+    pf = QW.QFormLayout(pg)
+    fam_cb = QW.QComboBox()
+    fam_cb.addItems(famnames)
+    size_cb = QW.QComboBox()
+
+    def refill():
+        size_cb.clear()
+        for nm, _b in fams[fam_cb.currentText()]:
+            size_cb.addItem(nm)
+
+    fam_cb.currentIndexChanged.connect(lambda *a: refill())
+    pf.addRow("Family:", fam_cb)
+    pf.addRow("Size:", size_cb)
+    outer.addWidget(pg)
+
+    # ---- Orientation ----
+    og = QW.QGroupBox("Orientation")
+    ov = QW.QVBoxLayout(og)
+    ov.addWidget(QW.QLabel("Anchor point (which profile point sits on the line):"))
+    grid = QW.QGridLayout()
+    grid.setHorizontalSpacing(24)
+    bgrp = QW.QButtonGroup(dlg)
+    radios = {}
+    for r in range(3):
+        for c in range(3):
+            rb = QW.QRadioButton(ANCHOR_GRID[r][c])
+            grid.addWidget(rb, r, c)
+            bgrp.addButton(rb)
+            radios[ANCHOR_GRID[r][c]] = rb
+    gwrap = QW.QWidget()
+    gwrap.setLayout(grid)
+    ov.addWidget(gwrap)
+
+    frm = QW.QFormLayout()
+    rot = QW.QDoubleSpinBox(); rot.setRange(-360.0, 360.0); rot.setSuffix("  deg")
+    ox = QW.QDoubleSpinBox(); ox.setRange(-1e5, 1e5); ox.setSuffix("  mm")
+    oy = QW.QDoubleSpinBox(); oy.setRange(-1e5, 1e5); oy.setSuffix("  mm")
+    frm.addRow("Rotate about axis:", rot)
+    frm.addRow("Offset X (horizontal):", ox)
+    frm.addRow("Offset Y (vertical):", oy)
+    ov.addLayout(frm)
+    outer.addWidget(og)
+
+    # ---- Buttons ----
+    bb = QW.QDialogButtonBox(QW.QDialogButtonBox.Ok | QW.QDialogButtonBox.Cancel)
+    bb.accepted.connect(dlg.accept)
+    bb.rejected.connect(dlg.reject)
+    outer.addWidget(bb)
+
+    # ---- defaults ----
+    if defaults.get("family") in famnames:
+        fam_cb.setCurrentText(defaults["family"])
+    refill()
+    if defaults.get("size"):
+        i = size_cb.findText(defaults["size"])
+        if i >= 0:
+            size_cb.setCurrentIndex(i)
+    (radios.get(defaults.get("align", "Center")) or radios["Center"]).setChecked(True)
+    rot.setValue(float(defaults.get("twist", 0.0)))
+    ox.setValue(float(defaults.get("offx", 0.0)))
+    oy.setValue(float(defaults.get("offy", 0.0)))
+
+    if not _exec(dlg):
+        return None
+    align = "Center"
+    for nm, rb in radios.items():
+        if rb.isChecked():
+            align = nm
+            break
+    return {"family": fam_cb.currentText(), "size": size_cb.currentText(),
+            "align": align, "twist": rot.value(), "offx": ox.value(), "offy": oy.value()}
+
+
+def _prompt_fallback(defaults=None):
+    """Sequential QInputDialog fallback if the rich dialog can't run."""
+    defaults = defaults or {}
+    fams = profiles.families()
+    fam, ok = get_item("Frame Generator (1/3)", "Profile family:", list(fams.keys()))
     if not ok:
         return None
     sizes = fams[fam]
-    name, ok = get_item("Frame Generator  (2/3)  -  " + fam, "Size:", [s[0] for s in sizes])
+    name, ok = get_item("Frame Generator (2/3)", "Size:", [s[0] for s in sizes])
     if not ok:
         return None
-    return name
+    align, ok = get_item("Frame Generator (3/3)", "Alignment:", ALIGN_OPTIONS, 0)
+    if not ok:
+        return None
+    twist, _ = get_double("Frame Generator", "Rotate about axis (deg):", 0.0, -360.0, 360.0)
+    return {"family": fam, "size": name, "align": align, "twist": twist, "offx": 0.0, "offy": 0.0}
+
+
+def get_frame_settings(title, defaults=None):
+    """Rich dialog with automatic fallback to simple prompts."""
+    try:
+        return frame_dialog(title, defaults)
+    except Exception as e:
+        FreeCAD.Console.PrintError("DynFrame: rich dialog unavailable, using "
+                                   "simple prompts (%s)\n" % e)
+        return _prompt_fallback(defaults)
 
 
 # ── geometry helpers ─────────────────────────────────────────────
@@ -107,9 +220,9 @@ def global_shape(obj):
     return g
 
 
-def apply_align(face, align):
+def apply_align(face, align, offx=0.0, offy=0.0):
     """Translate the (bbox-centred) profile so the chosen 9-point anchor sits
-    at the origin, i.e. on the skeleton line."""
+    at the origin (on the skeleton line), plus any extra X/Y offset."""
     if not align:
         align = "Center"
     bb = face.BoundBox
@@ -123,16 +236,16 @@ def apply_align(face, align):
     ax = xmap.get(xk, (bb.XMin + bb.XMax) / 2.0)
     ay = ymap.get(yk, (bb.YMin + bb.YMax) / 2.0)
     f = face.copy()
-    f.translate(FreeCAD.Vector(-ax, -ay, 0))
+    f.translate(FreeCAD.Vector(-ax + offx, -ay + offy, 0))
     return f
 
 
-def build_face(profname, align):
+def build_face(profname, align, offx=0.0, offy=0.0):
     b = profiles.builder_for(profname)
     if b is None:
         return None
     try:
-        return apply_align(b(), align)
+        return apply_align(b(), align, offx, offy)
     except Exception as e:
         FreeCAD.Console.PrintError("DynFrame: profile build failed (%s)\n" % e)
         return None
@@ -247,18 +360,20 @@ def orient_placement(p1, direction, twist_deg=0.0):
     return FreeCAD.Placement(m)
 
 
-def _store(obj, profname, p1, p2, twist, align, L):
+def _store(obj, profname, p1, p2, twist, align, offx, offy, L):
     _set(obj, "App::PropertyString", "MemberProfile", profname)
     _set(obj, "App::PropertyVector", "MemberStart", p1)
     _set(obj, "App::PropertyVector", "MemberEnd", p2)
     _set(obj, "App::PropertyLength", "MemberLength", L)
     _set(obj, "App::PropertyFloat", "MemberTwist", float(twist))
     _set(obj, "App::PropertyString", "MemberAlign", align)
+    _set(obj, "App::PropertyFloat", "MemberOffX", float(offx))
+    _set(obj, "App::PropertyFloat", "MemberOffY", float(offy))
     obj.Label = "%s (%.0f mm)" % (profname, L)
 
 
-def make_member(doc, profname, p1, p2, twist, align):
-    face = build_face(profname, align)
+def make_member(doc, profname, p1, p2, twist, align, offx=0.0, offy=0.0):
+    face = build_face(profname, align, offx, offy)
     if face is None:
         return None
     d = p2 - p1
@@ -273,12 +388,12 @@ def make_member(doc, profname, p1, p2, twist, align):
     obj = doc.addObject("Part::Feature", "Member")
     obj.Shape = solid
     obj.Placement = orient_placement(p1, d, twist)
-    _store(obj, profname, p1, p2, twist, align, L)
+    _store(obj, profname, p1, p2, twist, align, offx, offy, L)
     return obj
 
 
-def rebuild_member(obj, p1, p2, profname, twist, align):
-    face = build_face(profname, align)
+def rebuild_member(obj, p1, p2, profname, twist, align, offx=0.0, offy=0.0):
+    face = build_face(profname, align, offx, offy)
     if face is None:
         return False
     d = p2 - p1
@@ -292,7 +407,7 @@ def rebuild_member(obj, p1, p2, profname, twist, align):
         return False
     obj.Shape = solid
     obj.Placement = orient_placement(p1, d, twist)
-    _store(obj, profname, p1, p2, twist, align, L)
+    _store(obj, profname, p1, p2, twist, align, offx, offy, L)
     return True
 
 
@@ -321,22 +436,16 @@ class InsertMembers:
                  "Tip: draw the frame centre-lines at real size (e.g. a 1000 mm "
                  "sketch rectangle), select them, then run this.")
             return
-        name = pick_profile()
-        if not name:
+        res = get_frame_settings("DynFrame - Insert Frame Members")
+        if not res:
             return
-        align, ok = get_item("Frame Generator  (3/3)",
-                             "Alignment (which profile point sits on the line):",
-                             ALIGN_OPTIONS, 0)
-        if not ok:
-            return
-        twist, _ = get_double("Frame Generator", "Rotate profile about its axis (deg):",
-                              0.0, -360.0, 360.0)
         doc = FreeCAD.ActiveDocument
         doc.openTransaction("DynFrame: insert members")
         grp = group(doc)
         n = 0
         for p1, p2 in edges:
-            m = make_member(doc, name, p1, p2, twist, align)
+            m = make_member(doc, res["size"], p1, p2, res["twist"], res["align"],
+                            res["offx"], res["offy"])
             if m:
                 grp.addObject(m)
                 n += 1
@@ -364,21 +473,27 @@ class ChangeProfile:
         if not members:
             info("Select one or more frame members first.")
             return
-        name = pick_profile()
-        if not name:
+        m0 = members[0]
+        prof = getattr(m0, "MemberProfile", "")
+        fam = ""
+        for fn, sizes in profiles.families().items():
+            if any(s[0] == prof for s in sizes):
+                fam = fn
+                break
+        res = get_frame_settings("DynFrame - Change Profile / Align", {
+            "family": fam, "size": prof,
+            "align": getattr(m0, "MemberAlign", "Center"),
+            "twist": float(getattr(m0, "MemberTwist", 0.0)),
+            "offx": float(getattr(m0, "MemberOffX", 0.0)),
+            "offy": float(getattr(m0, "MemberOffY", 0.0))})
+        if not res:
             return
-        cur = getattr(members[0], "MemberAlign", "Center")
-        align, ok = get_item("Change Profile", "Alignment:", ALIGN_OPTIONS,
-                             ALIGN_OPTIONS.index(cur) if cur in ALIGN_OPTIONS else 0)
-        if not ok:
-            return
-        twist, _ = get_double("Change Profile", "Rotate about axis (deg):",
-                              float(getattr(members[0], "MemberTwist", 0.0)), -360.0, 360.0)
         doc = FreeCAD.ActiveDocument
         doc.openTransaction("DynFrame: change profile")
         for m in members:
             s, e = skeleton(m)
-            rebuild_member(m, s, e, name, twist, align)
+            rebuild_member(m, s, e, res["size"], res["twist"], res["align"],
+                           res["offx"], res["offy"])
         doc.commitTransaction()
         doc.recompute()
 
@@ -417,7 +532,9 @@ class LengthenShorten:
             ne = e + vscale(d, d_end)
             if rebuild_member(m, ns, ne, getattr(m, "MemberProfile", ""),
                               float(getattr(m, "MemberTwist", 0.0)),
-                              getattr(m, "MemberAlign", "Center")):
+                              getattr(m, "MemberAlign", "Center"),
+                              float(getattr(m, "MemberOffX", 0.0)),
+                              float(getattr(m, "MemberOffY", 0.0))):
                 done += 1
         doc.commitTransaction()
         doc.recompute()

@@ -41,9 +41,10 @@ class DynFrameWorkbench(FreeCADGui.Workbench):
                                        + traceback.format_exc())
             return
 
-        frame = ["DynFrame_InsertMembers", "DynFrame_ChangeProfile",
-                 "DynFrame_LengthenShorten", "DynFrame_ExtendToFace",
-                 "DynFrame_TrimButt", "DynFrame_Miter", "DynFrame_TrimToFace"]
+        frame = ["DynFrame_InsertMembers", "DynFrame_RebuildFromSketch",
+                 "DynFrame_ChangeProfile", "DynFrame_LengthenShorten",
+                 "DynFrame_ExtendToFace", "DynFrame_TrimButt", "DynFrame_Miter",
+                 "DynFrame_TrimToFace"]
         pattern = ["DynFrame_MirrorMembers", "DynFrame_RectPattern",
                    "DynFrame_CircPattern"]
         skel = ["DynFrame_Skeleton3D"]

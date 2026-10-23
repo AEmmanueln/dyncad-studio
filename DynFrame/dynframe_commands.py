@@ -291,25 +291,41 @@ def _edges_of(shp, out):
 
 
 def collect_edges():
+    """Return (p1, p2, source_name, edge_index) for each selected straight
+    edge, so each member can remember the sketch edge it came from and be
+    rebuilt if the sketch moves."""
     out = []
     for so in FreeCADGui.Selection.getSelectionEx():
+        obj = so.Object
+        names = list(getattr(so, "SubElementNames", []) or [])
         subs = list(getattr(so, "SubObjects", []) or [])
-        if subs:
-            for s in subs:
-                _edges_of(s, out)
-        else:
-            obj = so.Object
-            if getattr(obj, "Shape", None) is not None:
-                try:
-                    _edges_of(global_shape(obj), out)
-                except Exception:
-                    _edges_of(obj.Shape, out)
+        if names:
+            for nm, sub in zip(names, subs):
+                if nm.startswith("Edge") and getattr(sub, "ShapeType", "") == "Edge" \
+                        and len(sub.Vertexes) >= 2:
+                    a = FreeCAD.Vector(sub.Vertexes[0].Point)
+                    b = FreeCAD.Vector(sub.Vertexes[-1].Point)
+                    if a.distanceToPoint(b) > TOL:
+                        try:
+                            idx = int(nm[4:])
+                        except Exception:
+                            idx = 0
+                        out.append((a, b, obj.Name, idx))
+        elif getattr(obj, "Shape", None) is not None:
+            try:
+                g = global_shape(obj)
+            except Exception:
+                g = obj.Shape
+            for i, e in enumerate(g.Edges, start=1):
+                if len(e.Vertexes) >= 2:
+                    a = FreeCAD.Vector(e.Vertexes[0].Point)
+                    b = FreeCAD.Vector(e.Vertexes[-1].Point)
+                    if a.distanceToPoint(b) > TOL:
+                        out.append((a, b, obj.Name, i))
     uniq = []
-    for a, b in out:
-        if not any((a.distanceToPoint(c) < 1e-4 and b.distanceToPoint(d) < 1e-4) or
-                   (a.distanceToPoint(d) < 1e-4 and b.distanceToPoint(c) < 1e-4)
-                   for c, d in uniq):
-            uniq.append((a, b))
+    for a, b, src, idx in out:
+        if not any(s == src and ix == idx for _, _, s, ix in uniq):
+            uniq.append((a, b, src, idx))
     return uniq
 
 
@@ -489,10 +505,12 @@ class InsertMembers:
         doc.openTransaction("DynFrame: insert members")
         grp = group(doc)
         n = 0
-        for p1, p2 in edges:
+        for p1, p2, src, idx in edges:
             m = make_member(doc, res["size"], p1, p2, res["twist"], res["align"],
                             res["offx"], res["offy"])
             if m:
+                _set(m, "App::PropertyString", "MemberSource", src)
+                _set(m, "App::PropertyInteger", "MemberSourceIndex", idx)
                 grp.addObject(m)
                 n += 1
         doc.commitTransaction()
@@ -1509,6 +1527,57 @@ class BOM:
             info("Spreadsheet 'BOM' added (total steel mass %.1f kg)." % tot_mass)
 
 
+class RebuildFromSketch:
+    def GetResources(self):
+        return {"Pixmap": _icon("rebuild"), "MenuText": "Rebuild Members from Sketch",
+                "ToolTip": "Re-fit members to their source sketch edges after you "
+                           "move the sketch. Regenerates members (per-member "
+                           "miters/trims are reset).", "Accel": "F, U"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        doc = FreeCAD.ActiveDocument
+        sel = [m for m in selected_members() if is_member(m) and getattr(m, "MemberSource", "")]
+        members = sel or [o for o in doc.Objects if is_member(o) and getattr(o, "MemberSource", "")]
+        if not members:
+            info("No members are linked to a sketch.\n\nMembers created with "
+                 "Insert Frame Members (by selecting sketch/edge geometry) remember "
+                 "their source and can be rebuilt here.")
+            return
+        rebuilt = skipped = 0
+        doc.openTransaction("DynFrame: rebuild from sketch")
+        for m in members:
+            src = doc.getObject(getattr(m, "MemberSource", ""))
+            idx = int(getattr(m, "MemberSourceIndex", 0) or 0)
+            if src is None or getattr(src, "Shape", None) is None or idx < 1:
+                skipped += 1
+                continue
+            try:
+                g = global_shape(src)
+                e = g.Edges[idx - 1]
+                a = FreeCAD.Vector(e.Vertexes[0].Point)
+                b = FreeCAD.Vector(e.Vertexes[-1].Point)
+            except Exception:
+                skipped += 1
+                continue
+            if rebuild_member(m, a, b, getattr(m, "MemberProfile", ""),
+                              float(getattr(m, "MemberTwist", 0.0)),
+                              getattr(m, "MemberAlign", "Center"),
+                              float(getattr(m, "MemberOffX", 0.0)),
+                              float(getattr(m, "MemberOffY", 0.0))):
+                rebuilt += 1
+            else:
+                skipped += 1
+        doc.commitTransaction()
+        doc.recompute()
+        info("Rebuilt %d member(s) from their sketch%s.\n\nNote: this regenerates "
+             "members from the current sketch geometry, so any per-member miters, "
+             "trims or holes are reset — re-apply them after." %
+             (rebuilt, "" if skipped == 0 else " (%d skipped)" % skipped))
+
+
 # ── register ─────────────────────────────────────────────────────
 def _add(name, cls):
     try:
@@ -1518,6 +1587,7 @@ def _add(name, cls):
 
 
 _add("DynFrame_InsertMembers", InsertMembers)
+_add("DynFrame_RebuildFromSketch", RebuildFromSketch)
 _add("DynFrame_ChangeProfile", ChangeProfile)
 _add("DynFrame_LengthenShorten", LengthenShorten)
 _add("DynFrame_TrimButt", TrimButt)

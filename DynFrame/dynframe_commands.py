@@ -411,6 +411,35 @@ def rebuild_member(obj, p1, p2, profname, twist, align, offx=0.0, offy=0.0):
     return True
 
 
+def member_solid_global(obj, p1, p2):
+    """Build a member's solid (from its stored profile settings) along p1->p2,
+    returned in global coords with identity placement."""
+    face = build_face(getattr(obj, "MemberProfile", ""),
+                      getattr(obj, "MemberAlign", "Center"),
+                      float(getattr(obj, "MemberOffX", 0.0)),
+                      float(getattr(obj, "MemberOffY", 0.0)))
+    if face is None:
+        return None
+    d = p2 - p1
+    L = d.Length
+    if L < TOL:
+        return None
+    solid = face.extrude(FreeCAD.Vector(0, 0, L))
+    solid.transformShape(orient_placement(p1, d, float(getattr(obj, "MemberTwist", 0.0))).toMatrix())
+    return solid
+
+
+def _prof_diag(obj):
+    face = build_face(getattr(obj, "MemberProfile", ""),
+                      getattr(obj, "MemberAlign", "Center"),
+                      float(getattr(obj, "MemberOffX", 0.0)),
+                      float(getattr(obj, "MemberOffY", 0.0)))
+    if face is None:
+        return 100.0
+    bb = face.BoundBox
+    return ((bb.XMax - bb.XMin) ** 2 + (bb.YMax - bb.YMin) ** 2) ** 0.5
+
+
 def _halfspace_box(point, remove_dir, size):
     rd = unit(remove_dir)
     box = Part.makeBox(2 * size, 2 * size, 2 * size, FreeCAD.Vector(-size, -size, 0))
@@ -593,13 +622,16 @@ class Miter:
             info("Select exactly two members that meet at a corner.")
             return
         m1, m2 = members
+        if not (is_member(m1) and is_member(m2)):
+            info("Both selections must be DynFrame members.")
+            return
         s1, e1 = skeleton(m1)
         s2, e2 = skeleton(m2)
         cand = [(s1, e1, s2, e2), (s1, e1, e2, s2), (e1, s1, s2, e2), (e1, s1, e2, s2)]
         c1, f1, c2, f2 = min(cand, key=lambda p: p[0].distanceToPoint(p[2]))
-        gap = c1.distanceToPoint(c2)
-        if gap > 5.0:
-            warn("Those members don't meet at a corner (ends are %.1f mm apart)." % gap)
+        if c1.distanceToPoint(c2) > 50.0:
+            warn("Those members don't meet at a corner (ends are %.1f mm apart)."
+                 % c1.distanceToPoint(c2))
             return
         C = c1
         d1 = unit(f1 - c1)
@@ -609,21 +641,38 @@ class Miter:
             warn("Members are collinear — nothing to miter.")
             return
         n = unit(n)
-        L1 = s1.distanceToPoint(e1)
-        L2 = s2.distanceToPoint(e2)
-        S = max(L1, L2, 100.0) * 4.0 + 200.0
+
+        # Extend each member past the corner so the solids fully overlap across
+        # the bisector plane; the cut then leaves faces that actually meet
+        # (otherwise an I-beam miter leaves a gap at the corner).
+        ext = max(_prof_diag(m1), _prof_diag(m2)) * 1.5 + 20.0
+
+        def extend(s, e):
+            # push whichever endpoint is the corner outward, past C, by ext
+            if s.distanceToPoint(C) <= e.distanceToPoint(C):
+                return s + vscale(unit(s - e), ext), e
+            return s, e + vscale(unit(e - s), ext)
+
+        es1, ee1 = extend(s1, e1)
+        es2, ee2 = extend(s2, e2)
+        g1 = member_solid_global(m1, es1, ee1)
+        g2 = member_solid_global(m2, es2, ee2)
+        if g1 is None or g2 is None:
+            err("Could not rebuild the members for mitering.")
+            return
+        S = (max(s1.distanceToPoint(e1), s2.distanceToPoint(e2)) + ext) * 2.0 + 200.0
         doc = FreeCAD.ActiveDocument
         doc.openTransaction("DynFrame: miter")
         try:
-            g1 = global_shape(m1).cut(_halfspace_box(C, vscale(n, -1.0), S))
-            g2 = global_shape(m2).cut(_halfspace_box(C, n, S))
-            if g1.Volume < TOL or g2.Volume < TOL:
+            r1 = g1.cut(_halfspace_box(C, vscale(n, -1.0), S))   # keep d1 side
+            r2 = g2.cut(_halfspace_box(C, n, S))                 # keep d2 side
+            if r1.Volume < TOL or r2.Volume < TOL:
                 doc.abortTransaction()
                 warn("Miter produced an empty result — check the two members "
                      "share a corner.")
                 return
-            m1.Shape, m1.Placement = g1, FreeCAD.Placement()
-            m2.Shape, m2.Placement = g2, FreeCAD.Placement()
+            m1.Shape, m1.Placement = r1, FreeCAD.Placement()
+            m2.Shape, m2.Placement = r2, FreeCAD.Placement()
             doc.commitTransaction()
             doc.recompute()
         except Exception as e:
@@ -852,28 +901,61 @@ class Skeleton3D:
     def Activated(self):
         if FreeCAD.ActiveDocument is None:
             FreeCAD.newDocument()
+        # Reliable path: type the 3D points and build a wire skeleton.
+        default = "0 0 0\n1000 0 0\n1000 1000 0\n0 1000 0\n0 0 0\n0 0 1000"
+        text, ok = None, False
+        try:
+            text, ok = QW.QInputDialog.getMultiLineText(
+                _mw(), "3D Skeleton",
+                "Enter skeleton points, one 'X Y Z' per line (mm).\n"
+                "Each consecutive pair becomes a member edge.\n"
+                "Leave blank and press OK to draw interactively with Draft instead:",
+                default)
+        except Exception:
+            ok = False
+        if ok and text and text.strip():
+            pts = []
+            for line in text.splitlines():
+                p = line.replace(",", " ").split()
+                if len(p) >= 3:
+                    try:
+                        pts.append(FreeCAD.Vector(float(p[0]), float(p[1]), float(p[2])))
+                    except Exception:
+                        pass
+            if len(pts) < 2:
+                warn("Need at least two valid points.")
+                return
+            doc = FreeCAD.ActiveDocument
+            doc.openTransaction("DynFrame: 3D skeleton")
+            o = doc.addObject("Part::Feature", "Skeleton3D")
+            o.Shape = Part.makePolygon(pts)
+            doc.commitTransaction()
+            doc.recompute()
+            try:
+                FreeCADGui.Selection.clearSelection()
+                FreeCADGui.Selection.addSelection(o)
+                FreeCADGui.activeDocument().activeView().viewAxonometric()
+                FreeCADGui.SendMsgToActiveView("ViewFit")
+            except Exception:
+                pass
+            info("3D skeleton created and selected. Run 'Insert Frame Members' "
+                 "to build members along it.")
+            return
+        # Interactive fallback: Draft Polyline.
         try:
             FreeCADGui.activateWorkbench("DraftWorkbench")
+            for cmd in ("Draft_Wire", "Draft_Polyline", "Draft_Line"):
+                try:
+                    FreeCADGui.runCommand(cmd, 0)
+                    break
+                except Exception:
+                    continue
         except Exception as e:
             err("Could not open the Draft workbench:\n%s" % e)
             return
-        started = False
-        for cmd in ("Draft_Wire", "Draft_Polyline", "Draft_Line"):
-            try:
-                FreeCADGui.runCommand(cmd, 0)
-                started = True
-                break
-            except Exception:
-                continue
-        info("You're now in the Draft workbench.\n\n"
-             "Draw the 3D skeleton with the **Polyline** tool "
-             "(Drafting menu -> Polyline, or the polyline toolbar icon)%s:\n"
-             "  - click points in 3D (type X/Y/Z for exact points),\n"
-             "  - set the working plane or use snaps for other planes,\n"
-             "  - double-click or Esc to finish.\n\n"
-             "Then switch back to DynFrame, select the polyline(s), and run "
-             "Insert Frame Members."
-             % (" (it may already be active)" if started else ""))
+        info("Draft workbench opened. Use the Polyline tool to draw a 3D "
+             "skeleton (type X/Y/Z for each point, Esc to finish), then switch "
+             "back to DynFrame, select it, and Insert Frame Members.")
 
 
 class InventorNav:

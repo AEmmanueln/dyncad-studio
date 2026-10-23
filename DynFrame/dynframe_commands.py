@@ -628,6 +628,10 @@ class TrimButt:
             res = global_shape(target)
             for t in tools:
                 res = res.cut(global_shape(t))
+            try:
+                res = res.removeSplitter()
+            except Exception:
+                pass
             if res.Volume < TOL:
                 doc.abortTransaction()
                 warn("Trim would remove the whole member — select the member to "
@@ -709,6 +713,13 @@ class Miter:
         try:
             r1 = g1.cut(_halfspace_box(C, vscale(n, -1.0), S))   # keep d1 side
             r2 = g2.cut(_halfspace_box(C, n, S))                 # keep d2 side
+            # merge the coplanar faces left by the fuse+cut so there are no
+            # stray seam edges ("strange cuts") on the member.
+            try:
+                r1 = r1.removeSplitter()
+                r2 = r2.removeSplitter()
+            except Exception:
+                pass
             if r1.Volume < TOL or r2.Volume < TOL:
                 doc.abortTransaction()
                 warn("Miter produced an empty result — check the two members "
@@ -978,6 +989,10 @@ class HoleFeature:
         doc.openTransaction("DynFrame: hole")
         try:
             result = base.cut(tool)
+            try:
+                result = result.removeSplitter()
+            except Exception:
+                pass
             if result.Volume < TOL:
                 doc.abortTransaction()
                 warn("The hole removed the whole part — check the diameter/position.")
@@ -1535,26 +1550,34 @@ _PLANE_TO_UV = {"XY": lambda p: (p.x, p.y),
                 "YZ": lambda p: (p.y, p.z)}
 
 
-def solve_profile(pts, close, slope=0.36):
+def solve_profile(pts, close, dims=None, slope=0.36):
     """Square up a rough 2D profile with the constraint solver: segments
-    within ~20deg of an axis are constrained horizontal/vertical, then
-    solved. Returns the cleaned [(u, v), ...] or None. Validated against
-    python-solvespace."""
+    within ~20deg of an axis are constrained horizontal/vertical; optional
+    driving dimensions `dims` = [(segment_1based, length), ...] pin exact
+    segment lengths. Returns the cleaned [(u, v), ...] or None. Validated
+    against python-solvespace."""
     from python_solvespace import SolverSystem, ResultFlag
     ss = SolverSystem()
     wp = ss.create_2d_base()
     P = [ss.add_point_2d(x, y, wp) for (x, y) in pts]
     ss.dragged(P[0], wp)
     n = len(P)
-    for i in range(n if close else n - 1):
+    nseg = n if close else n - 1
+    segs = []
+    for i in range(nseg):
         a, b = i, (i + 1) % n
         ln = ss.add_line_2d(P[a], P[b], wp)
+        segs.append((a, b))
         dx = pts[b][0] - pts[a][0]
         dy = pts[b][1] - pts[a][1]
         if abs(dy) <= slope * abs(dx):
             ss.horizontal(ln, wp)
         elif abs(dx) <= slope * abs(dy):
             ss.vertical(ln, wp)
+    for (i, length) in (dims or []):
+        if 1 <= i <= nseg and float(length) > 0:
+            a, b = segs[i - 1]
+            ss.distance(P[a], P[b], float(length), wp)
     if ss.solve() != ResultFlag.OKAY:
         return None
     return [tuple(ss.params(p.params)) for p in P]
@@ -1633,7 +1656,25 @@ class ConstrainedSketch:
             return
         close = cl == "Yes"
 
-        solved = solve_profile(pts, close)
+        # optional driving dimensions: "segment length" per line (1-based segments)
+        dims = []
+        try:
+            dtext, dok = QW.QInputDialog.getMultiLineText(
+                _mw(), "Constrained Sketch - Dimensions (optional)",
+                "Pin exact segment lengths? One 'segment length' per line "
+                "(segment 1 = first point to second), or leave blank:", "")
+        except Exception:
+            dok, dtext = False, ""
+        if dok and dtext.strip():
+            for line in dtext.splitlines():
+                p = line.replace(",", " ").split()
+                if len(p) >= 2:
+                    try:
+                        dims.append((int(float(p[0])), float(p[1])))
+                    except Exception:
+                        pass
+
+        solved = solve_profile(pts, close, dims)
         if solved is None:
             warn("The solver could not satisfy the constraints — try a rougher "
                  "profile that is clearly near right angles.")

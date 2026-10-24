@@ -105,16 +105,40 @@ model is what you analyse. Commands are on the toolbars/menus
 10. **Clear Results** — remove results only, or everything (supports, loads,
     combinations).
 
+*Design & dynamics (DynFrame · Loads / Results):*
+- **Member Releases** — free member end DOFs: moment releases for a pinned
+  connection, or pin both ends for a truss member (presets). Handled by
+  static condensation; non-released members are unaffected.
+- **Nodal Load** also takes **moments** Mx / My / Mz, not just forces.
+- **Envelope (all combinations)** — solves every combination and keeps the
+  worst axial / My / Mz / utilisation per member (the design envelope),
+  colours members by it, and stores the governing forces so the code check
+  runs against the envelope.
+- **Steel Code Check (EC3)** — verifies steel members to EN 1993-1-1
+  (simplified, user γ-factors): cross-section resistance, flexural buckling
+  (both axes, curve a–d), the N+M interaction, and lateral-torsional
+  buckling → utilisation, governing check and OK/FAIL per member, coloured
+  green→red, in a `CodeCheck` table.
+- **Modal Analysis** — natural frequencies and mode shapes (consistent-mass
+  eigenvalue analysis, each bar meshed into sub-elements); first *N*
+  frequencies in a `ModalFrequencies` table, Mode 1 drawn as a mode-shape
+  tube.
+
 **Materials:** Steel S235 / S275 / S355, Stainless 304, Aluminium 6061-T6
 (each with its own E, G, yield and density). Edit `MATERIALS` in
 `dynframe_commands.py` to add more.
 
-> The solver is validated to zero error against textbook cases in both
-> bending planes — cantilever (point and UDL), simply-supported and
-> fixed-fixed beams (tip = wL⁴/8EI, mid = 5wL⁴/384EI, M = wL²/8, end =
-> wL²/12), all six force components, and load-case superposition — and
-> solves portal/space frames on the line model. It is **linear static
-> only**; modal, buckling, seismic and code-checks are later phases.
+> **Validation** (all numeric, against closed-form solutions): the static
+> solver is exact in both bending planes — cantilever (point and UDL),
+> simply-supported and fixed-fixed beams (tip = wL⁴/8EI, mid = 5wL⁴/384EI,
+> M = wL²/8, end = wL²/12), all six force components and load-case
+> superposition; **releases** reproduce the propped cantilever (wL²/8);
+> **modal** matches the cantilever f₁ = (1.875²/2π)·√(EI/ρAL⁴) to four
+> figures; the **EC3** buckling reduction factors match the code tables and
+> a worked column check (χ = 0.441, Nb,Rd = 558 kN). It is **linear static
+> + modal**; second-order (P-Δ), buckling-load and seismic analysis, and a
+> full (non-simplified) code check are later phases. FreeCAD is not Robot —
+> this reproduces Robot's *workflow and core engineering* on its kernel.
 
 **Modeling / export / setup**
 - **Quick Fillet** — fillet selected solid edges by a radius.

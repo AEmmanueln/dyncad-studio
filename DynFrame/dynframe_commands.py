@@ -1785,8 +1785,11 @@ def _beam_T(n1, n2):
     return T, L
 
 
-def _section_props(obj):
-    face = build_face(getattr(obj, "MemberProfile", ""), "Center", 0.0, 0.0)
+def _section_props_from_name(name):
+    """Section properties (A, Iy, Iz, J, c) from a profile name in the library.
+    Works for both solid members and line bars (the analysis entity carries a
+    section name, never a swept solid)."""
+    face = build_face(name, "Center", 0.0, 0.0)
     if face is None:
         return None
     A = face.Area
@@ -1802,13 +1805,47 @@ def _section_props(obj):
     return A, Iy, Iz, J, c
 
 
-# ── Frame analysis — Robot-style workflow ────────────────────────
-# Model it the way Autodesk Robot does: organise loads into named LOAD
-# CASES (Dead / Live / Wind / Snow), build code COMBINATIONS (ULS / SLS)
-# from them, CALCULATE a chosen case or combination, then read the results
-# as switchable N / V / M force diagrams and reaction / displacement /
-# bar-force tables.  Linear-static direct stiffness (6 DOF/node), validated
-# to zero error against textbook beams in both bending planes.
+def _section_props(obj):
+    return _section_props_from_name(getattr(obj, "MemberProfile", ""))
+
+
+# ── materials (name -> E, G, Fy, density) in N/mm^2 and kg/mm^3 ──────
+MATERIALS = {
+    "Steel S235": (210000.0, 80769.0, 235.0, 7.85e-6),
+    "Steel S275": (210000.0, 80769.0, 275.0, 7.85e-6),
+    "Steel S355": (210000.0, 80769.0, 355.0, 7.85e-6),
+    "Stainless 304": (193000.0, 74000.0, 215.0, 7.90e-6),
+    "Aluminium 6061-T6": (70000.0, 26000.0, 240.0, 2.70e-6),
+}
+DEFAULT_MAT = "Steel S235"
+
+
+def _material(name):
+    """Return (E, G, Fy, rho) for a material name, defaulting to steel."""
+    return MATERIALS.get(name, MATERIALS[DEFAULT_MAT])
+
+
+def _ramp(t):
+    """Continuous blue->cyan->green->yellow->red colour ramp, t in [0, 1]."""
+    t = 0.0 if t < 0.0 else (1.0 if t > 1.0 else t)
+    if t < 0.25:
+        f = t / 0.25; return (0.0, f, 1.0)
+    if t < 0.5:
+        f = (t - 0.25) / 0.25; return (0.0, 1.0, 1.0 - f)
+    if t < 0.75:
+        f = (t - 0.5) / 0.25; return (f, 1.0, 0.0)
+    f = (t - 0.75) / 0.25; return (1.0, 1.0 - f, 0.0)
+
+
+# ── Frame analysis — Robot-style line/stick model ────────────────
+# The analysis entity is a BAR: a line (two nodes) carrying a section and a
+# material, not a swept solid. That is how Robot Structural Analysis works
+# and it is what scales to large models (a high-rise is thousands of lines,
+# which would be impossible as solids). Workflow: build the line model
+# (draw lines + section, convert members, or node/bar tables) -> supports ->
+# load cases -> loads -> combinations -> Calculate -> gradient N/V/M diagrams
+# and node/bar/reaction/displacement/force tables. The solver is the same
+# validated 3D direct-stiffness core (6 DOF/node).
 SUPPORT_TYPES = {"Fixed (all 6)": "111111", "Pinned (Ux Uy Uz)": "111000",
                  "Roller Z (Uz only)": "001000", "Roller X (Ux only)": "100000",
                  "Roller Y (Uy only)": "010000"}
@@ -1817,20 +1854,18 @@ SUP_GROUP = "Supports"
 LOAD_GROUP = "Loads"
 RES_GROUP = "Results"
 DIA_GROUP = "Force Diagrams"
-META_NAME = "DynFrameAnalysis"            # internal Name of the settings object
-DIAG_KINDS = ["N", "Vy", "Vz", "Mx", "My", "Mz"]
+STR_GROUP = "Structure"
+META_NAME = "DynFrameAnalysis"
+DIAG_KINDS = ["N", "Vy", "Vz", "Mx", "My", "Mz", "Stress"]
 
 
 def _fef_udl(w_global, R, L):
     """Local 12-dof consistent nodal-load vector for a uniform load given in
-    GLOBAL coords, on an element whose rotation R (3x3, rows = local axes
-    expressed in global) comes from _beam_T. The local-z-bending moment terms
-    (f[4], f[10]) are negated relative to the usual textbook vector because
-    that plane of _beam_k_local uses the opposite transverse-rotation sign
-    (k[uz, ry] = -6EIy/L^2, while k[uy, rz] = +6EIz/L^2). With these signs the
-    nodal deflections are exact for one element per member; validated to zero
-    error against cantilever, simply-supported and fixed-fixed UDL beams in
-    both planes (tip wL^4/8EI, mid 5wL^4/384EI, M = wL^2/8, end wL^2/12)."""
+    GLOBAL coords (R from _beam_T). The local-z-bending moment terms (f[4],
+    f[10]) are negated because that plane of _beam_k_local uses the opposite
+    transverse-rotation sign (k[uz,ry]=-6EIy/L^2, k[uy,rz]=+6EIz/L^2). Gives
+    exact nodal deflections at one element per member; validated to zero error
+    against cantilever / simply-supported / fixed-fixed UDL beams, both planes."""
     import numpy as np
     wl = R @ np.array([w_global.x, w_global.y, w_global.z])
     wx, wy, wz = float(wl[0]), float(wl[1]), float(wl[2])
@@ -1844,7 +1879,6 @@ def _fef_udl(w_global, R, L):
 
 
 def _grp(doc, label):
-    """Find (by Label) or create a document group."""
     for o in doc.Objects:
         if o.TypeId == "App::DocumentObjectGroup" and o.Label == label:
             return o
@@ -1854,8 +1888,6 @@ def _grp(doc, label):
 
 
 def _meta(doc):
-    """Persistent settings object holding the load cases and combinations as
-    string-list properties (robust to read back, unlike spreadsheet cells)."""
     o = doc.getObject(META_NAME)
     if o is None:
         o = doc.addObject("App::DocumentObjectGroup", META_NAME)
@@ -1871,14 +1903,12 @@ def _meta(doc):
 
 
 def _cases(doc):
-    """Return [(name, nature), ...]; seed a default Dead case if none exist."""
     m = _meta(doc)
     names = list(getattr(m, "CaseNames", []) or [])
     nats = list(getattr(m, "CaseNatures", []) or [])
     if not names:
         names, nats = ["DL1"], ["Dead"]
-        m.CaseNames = names
-        m.CaseNatures = nats
+        m.CaseNames = names; m.CaseNatures = nats
     return list(zip(names, nats))
 
 
@@ -1904,8 +1934,7 @@ def _nature_of(doc, case):
 def _write_case_sheet(doc):
     try:
         sh = doc.getObject("LoadCases") or doc.addObject("Spreadsheet::Sheet", "LoadCases")
-        sh.Label = "LoadCases"
-        sh.clearAll()
+        sh.Label = "LoadCases"; sh.clearAll()
         sh.set("A1", "LOAD CASES"); sh.set("A2", "Name"); sh.set("B2", "Nature")
         r = 3
         for n, nat in _cases(doc):
@@ -1922,12 +1951,10 @@ def _combos(doc):
 
 def _set_combos(doc, pairs):
     m = _meta(doc)
-    m.ComboNames = [p[0] for p in pairs]
-    m.ComboDefs = [p[1] for p in pairs]
+    m.ComboNames = [p[0] for p in pairs]; m.ComboDefs = [p[1] for p in pairs]
     try:
         sh = doc.getObject("Combinations") or doc.addObject("Spreadsheet::Sheet", "Combinations")
-        sh.Label = "Combinations"
-        sh.clearAll()
+        sh.Label = "Combinations"; sh.clearAll()
         sh.set("A1", "LOAD COMBINATIONS"); sh.set("A2", "Name"); sh.set("B2", "Definition")
         r = 3
         for nm, df in pairs:
@@ -1937,7 +1964,6 @@ def _set_combos(doc, pairs):
 
 
 def _parse_combo(defn):
-    """'1.35*DL1 + 1.5*LL1' -> {'DL1':1.35,'LL1':1.5}. No eval, whitespace ok."""
     out = {}
     for term in str(defn).replace("-", "+-").split("+"):
         term = term.strip()
@@ -1957,10 +1983,58 @@ def _parse_combo(defn):
     return out
 
 
-def _model_size(members):
+# ── line-model (bar) entity helpers ──────────────────────────────
+def is_bar(o):
+    return bool(getattr(o, "IsBar", False))
+
+
+def is_analysis_elem(o):
+    return is_bar(o) or is_member(o)
+
+
+def selected_elems():
+    out = []
+    for s in FreeCADGui.Selection.getSelectionEx():
+        o = s.Object
+        if o not in out and is_analysis_elem(o):
+            out.append(o)
+    return out
+
+
+def _elem_ends(o):
+    if is_bar(o):
+        a = getattr(o, "BarStart", None); b = getattr(o, "BarEnd", None)
+        if a is not None and b is not None:
+            return FreeCAD.Vector(a), FreeCAD.Vector(b)
+        vs = o.Shape.Vertexes
+        return FreeCAD.Vector(vs[0].Point), FreeCAD.Vector(vs[-1].Point)
+    return skeleton(o)
+
+
+def _elem_section(o):
+    return getattr(o, "Section", None) or getattr(o, "MemberProfile", "")
+
+
+def _elem_material(o):
+    return getattr(o, "Material", None) or DEFAULT_MAT
+
+
+def _analysis_objs(doc):
+    """Bars are the analysis model; fall back to solid members if no bars exist
+    (so older solid-only documents still analyse)."""
+    bars = [o for o in doc.Objects if is_bar(o)]
+    if bars:
+        return bars, "bar"
+    return [o for o in doc.Objects if is_member(o)], "member"
+
+
+def _model_size(objs):
     bb = None
-    for m in members:
-        b = m.Shape.BoundBox
+    for m in objs:
+        try:
+            b = m.Shape.BoundBox
+        except Exception:
+            continue
         bb = b if bb is None else bb.united(b)
     if bb is None:
         return 1000.0
@@ -1976,32 +2050,968 @@ def _sel_vertices():
     return pts
 
 
-def _polyline(pts):
-    """Part.makePolygon over points with consecutive near-duplicates removed
-    (a zero diagram value at a support makes the baseline and first sample
-    coincide, which makePolygon rejects). Returns a wire or None."""
-    clean = []
-    for p in pts:
-        if not clean or (p - clean[-1]).Length > 1e-7:
-            clean.append(p)
-    if len(clean) < 2:
-        return None
-    try:
-        return Part.makePolygon(clean)
-    except Exception:
-        return None
-
-
 def _pick_case(doc, title):
-    """Return a chosen case name (creating a default if necessary), or None."""
     cs = [c[0] for c in _cases(doc)]
     item, ok = get_item(title, "Load case:", cs, len(cs) - 1)
     return item if ok else None
 
 
+def _pick_section(title):
+    fams = sorted(profiles.families().keys())
+    fam, ok = get_item(title, "Section family:", fams, 0)
+    if not ok:
+        return None
+    sizes = [nm for (nm, _b) in profiles.families()[fam]]
+    size, ok = get_item(title, "Section size:", sizes, 0)
+    return size if ok else None
+
+
+def _make_bar(doc, p1, p2, section, material, grp):
+    o = doc.addObject("Part::Feature", "Bar")
+    o.Shape = Part.makeLine(FreeCAD.Vector(p1), FreeCAD.Vector(p2))
+    o.Label = "Bar %s" % section
+    _set(o, "App::PropertyBool", "IsBar", True)
+    _set(o, "App::PropertyString", "Section", section)
+    _set(o, "App::PropertyString", "Material", material)
+    _set(o, "App::PropertyVector", "BarStart", FreeCAD.Vector(p1))
+    _set(o, "App::PropertyVector", "BarEnd", FreeCAD.Vector(p2))
+    try:
+        o.ViewObject.LineWidth = 4
+        o.ViewObject.LineColor = (0.30, 0.45, 0.65)
+        o.ViewObject.PointSize = 6
+    except Exception:
+        pass
+    if grp is not None:
+        grp.addObject(o)
+    return o
+
+
+def _cell(sh, addr):
+    try:
+        return sh.get(addr)
+    except Exception:
+        return None
+
+
+class AddBars:
+    def GetResources(self):
+        return {"Pixmap": _icon("bar"), "MenuText": "Add Bars (from lines)",
+                "ToolTip": "Select straight lines (sketch / Draft wire / any edge), "
+                           "pick a section and material, and create analysis bars "
+                           "(line members). This is the Robot-style line model.",
+                "Accel": "A, A"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        doc = FreeCAD.ActiveDocument
+        edges = collect_edges()
+        if not edges:
+            info("Select one or more straight lines first (sketch lines, a Draft "
+                 "wire, or model edges). Each line becomes a bar.")
+            return
+        section = _pick_section("Add Bars")
+        if section is None:
+            return
+        mat, ok = get_item("Add Bars", "Material:", list(MATERIALS.keys()), 0)
+        if not ok:
+            return
+        doc.openTransaction("DynFrame: add bars")
+        grp = _grp(doc, STR_GROUP)
+        n = 0
+        for (p1, p2, _src, _idx) in edges:
+            _make_bar(doc, p1, p2, section, mat, grp)
+            n += 1
+        doc.commitTransaction()
+        doc.recompute()
+        info("Created %d bar(s): %s, %s." % (n, section, mat))
+
+
+class BarsFromMembers:
+    def GetResources(self):
+        return {"Pixmap": _icon("bar"), "MenuText": "Bars from Members",
+                "ToolTip": "Convert the solid frame members you already built into "
+                           "analysis bars (line model), keeping each member's section.",
+                "Accel": "A, F"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        doc = FreeCAD.ActiveDocument
+        sel = [m for m in selected_members() if is_member(m)]
+        members = sel or [o for o in doc.Objects if is_member(o)]
+        if not members:
+            info("No solid frame members found to convert.")
+            return
+        mat, ok = get_item("Bars from Members", "Material for all bars:",
+                           list(MATERIALS.keys()), 0)
+        if not ok:
+            return
+        doc.openTransaction("DynFrame: bars from members")
+        grp = _grp(doc, STR_GROUP)
+        n = 0
+        for m in members:
+            s, e = skeleton(m)
+            sec = getattr(m, "MemberProfile", "") or "IPE 200"
+            _make_bar(doc, s, e, sec, mat, grp)
+            n += 1
+        doc.commitTransaction()
+        doc.recompute()
+        info("Created %d bar(s) from members. The solid members are kept (hide "
+             "them if you want a clean line model); analysis now runs on the bars."
+             % n)
+
+
+class EditTables:
+    def GetResources(self):
+        return {"Pixmap": _icon("table"), "MenuText": "Node/Bar Tables",
+                "ToolTip": "Create editable 'Nodes' and 'Bars' spreadsheets (Robot-"
+                           "style coordinate tables). Fill them in, then 'Build from "
+                           "Tables'.", "Accel": "A, T"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        doc = FreeCAD.ActiveDocument
+        if doc.getObject("Nodes") or doc.getObject("Bars"):
+            keep, ok = get_item("Node/Bar Tables",
+                                "Tables already exist. Overwrite with blank "
+                                "templates?", ["Keep existing", "Overwrite"], 0)
+            if not ok or keep == "Keep existing":
+                info("Edit the existing 'Nodes' and 'Bars' spreadsheets, then run "
+                     "Build from Tables.")
+                return
+        doc.openTransaction("DynFrame: node/bar tables")
+        nd = doc.getObject("Nodes") or doc.addObject("Spreadsheet::Sheet", "Nodes")
+        nd.Label = "Nodes"; nd.clearAll()
+        nd.set("A1", "NODES  (fill rows from 3; units mm)")
+        for c, h in zip("ABCD", ["Node", "X", "Y", "Z"]):
+            nd.set("%s2" % c, h)
+        for i, (x, y, z) in enumerate([(0, 0, 0), (0, 0, 3000), (4000, 0, 3000),
+                                       (4000, 0, 0)]):
+            nd.set("A%d" % (i + 3), str(i + 1)); nd.set("B%d" % (i + 3), str(x))
+            nd.set("C%d" % (i + 3), str(y)); nd.set("D%d" % (i + 3), str(z))
+        br = doc.getObject("Bars") or doc.addObject("Spreadsheet::Sheet", "Bars")
+        br.Label = "Bars"; br.clearAll()
+        br.set("A1", "BARS  (NodeI/NodeJ are node numbers above)")
+        for c, h in zip("ABCDE", ["Bar", "NodeI", "NodeJ", "Section", "Material"]):
+            br.set("%s2" % c, h)
+        ex = [(1, 1, 2, "IPE 200", "Steel S235"), (2, 2, 3, "IPE 200", "Steel S235"),
+              (3, 4, 3, "IPE 200", "Steel S235")]
+        for i, (b, ni, nj, sec, mat) in enumerate(ex):
+            r = i + 3
+            br.set("A%d" % r, str(b)); br.set("B%d" % r, str(ni))
+            br.set("C%d" % r, str(nj)); br.set("D%d" % r, sec); br.set("E%d" % r, mat)
+        doc.commitTransaction()
+        doc.recompute()
+        info("Created 'Nodes' and 'Bars' spreadsheets with an example portal.\n\n"
+             "Edit them (node coordinates; bar NodeI/NodeJ/Section/Material), then "
+             "run 'Build from Tables'.\n\nSections must be names from the library "
+             "(e.g. IPE 200, HEB 160, SHS 80x80x5). Materials: %s."
+             % ", ".join(MATERIALS.keys()))
+
+
+class BuildFromTables:
+    def GetResources(self):
+        return {"Pixmap": _icon("table"), "MenuText": "Build from Tables",
+                "ToolTip": "Read the 'Nodes' and 'Bars' spreadsheets and create the "
+                           "bar line model from them.", "Accel": "A, G"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        doc = FreeCAD.ActiveDocument
+        nd = doc.getObject("Nodes"); br = doc.getObject("Bars")
+        if nd is None or br is None:
+            info("No 'Nodes'/'Bars' tables found. Run 'Node/Bar Tables' first.")
+            return
+        coords = {}
+        r = 3
+        while True:
+            nv = _cell(nd, "A%d" % r)
+            if nv in (None, ""):
+                break
+            try:
+                key = str(int(float(nv)))
+                coords[key] = FreeCAD.Vector(float(_cell(nd, "B%d" % r) or 0),
+                                             float(_cell(nd, "C%d" % r) or 0),
+                                             float(_cell(nd, "D%d" % r) or 0))
+            except Exception:
+                pass
+            r += 1
+        if not coords:
+            info("No node rows found in the 'Nodes' table.")
+            return
+        doc.openTransaction("DynFrame: build from tables")
+        grp = _grp(doc, STR_GROUP)
+        made = bad = 0
+        r = 3
+        while True:
+            bv = _cell(br, "A%d" % r)
+            if bv in (None, ""):
+                break
+            try:
+                ni = str(int(float(_cell(br, "B%d" % r))))
+                nj = str(int(float(_cell(br, "C%d" % r))))
+                sec = str(_cell(br, "D%d" % r) or "IPE 200").strip()
+                mat = str(_cell(br, "E%d" % r) or DEFAULT_MAT).strip()
+                if ni in coords and nj in coords and profiles.builder_for(sec):
+                    _make_bar(doc, coords[ni], coords[nj], sec, mat, grp)
+                    made += 1
+                else:
+                    bad += 1
+            except Exception:
+                bad += 1
+            r += 1
+        doc.commitTransaction()
+        doc.recompute()
+        info("Built %d bar(s) from the tables%s." %
+             (made, "" if bad == 0 else " (%d row(s) skipped - check node numbers "
+              "and section names)" % bad))
+
+
+class NewLoadCase:
+    def GetResources(self):
+        return {"Pixmap": _icon("case"), "MenuText": "New Load Case",
+                "ToolTip": "Create a named load case with a nature (Dead / Live / "
+                           "Wind / Snow). Loads belong to a case; combinations are "
+                           "built from the cases.", "Accel": "A, N"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        doc = FreeCAD.ActiveDocument
+        nature, ok = get_item("New Load Case", "Nature:", NATURES, 0)
+        if not ok:
+            return
+        default = {"Dead": "DL", "Live": "LL", "Wind": "WL", "Snow": "SL",
+                   "Other": "CASE"}[nature]
+        n = sum(1 for _, nat in _cases(doc) if nat == nature) + 1
+        name, ok = get_text("New Load Case", "Case name:", "%s%d" % (default, n))
+        if not ok or not name.strip():
+            return
+        _add_case(doc, name.strip(), nature)
+        doc.recompute()
+        info("Load case '%s' (%s) created." % (name.strip(), nature))
+
+
+class DefineSupport:
+    def GetResources(self):
+        return {"Pixmap": _icon("support"), "MenuText": "Define Support",
+                "ToolTip": "Select joint vertices (bar node points), then apply a "
+                           "support (Fixed / Pinned / Roller). Blue cone. Supports "
+                           "are global (shared by every case).", "Accel": "A, S"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        pts = _sel_vertices()
+        if not pts:
+            info("Select one or more joint vertices (a bar end point), then run "
+                 "Define Support.")
+            return
+        t, ok = get_item("Define Support", "Support type:",
+                         list(SUPPORT_TYPES.keys()), 0)
+        if not ok:
+            return
+        restr = SUPPORT_TYPES[t]
+        doc = FreeCAD.ActiveDocument
+        doc.openTransaction("DynFrame: support")
+        grp = _grp(doc, SUP_GROUP)
+        objs, _k = _analysis_objs(doc)
+        sz = _model_size(objs) * 0.02 + 20.0
+        for p in pts:
+            cone = Part.makeCone(sz, 0.0, sz * 2.0,
+                                 FreeCAD.Vector(p.x, p.y, p.z - sz * 2.0),
+                                 FreeCAD.Vector(0, 0, 1))
+            o = doc.addObject("Part::Feature", "Support")
+            o.Shape = cone
+            o.Label = "Support %s" % t.split(" (")[0]
+            _set(o, "App::PropertyString", "Restrain", restr)
+            _set(o, "App::PropertyVector", "AtNode", p)
+            try:
+                o.ViewObject.ShapeColor = (0.1, 0.4, 1.0)
+            except Exception:
+                pass
+            grp.addObject(o)
+        doc.commitTransaction()
+        doc.recompute()
+        info("Support applied to %d node(s): %s." % (len(pts), t))
+
+
+class AddNodalLoad:
+    def GetResources(self):
+        return {"Pixmap": _icon("load"), "MenuText": "Add Nodal Load",
+                "ToolTip": "Select joint vertices, pick a load case, then enter a "
+                           "point force (Fx, Fy, Fz in N). Orange arrow.",
+                "Accel": "A, L"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        pts = _sel_vertices()
+        if not pts:
+            info("Select one or more joint vertices, then add a nodal load.")
+            return
+        doc = FreeCAD.ActiveDocument
+        case = _pick_case(doc, "Add Nodal Load")
+        if case is None:
+            return
+        fz, ok = get_double("Add Nodal Load", "Fz  (N, + up / - down):",
+                            -1000.0, -1e12, 1e12)
+        if not ok:
+            return
+        fx, ok = get_double("Add Nodal Load", "Fx  (N):", 0.0, -1e12, 1e12)
+        if not ok:
+            return
+        fy, ok = get_double("Add Nodal Load", "Fy  (N):", 0.0, -1e12, 1e12)
+        if not ok:
+            return
+        if abs(fx) + abs(fy) + abs(fz) < 1e-9:
+            warn("Load is zero - nothing added.")
+            return
+        doc.openTransaction("DynFrame: nodal load")
+        grp = _grp(doc, LOAD_GROUP)
+        objs, _k = _analysis_objs(doc)
+        ln = _model_size(objs) * 0.15 + 100.0
+        fvec = FreeCAD.Vector(fx, fy, fz)
+        dirn = unit(fvec)
+        for p in pts:
+            tail = p - vscale(dirn, ln)
+            shaft = Part.makeLine(FreeCAD.Vector(tail), FreeCAD.Vector(p))
+            head = Part.makeCone(ln * 0.12, 0.0, ln * 0.25,
+                                 p - vscale(dirn, ln * 0.25), dirn)
+            o = doc.addObject("Part::Feature", "NodalLoad")
+            o.Shape = Part.makeCompound([shaft, head])
+            o.Label = "%s: (%.0f,%.0f,%.0f)N" % (case, fx, fy, fz)
+            _set(o, "App::PropertyString", "LoadType", "Nodal")
+            _set(o, "App::PropertyString", "LoadCase", case)
+            _set(o, "App::PropertyVector", "LoadVec", fvec)
+            _set(o, "App::PropertyVector", "AtNode", p)
+            try:
+                o.ViewObject.ShapeColor = (1.0, 0.3, 0.0); o.ViewObject.LineWidth = 3
+            except Exception:
+                pass
+            grp.addObject(o)
+        doc.commitTransaction()
+        doc.recompute()
+        info("Nodal load (%.0f, %.0f, %.0f) N added to case '%s' on %d node(s)."
+             % (fx, fy, fz, case, len(pts)))
+
+
+class AddMemberLoad:
+    def GetResources(self):
+        return {"Pixmap": _icon("load"), "MenuText": "Add Bar Load",
+                "ToolTip": "Select bars (or members), pick a load case, then apply a "
+                           "uniform distributed load (N/mm along global Z).",
+                "Accel": "A, M"}
+
+    def IsActive(self):
+        return bool(selected_elems())
+
+    def Activated(self):
+        elems = selected_elems()
+        if not elems:
+            info("Select one or more bars (or members), then add a distributed load.")
+            return
+        doc = FreeCAD.ActiveDocument
+        case = _pick_case(doc, "Add Bar Load")
+        if case is None:
+            return
+        w, ok = get_double("Add Bar Load",
+                           "Uniform load  (N/mm, global Z, + up / - down):",
+                           -5.0, -1e9, 1e9)
+        if not ok or abs(w) < 1e-12:
+            return
+        doc.openTransaction("DynFrame: bar load")
+        grp = _grp(doc, LOAD_GROUP)
+        msize = _model_size(elems)
+        vec = FreeCAD.Vector(0, 0, w)
+        dirn = unit(vec)
+        ln = msize * 0.08 + 50.0
+        for m in elems:
+            s, e = _elem_ends(m)
+            arrows = []
+            for t in (0.15, 0.35, 0.55, 0.75, 0.95):
+                p = s + vscale(e - s, t)
+                tail = p - vscale(dirn, ln)
+                arrows.append(Part.makeLine(FreeCAD.Vector(tail), FreeCAD.Vector(p)))
+                arrows.append(Part.makeCone(ln * 0.14, 0.0, ln * 0.3,
+                                            p - vscale(dirn, ln * 0.3), dirn))
+            o = doc.addObject("Part::Feature", "BarLoad")
+            o.Shape = Part.makeCompound(arrows)
+            o.Label = "%s: %.3g N/mm on %s" % (case, w, m.Label)
+            _set(o, "App::PropertyString", "LoadType", "Member")
+            _set(o, "App::PropertyString", "LoadCase", case)
+            _set(o, "App::PropertyString", "OnMember", m.Name)
+            _set(o, "App::PropertyVector", "LoadVec", vec)
+            try:
+                o.ViewObject.ShapeColor = (1.0, 0.5, 0.0); o.ViewObject.LineWidth = 2
+            except Exception:
+                pass
+            grp.addObject(o)
+        doc.commitTransaction()
+        doc.recompute()
+        info("Distributed load %.3g N/mm (Z) added to case '%s' on %d bar(s)."
+             % (w, case, len(elems)))
+
+
+class Combinations:
+    def GetResources(self):
+        return {"Pixmap": _icon("combo"), "MenuText": "Load Combinations",
+                "ToolTip": "Generate simplified EN 1990 ULS (1.35G + 1.5Q) and SLS "
+                           "(G + Q) combinations from the load cases, or add your own.",
+                "Accel": "A, B"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        doc = FreeCAD.ActiveDocument
+        cases = _cases(doc)
+        mode, ok = get_item("Load Combinations", "Action:",
+                            ["Auto ULS + SLS (EN 1990)", "Add a custom combination",
+                             "Clear all combinations"], 0)
+        if not ok:
+            return
+        if mode.startswith("Clear"):
+            _set_combos(doc, [])
+            doc.recompute(); info("All combinations cleared."); return
+        if mode.startswith("Auto"):
+            dead = [n for n, nat in cases if nat == "Dead"]
+            var = [n for n, nat in cases if nat in ("Live", "Wind", "Snow")]
+            if not dead and not var:
+                info("Define some load cases first (New Load Case)."); return
+            uls = " + ".join(["1.35*%s" % d for d in dead] + ["1.5*%s" % q for q in var])
+            sls = " + ".join(["1.0*%s" % c for c in (dead + var)])
+            pairs = _combos(doc); have = {p[0] for p in pairs}
+            if uls and "ULS1" not in have:
+                pairs.append(("ULS1", uls))
+            if sls and "SLS1" not in have:
+                pairs.append(("SLS1", sls))
+            _set_combos(doc, pairs); doc.recompute()
+            info("Combinations generated:\n\nULS1 = %s\nSLS1 = %s\n\n(Simplified "
+                 "EN 1990. Edit the 'Combinations' spreadsheet or add custom ones.)"
+                 % (uls or "-", sls or "-"))
+            return
+        name, ok = get_text("Add Combination", "Name:", "C%d" % (len(_combos(doc)) + 1))
+        if not ok or not name.strip():
+            return
+        hint = "e.g.  1.35*%s + 1.5*%s" % (cases[0][0], cases[-1][0])
+        defn, ok = get_text("Add Combination",
+                            "Definition (factor*Case + ...). Cases: %s"
+                            % ", ".join(c[0] for c in cases), hint)
+        if not ok or not defn.strip():
+            return
+        pairs = [p for p in _combos(doc) if p[0] != name.strip()]
+        pairs.append((name.strip(), defn.strip()))
+        _set_combos(doc, pairs); doc.recompute()
+        info("Combination '%s' = %s added." % (name.strip(), defn.strip()))
+
+
+class RunAnalysis:
+    def GetResources(self):
+        return {"Pixmap": _icon("analysis"), "MenuText": "Calculate",
+                "ToolTip": "Linear-static solve on the bar line model for a chosen "
+                           "load case or combination. Produces reactions, deformed "
+                           "shape, gradient N/V/M diagrams and result tables.",
+                "Accel": "A, C"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        import numpy as np
+        doc = FreeCAD.ActiveDocument
+        objs, kind = _analysis_objs(doc)
+        if not objs:
+            info("No bars or members found. Build a line model first (Add Bars, "
+                 "Bars from Members, or Node/Bar Tables + Build from Tables).")
+            return
+
+        nodes = []
+
+        def nid(p, make=True):
+            for i, q in enumerate(nodes):
+                if q.distanceToPoint(p) <= 1.0:
+                    return i
+            if not make:
+                return -1
+            nodes.append(FreeCAD.Vector(p)); return len(nodes) - 1
+
+        elems = []
+        for o in objs:
+            sec = _elem_section(o)
+            sp = _section_props_from_name(sec)
+            if sp is None:
+                continue
+            A, Iy, Iz, J, c = sp
+            s, e = _elem_ends(o)
+            n1, n2 = nid(s), nid(e)
+            if n1 == n2:
+                continue
+            E, G, Fy, rho = _material(_elem_material(o))
+            elems.append({"o": o, "n1": n1, "n2": n2, "A": A, "Iy": Iy, "Iz": Iz,
+                          "J": J, "c": c, "E": E, "G": G, "Fy": Fy, "rho": rho,
+                          "sec": sec, "w": FreeCAD.Vector(0, 0, 0)})
+        if not elems:
+            info("Could not build an analysis model (check that bars have valid "
+                 "section names).")
+            return
+        by_obj = {el["o"].Name: el for el in elems}
+
+        fixed = set(); sup_nodes = []
+        for o in doc.Objects:
+            r = getattr(o, "Restrain", None); at = getattr(o, "AtNode", None)
+            if r and at is not None:
+                i = nid(FreeCAD.Vector(at), make=False)
+                if i >= 0:
+                    sup_nodes.append(i)
+                    for k, ch in enumerate(r):
+                        if ch == "1":
+                            fixed.add(6 * i + k)
+        if not fixed:
+            err("No supports defined.\n\nSelect base node vertices and run "
+                "'Define Support' (e.g. Fixed or Pinned), then Calculate.")
+            return
+
+        cases = _cases(doc); combos = _combos(doc)
+        run_opts = (["All loads"] + ["Case: %s" % c[0] for c in cases]
+                    + ["Combo: %s" % cb[0] for cb in combos])
+        pick, ok = get_item("Calculate", "Analyse:", run_opts, 0)
+        if not ok:
+            return
+        sw, ok = get_item("Calculate", "Include bar self-weight (as Dead)?",
+                          ["Yes", "No"], 0)
+        if not ok:
+            return
+        if pick == "All loads":
+            factors = {c[0]: 1.0 for c in cases}; sw_factor = 1.0; run_name = "All loads"
+        elif pick.startswith("Case: "):
+            cn = pick[6:]; factors = {cn: 1.0}
+            sw_factor = 1.0 if _nature_of(doc, cn) == "Dead" else 0.0
+            run_name = "Case " + cn
+        else:
+            cn = pick[7:]; factors = _parse_combo(dict(combos).get(cn, ""))
+            sw_factor = sum(f for c, f in factors.items() if _nature_of(doc, c) == "Dead")
+            run_name = "Combo " + cn
+        if sw != "Yes":
+            sw_factor = 0.0
+
+        for o in doc.Objects:
+            if getattr(o, "LoadType", None) == "Member":
+                f = factors.get(getattr(o, "LoadCase", ""), 0.0)
+                el = by_obj.get(getattr(o, "OnMember", ""))
+                if f and el is not None:
+                    el["w"] = el["w"] + vscale(FreeCAD.Vector(getattr(o, "LoadVec")), f)
+        if sw_factor:
+            for el in elems:
+                el["w"] = el["w"] + FreeCAD.Vector(
+                    0, 0, -el["A"] * el["rho"] * GRAV * sw_factor)
+
+        ndof = 6 * len(nodes)
+        K = np.zeros((ndof, ndof)); F = np.zeros(ndof)
+        for el in elems:
+            T, L = _beam_T(nodes[el["n1"]], nodes[el["n2"]])
+            el["T"] = T; el["L"] = L
+            kl = _beam_k_local(el["E"], el["G"], el["A"], el["Iy"], el["Iz"], el["J"], L)
+            el["kl"] = kl
+            dofs = ([6 * el["n1"] + i for i in range(6)]
+                    + [6 * el["n2"] + i for i in range(6)])
+            el["dofs"] = dofs
+            K[np.ix_(dofs, dofs)] += T.T @ kl @ T
+            w = el["w"]
+            wl = T[0:3, 0:3] @ np.array([w.x, w.y, w.z])
+            el["wx"], el["wy"], el["wz"] = float(wl[0]), float(wl[1]), float(wl[2])
+            if w.Length > 1e-12:
+                fl = _fef_udl(w, T[0:3, 0:3], L); el["fef"] = fl; F[dofs] += T.T @ fl
+            else:
+                el["fef"] = np.zeros(12)
+        for o in doc.Objects:
+            if getattr(o, "LoadType", None) == "Nodal":
+                f = factors.get(getattr(o, "LoadCase", ""), 0.0)
+                at = getattr(o, "AtNode", None)
+                if f and at is not None:
+                    i = nid(FreeCAD.Vector(at), make=False)
+                    if i >= 0:
+                        v = FreeCAD.Vector(getattr(o, "LoadVec"))
+                        F[6 * i] += v.x * f; F[6 * i + 1] += v.y * f; F[6 * i + 2] += v.z * f
+
+        free = [d for d in range(ndof) if d not in fixed]
+        u = np.zeros(ndof)
+        try:
+            u[free] = np.linalg.solve(K[np.ix_(free, free)], F[free])
+        except Exception:
+            err("The structure is a mechanism (unstable) with the supports given. "
+                "Add more supports (or restrain more directions), then Calculate.")
+            return
+        Rreac = K @ u - F
+        msize = _model_size(objs)
+        maxd = max((u[6 * i] ** 2 + u[6 * i + 1] ** 2 + u[6 * i + 2] ** 2) ** 0.5
+                   for i in range(len(nodes)))
+
+        NS = 16
+        comp_max = {k: 0.0 for k in DIAG_KINDS}
+        max_util = 0.0
+        for el in elems:
+            dloc = el["T"] @ u[el["dofs"]]; el["dloc"] = dloc
+            fend = el["kl"] @ dloc - el["fef"]; el["fend"] = fend
+            L = el["L"]; wy, wz, wx = el["wy"], el["wz"], el["wx"]
+            A = el["A"]; c = el["c"]; Imin = min(el["Iy"], el["Iz"]); Fy = el["Fy"]
+
+            def val(kind, x, fend=fend, L=L, wx=wx, wy=wy, wz=wz, A=A, c=c,
+                    Imin=Imin):
+                if kind == "N":
+                    return -(fend[0] + wx * x)
+                if kind == "Vy":
+                    return fend[1] + wy * x
+                if kind == "Vz":
+                    return fend[2] + wz * x
+                if kind == "Mx":
+                    return -fend[3]
+                if kind == "My":
+                    return fend[4] * (1 - x / L) - fend[10] * (x / L) - wz * x * (L - x) / 2.0
+                if kind == "Mz":
+                    return -fend[5] * (1 - x / L) + fend[11] * (x / L) - wy * x * (L - x) / 2.0
+                # Stress: axial + biaxial bending magnitude at x
+                myx = fend[4] * (1 - x / L) - fend[10] * (x / L) - wz * x * (L - x) / 2.0
+                mzx = -fend[5] * (1 - x / L) + fend[11] * (x / L) - wy * x * (L - x) / 2.0
+                nx = -(fend[0] + wx * x)
+                mm = (myx * myx + mzx * mzx) ** 0.5
+                return abs(nx) / A + (mm * c / Imin if Imin > 1e-9 else 0.0)
+
+            el["val"] = val
+            samp = {}
+            for k in DIAG_KINDS:
+                vals = [val(k, L * s / NS) for s in range(NS + 1)]
+                samp[k] = vals
+                comp_max[k] = max(comp_max[k], max(abs(v) for v in vals))
+            el["samp"] = samp
+            util = (max(samp["Stress"]) / Fy) if Fy > 0 else 0.0
+            el["util"] = util; max_util = max(max_util, util)
+
+        # ---- build visuals ----
+        doc.openTransaction("DynFrame: results")
+        for o in list(doc.Objects):
+            if getattr(o, "DiagKind", None) is not None \
+                    or o.Name.startswith(("Diagram_", "DeformedShape", "Legend",
+                                          "MomentDiagram")):
+                try:
+                    doc.removeObject(o.Name)
+                except Exception:
+                    pass
+        rg = _grp(doc, RES_GROUP); dg = _grp(doc, DIA_GROUP)
+
+        # deformed shape: real bent curve inside each bar (cubic shape fns)
+        ND = 10; maxoff = 0.0
+        for el in elems:
+            T = el["T"]; L = el["L"]; d = el["dloc"]; R3 = T[0:3, 0:3]
+            lx = FreeCAD.Vector(*[float(R3[0][j]) for j in range(3)])
+            ly = FreeCAD.Vector(*[float(R3[1][j]) for j in range(3)])
+            lz = FreeCAD.Vector(*[float(R3[2][j]) for j in range(3)])
+            base = nodes[el["n1"]]; samp = []
+            for s in range(ND + 1):
+                xi = s / float(ND); x = L * xi
+                n1 = 1 - 3 * xi ** 2 + 2 * xi ** 3; n2 = L * (xi - 2 * xi ** 2 + xi ** 3)
+                n3 = 3 * xi ** 2 - 2 * xi ** 3; n4 = L * (-xi ** 2 + xi ** 3)
+                ux = d[0] + (d[6] - d[0]) * xi
+                uy = n1 * d[1] + n2 * d[5] + n3 * d[7] + n4 * d[11]
+                uz = n1 * d[2] - n2 * d[4] + n3 * d[8] - n4 * d[10]
+                off = vscale(lx, ux) + vscale(ly, uy) + vscale(lz, uz)
+                samp.append((base + vscale(lx, x), off)); maxoff = max(maxoff, off.Length)
+            el["defsamp"] = samp
+        dscale = (0.08 * msize / maxoff) if maxoff > 1e-9 else 1.0
+        dlines = []
+        for el in elems:
+            w = _polyline([p + vscale(off, dscale) for (p, off) in el["defsamp"]])
+            if w is not None:
+                dlines.append(w)
+        if dlines:
+            dob = doc.addObject("Part::Feature", "DeformedShape")
+            dob.Shape = Part.makeCompound(dlines)
+            dob.Label = "Deformed shape (x%.0f)" % dscale
+            try:
+                dob.ViewObject.ShapeColor = (0.1, 0.8, 0.3); dob.ViewObject.LineWidth = 2
+            except Exception:
+                pass
+            rg.addObject(dob)
+
+        # gradient-filled diagrams, one object per component
+        off_axis = {"N": 2, "Vz": 2, "My": 2, "Mx": 2, "Stress": 2, "Vy": 1, "Mz": 1}
+        default_kind = "My"
+        for kind in DIAG_KINDS:
+            cmax = comp_max[kind]
+            if cmax < 1e-9:
+                continue
+            scale = 0.13 * msize / cmax
+            faces = []; colors = []
+            for el in elems:
+                T = el["T"]; L = el["L"]; R3 = T[0:3, 0:3]
+                lx = FreeCAD.Vector(*[float(R3[0][j]) for j in range(3)])
+                axis = off_axis[kind]
+                la = FreeCAD.Vector(*[float(R3[axis][j]) for j in range(3)])
+                base = nodes[el["n1"]]; vals = el["samp"][kind]
+                pcurve = [base + vscale(lx, L * s / NS) + vscale(la, vals[s] * scale)
+                          for s in range(NS + 1)]
+                pbase = [base + vscale(lx, L * s / NS) for s in range(NS + 1)]
+                for s in range(NS):
+                    quad = _polyface([pbase[s], pbase[s + 1], pcurve[s + 1], pcurve[s]])
+                    if quad is None:
+                        continue
+                    faces.append(quad)
+                    vmid = 0.5 * (abs(vals[s]) + abs(vals[s + 1]))
+                    colors.append(_ramp(vmid / cmax) + (0.0,))
+            if not faces:
+                continue
+            dob2 = doc.addObject("Part::Feature", "Diagram_%s" % kind)
+            dob2.Shape = Part.makeCompound(faces)
+            dob2.Label = "%s diagram" % kind
+            _set(dob2, "App::PropertyString", "DiagKind", kind)
+            try:
+                dob2.ViewObject.Visibility = (kind == default_kind)
+                if len(colors) == len(dob2.Shape.Faces):
+                    dob2.ViewObject.DiffuseColor = colors
+                else:
+                    dob2.ViewObject.ShapeColor = (0.9, 0.2, 0.1)
+            except Exception:
+                pass
+            dg.addObject(dob2)
+            # label the global extreme of this component
+            pk = 0.0; pkp = None
+            for el in elems:
+                T = el["T"]; L = el["L"]; R3 = T[0:3, 0:3]
+                lx = FreeCAD.Vector(*[float(R3[0][j]) for j in range(3)])
+                la = FreeCAD.Vector(*[float(R3[off_axis[kind]][j]) for j in range(3)])
+                base = nodes[el["n1"]]; vals = el["samp"][kind]
+                for s in range(NS + 1):
+                    if abs(vals[s]) >= abs(pk):
+                        pk = vals[s]
+                        pkp = base + vscale(lx, L * s / NS) + vscale(la, vals[s] * scale)
+            if pkp is not None and abs(pk) > 1e-6:
+                t = _label_text(doc, dg, "%s max %.4g" % (kind, pk), pkp, kind,
+                                fontsize=max(8.0, msize * 0.035))
+                if t is not None:
+                    try:
+                        t.ViewObject.Visibility = (kind == default_kind)
+                    except Exception:
+                        pass
+        _build_legend(doc, dg, nodes, objs, msize)
+        doc.commitTransaction()
+
+        self._tables(doc, nodes, sup_nodes, Rreac, u, elems, run_name, rg, kind)
+
+        try:
+            FreeCADGui.activeDocument().activeView().viewAxonometric()
+            FreeCADGui.SendMsgToActiveView("ViewFit")
+        except Exception:
+            pass
+        info("Analysis complete - %s  (line model, %d bars).\n\n"
+             "Nodes %d | Restrained DOFs %d\n"
+             "Max displacement:  %.3f mm\n"
+             "Max |My| %.0f | Max |Mz| %.0f | Max |N| %.0f  N(.mm)\n"
+             "Max utilisation:  %.2f  (stress / yield)\n\n"
+             "Showing the gradient 'My diagram' (blue->red by magnitude along each "
+             "bar) and the green deformed shape. Use 'Show Force Diagram' to switch "
+             "to N, Vy, Vz, Mx, My, Mz or Stress. Tables: Reactions, Displacements, "
+             "BarForces, plus your Nodes/Bars.\n\nLinear static only; modal / "
+             "buckling / seismic / code-checks are later phases." %
+             (run_name, len(elems), len(nodes), len(fixed), maxd,
+              comp_max["My"], comp_max["Mz"], comp_max["N"], max_util))
+
+    def _tables(self, doc, nodes, sup_nodes, Rreac, u, elems, run_name, rg, akind):
+        def sheet(name):
+            sh = doc.getObject(name) or doc.addObject("Spreadsheet::Sheet", name)
+            sh.Label = name; sh.clearAll()
+            if rg is not None and sh not in rg.Group:
+                rg.addObject(sh)
+            return sh
+        try:
+            sh = sheet("Reactions")
+            sh.set("A1", "REACTIONS - %s" % run_name)
+            for col, h in zip("ABCDEFG", ["Node", "Rx (N)", "Ry (N)", "Rz (N)",
+                                          "Mx (N.mm)", "My (N.mm)", "Mz (N.mm)"]):
+                sh.set("%s2" % col, h)
+            r = 3
+            for i in sorted(set(sup_nodes)):
+                sh.set("A%d" % r, "N%d (%.0f,%.0f,%.0f)" % (i + 1, nodes[i].x, nodes[i].y, nodes[i].z))
+                for c, col in enumerate("BCDEFG"):
+                    sh.set("%s%d" % (col, r), "%.1f" % Rreac[6 * i + c])
+                r += 1
+
+            sh = sheet("Displacements")
+            sh.set("A1", "NODAL DISPLACEMENTS - %s" % run_name)
+            for col, h in zip("ABCDEFG", ["Node", "Ux (mm)", "Uy (mm)", "Uz (mm)",
+                                          "Rx (rad)", "Ry (rad)", "Rz (rad)"]):
+                sh.set("%s2" % col, h)
+            for i in range(len(nodes)):
+                r = i + 3
+                sh.set("A%d" % r, "N%d (%.0f,%.0f,%.0f)" % (i + 1, nodes[i].x, nodes[i].y, nodes[i].z))
+                for c, col in zip(range(3), "BCD"):
+                    sh.set("%s%d" % (col, r), "%.4g" % u[6 * i + c])
+                for c, col in zip(range(3, 6), "EFG"):
+                    sh.set("%s%d" % (col, r), "%.3e" % u[6 * i + c])
+
+            sh = sheet("BarForces")
+            sh.set("A1", "BAR FORCES - %s  (Start x=0, End x=L)" % run_name)
+            for col, h in zip("ABCDEFGHIJK",
+                              ["Bar", "Section", "End", "N (N)", "Vy (N)", "Vz (N)",
+                               "Mx (N.mm)", "My (N.mm)", "Mz (N.mm)", "Stress(MPa)",
+                               "Util."]):
+                sh.set("%s2" % col, h)
+            r = 3
+            for el in elems:
+                L = el["L"]; v = el["val"]
+                for endname, x in (("Start", 0.0), ("End", L)):
+                    first = (endname == "Start")
+                    sh.set("A%d" % r, str(el["o"].Label) if first else "")
+                    sh.set("B%d" % r, el["sec"] if first else "")
+                    sh.set("C%d" % r, endname)
+                    sh.set("D%d" % r, "%.1f" % v("N", x)); sh.set("E%d" % r, "%.1f" % v("Vy", x))
+                    sh.set("F%d" % r, "%.1f" % v("Vz", x)); sh.set("G%d" % r, "%.0f" % v("Mx", x))
+                    sh.set("H%d" % r, "%.0f" % v("My", x)); sh.set("I%d" % r, "%.0f" % v("Mz", x))
+                    sh.set("J%d" % r, "%.1f" % v("Stress", x))
+                    if first:
+                        sh.set("K%d" % r, "%.2f" % el["util"])
+                    r += 1
+            doc.recompute()
+        except Exception as e:
+            FreeCAD.Console.PrintError("DynFrame: result tables failed (%s)\n" % e)
+
+
+class ShowDiagram:
+    def GetResources(self):
+        return {"Pixmap": _icon("diagram"), "MenuText": "Show Force Diagram",
+                "ToolTip": "Switch the visible internal-force diagram: N, Vy, Vz, Mx, "
+                           "My, Mz or Stress (Robot-style, gradient-coloured). Run "
+                           "Calculate first.", "Accel": "A, D"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        doc = FreeCAD.ActiveDocument
+        have = {getattr(o, "DiagKind") for o in doc.Objects if getattr(o, "DiagKind", None)}
+        if not have:
+            info("No diagrams yet. Run Calculate first."); return
+        order = [k for k in DIAG_KINDS if k in have]
+        labels = {"N": "N  - axial force", "Vy": "Vy - shear (local y)",
+                  "Vz": "Vz - shear (local z)", "Mx": "Mx - torsion",
+                  "My": "My - bending (major)", "Mz": "Mz - bending (minor)",
+                  "Stress": "Stress - combined (MPa)"}
+        pick, ok = get_item("Show Force Diagram", "Component:",
+                            [labels[k] for k in order] + ["(hide all)"], 0)
+        if not ok:
+            return
+        sel = None if pick.startswith("(hide") else order[[labels[k] for k in order].index(pick)]
+        for o in doc.Objects:
+            k = getattr(o, "DiagKind", None)
+            if not k or k.startswith("_"):      # leave the legend (and internals) alone
+                continue
+            try:
+                o.ViewObject.Visibility = (k == sel)
+            except Exception:
+                pass
+        doc.recompute()
+
+
+class ClearAnalysis:
+    def GetResources(self):
+        return {"Pixmap": _icon("analysis"), "MenuText": "Clear Results",
+                "ToolTip": "Remove analysis results (diagrams, deformed shape, legend "
+                           "and result tables). Keeps the bar model, supports and "
+                           "loads.", "Accel": "A, X"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        doc = FreeCAD.ActiveDocument
+        kill, ok = get_item("Clear",
+                            "What to remove?",
+                            ["Results only (keep model/loads)",
+                             "Everything (supports, loads, combinations, results)"], 0)
+        if not ok:
+            return
+        everything = kill.startswith("Everything")
+        doc.openTransaction("DynFrame: clear")
+        res_sheets = ("Reactions", "Displacements", "BarForces")
+        all_sheets = res_sheets + ("LoadCases", "Combinations", "AnalysisResults")
+        to_del = []
+        for o in list(doc.Objects):
+            nm = o.Name
+            is_res = (getattr(o, "DiagKind", None) is not None
+                      or nm.startswith(("Diagram_", "DeformedShape", "Legend",
+                                        "MomentDiagram"))
+                      or nm in res_sheets
+                      or (o.TypeId == "App::DocumentObjectGroup"
+                          and o.Label in (RES_GROUP, DIA_GROUP)))
+            is_load = (getattr(o, "Restrain", None) is not None
+                       or getattr(o, "LoadType", None) is not None
+                       or nm in all_sheets or nm == META_NAME
+                       or (o.TypeId == "App::DocumentObjectGroup"
+                           and o.Label in (SUP_GROUP, LOAD_GROUP, "Analysis Setup")))
+            if is_res or (everything and is_load):
+                to_del.append(nm)
+        for name in to_del:
+            try:
+                doc.removeObject(name)
+            except Exception:
+                pass
+        doc.commitTransaction(); doc.recompute()
+        info("Cleared %s." % ("everything" if everything else "results"))
+
+
+def _build_legend(doc, grp, nodes, objs, msize):
+    """A small colour-ramp legend placed at the model corner."""
+    try:
+        bb = None
+        for o in objs:
+            try:
+                b = o.Shape.BoundBox
+            except Exception:
+                continue
+            bb = b if bb is None else bb.united(b)
+        if bb is None:
+            return
+        x0 = bb.XMax + msize * 0.05
+        z0 = bb.ZMin
+        y0 = bb.YMin
+        h = msize * 0.5; w = msize * 0.04
+        nseg = 10
+        faces = []; colors = []
+        for s in range(nseg):
+            z1 = z0 + h * s / nseg; z2 = z0 + h * (s + 1) / nseg
+            p = [FreeCAD.Vector(x0, y0, z1), FreeCAD.Vector(x0 + w, y0, z1),
+                 FreeCAD.Vector(x0 + w, y0, z2), FreeCAD.Vector(x0, y0, z2)]
+            f = _polyface(p)
+            if f is not None:
+                faces.append(f); colors.append(_ramp(s / float(nseg - 1)) + (0.0,))
+        if not faces:
+            return
+        lg = doc.addObject("Part::Feature", "Legend")
+        lg.Shape = Part.makeCompound(faces)
+        lg.Label = "Diagram legend (low -> high)"
+        _set(lg, "App::PropertyString", "DiagKind", "_legend")
+        try:
+            if len(colors) == len(lg.Shape.Faces):
+                lg.ViewObject.DiffuseColor = colors
+        except Exception:
+            pass
+        grp.addObject(lg)
+    except Exception:
+        pass
+
+
 def _label_text(doc, grp, text, point, kind, fontsize=12.0):
-    """Add a Draft text annotation at a point (graceful if Draft is
-    unavailable or its API differs between FreeCAD versions)."""
+    """Add a Draft text annotation (graceful if Draft is unavailable or its API
+    differs between FreeCAD versions)."""
     try:
         import Draft
     except Exception:
@@ -2039,733 +3049,33 @@ def _label_text(doc, grp, text, point, kind, fontsize=12.0):
     return t
 
 
-class NewLoadCase:
-    def GetResources(self):
-        return {"Pixmap": _icon("case"), "MenuText": "New Load Case",
-                "ToolTip": "Create a named load case with a nature (Dead / Live / "
-                           "Wind / Snow). Loads you add are assigned to a case, and "
-                           "combinations are built from the cases.", "Accel": "A, N"}
-
-    def IsActive(self):
-        return FreeCAD.ActiveDocument is not None
-
-    def Activated(self):
-        doc = FreeCAD.ActiveDocument
-        nature, ok = get_item("New Load Case", "Nature:", NATURES, 0)
-        if not ok:
-            return
-        default = {"Dead": "DL", "Live": "LL", "Wind": "WL", "Snow": "SL",
-                   "Other": "CASE"}[nature]
-        n = sum(1 for _, nat in _cases(doc) if nat == nature) + 1
-        name, ok = get_text("New Load Case", "Case name:", "%s%d" % (default, n))
-        if not ok or not name.strip():
-            return
-        _add_case(doc, name.strip(), nature)
-        doc.recompute()
-        info("Load case '%s' (%s) created.\n\nAdd loads to it with Add Nodal / "
-             "Member Load, then build combinations and Calculate." % (name.strip(), nature))
+def _polyline(pts):
+    """Part.makePolygon over points with consecutive near-duplicates removed
+    (a zero value at a support makes the baseline and first sample coincide,
+    which makePolygon rejects). Returns a wire or None."""
+    clean = []
+    for p in pts:
+        if not clean or (p - clean[-1]).Length > 1e-7:
+            clean.append(p)
+    if len(clean) < 2:
+        return None
+    try:
+        return Part.makePolygon(clean)
+    except Exception:
+        return None
 
 
-class DefineSupport:
-    def GetResources(self):
-        return {"Pixmap": _icon("support"), "MenuText": "Define Support",
-                "ToolTip": "Select one or more joint vertices, then apply a support "
-                           "(Fixed / Pinned / Roller). Shown as a blue cone. Supports "
-                           "are global (shared by every load case).", "Accel": "A, S"}
-
-    def IsActive(self):
-        return FreeCAD.ActiveDocument is not None
-
-    def Activated(self):
-        pts = _sel_vertices()
-        if not pts:
-            info("Select one or more joint vertices (a corner point of a member), "
-                 "then run Define Support.")
-            return
-        t, ok = get_item("Define Support", "Support type:",
-                         list(SUPPORT_TYPES.keys()), 0)
-        if not ok:
-            return
-        restr = SUPPORT_TYPES[t]
-        doc = FreeCAD.ActiveDocument
-        doc.openTransaction("DynFrame: support")
-        grp = _grp(doc, SUP_GROUP)
-        sz = _model_size([o for o in doc.Objects if is_member(o)]) * 0.02 + 20.0
-        for p in pts:
-            cone = Part.makeCone(sz, 0.0, sz * 2.0,
-                                 FreeCAD.Vector(p.x, p.y, p.z - sz * 2.0),
-                                 FreeCAD.Vector(0, 0, 1))
-            o = doc.addObject("Part::Feature", "Support")
-            o.Shape = cone
-            o.Label = "Support %s" % t.split(" (")[0]
-            _set(o, "App::PropertyString", "Restrain", restr)
-            _set(o, "App::PropertyVector", "AtNode", p)
-            try:
-                o.ViewObject.ShapeColor = (0.1, 0.4, 1.0)
-            except Exception:
-                pass
-            grp.addObject(o)
-        doc.commitTransaction()
-        doc.recompute()
-        info("Support applied to %d node(s): %s." % (len(pts), t))
-
-
-class AddNodalLoad:
-    def GetResources(self):
-        return {"Pixmap": _icon("load"), "MenuText": "Add Nodal Load",
-                "ToolTip": "Select joint vertices, pick a load case, then enter a "
-                           "point force (Fx, Fy, Fz in N). Shown as an orange arrow.",
-                "Accel": "A, L"}
-
-    def IsActive(self):
-        return FreeCAD.ActiveDocument is not None
-
-    def Activated(self):
-        pts = _sel_vertices()
-        if not pts:
-            info("Select one or more joint vertices, then add a nodal load.")
-            return
-        doc = FreeCAD.ActiveDocument
-        case = _pick_case(doc, "Add Nodal Load")
-        if case is None:
-            return
-        fz, ok = get_double("Add Nodal Load", "Fz  (N, + up / - down):",
-                            -1000.0, -1e12, 1e12)
-        if not ok:
-            return
-        fx, ok = get_double("Add Nodal Load", "Fx  (N):", 0.0, -1e12, 1e12)
-        if not ok:
-            return
-        fy, ok = get_double("Add Nodal Load", "Fy  (N):", 0.0, -1e12, 1e12)
-        if not ok:
-            return
-        if abs(fx) + abs(fy) + abs(fz) < 1e-9:
-            warn("Load is zero - nothing added.")
-            return
-        doc.openTransaction("DynFrame: nodal load")
-        grp = _grp(doc, LOAD_GROUP)
-        ln = _model_size([o for o in doc.Objects if is_member(o)]) * 0.15 + 100.0
-        fvec = FreeCAD.Vector(fx, fy, fz)
-        dirn = unit(fvec)
-        for p in pts:
-            tail = p - vscale(dirn, ln)
-            shaft = Part.makeLine(FreeCAD.Vector(tail), FreeCAD.Vector(p))
-            head = Part.makeCone(ln * 0.12, 0.0, ln * 0.25,
-                                 p - vscale(dirn, ln * 0.25), dirn)
-            o = doc.addObject("Part::Feature", "NodalLoad")
-            o.Shape = Part.makeCompound([shaft, head])
-            o.Label = "%s: (%.0f,%.0f,%.0f)N" % (case, fx, fy, fz)
-            _set(o, "App::PropertyString", "LoadType", "Nodal")
-            _set(o, "App::PropertyString", "LoadCase", case)
-            _set(o, "App::PropertyVector", "LoadVec", fvec)
-            _set(o, "App::PropertyVector", "AtNode", p)
-            try:
-                o.ViewObject.ShapeColor = (1.0, 0.3, 0.0)
-                o.ViewObject.LineWidth = 3
-            except Exception:
-                pass
-            grp.addObject(o)
-        doc.commitTransaction()
-        doc.recompute()
-        info("Nodal load (%.0f, %.0f, %.0f) N added to case '%s' on %d node(s)."
-             % (fx, fy, fz, case, len(pts)))
-
-
-class AddMemberLoad:
-    def GetResources(self):
-        return {"Pixmap": _icon("load"), "MenuText": "Add Member Load",
-                "ToolTip": "Select members, pick a load case, then apply a uniform "
-                           "distributed load (N/mm along global Z). Shown as a row of "
-                           "arrows along each member.", "Accel": "A, M"}
-
-    def IsActive(self):
-        return bool(selected_members())
-
-    def Activated(self):
-        members = [m for m in selected_members() if is_member(m)]
-        if not members:
-            info("Select one or more members, then add a distributed load.")
-            return
-        doc = FreeCAD.ActiveDocument
-        case = _pick_case(doc, "Add Member Load")
-        if case is None:
-            return
-        w, ok = get_double("Add Member Load",
-                           "Uniform load  (N/mm, global Z, + up / - down):",
-                           -5.0, -1e9, 1e9)
-        if not ok or abs(w) < 1e-12:
-            return
-        doc.openTransaction("DynFrame: member load")
-        grp = _grp(doc, LOAD_GROUP)
-        msize = _model_size(members)
-        vec = FreeCAD.Vector(0, 0, w)
-        dirn = unit(vec)
-        ln = msize * 0.08 + 50.0
-        for m in members:
-            s, e = skeleton(m)
-            arrows = []
-            for t in (0.15, 0.35, 0.55, 0.75, 0.95):
-                p = s + vscale(e - s, t)
-                tail = p - vscale(dirn, ln)
-                arrows.append(Part.makeLine(FreeCAD.Vector(tail), FreeCAD.Vector(p)))
-                arrows.append(Part.makeCone(ln * 0.14, 0.0, ln * 0.3,
-                                            p - vscale(dirn, ln * 0.3), dirn))
-            o = doc.addObject("Part::Feature", "MemberLoad")
-            o.Shape = Part.makeCompound(arrows)
-            o.Label = "%s: %.3g N/mm on %s" % (case, w, m.Label)
-            _set(o, "App::PropertyString", "LoadType", "Member")
-            _set(o, "App::PropertyString", "LoadCase", case)
-            _set(o, "App::PropertyString", "OnMember", m.Name)
-            _set(o, "App::PropertyVector", "LoadVec", vec)
-            try:
-                o.ViewObject.ShapeColor = (1.0, 0.5, 0.0)
-                o.ViewObject.LineWidth = 2
-            except Exception:
-                pass
-            grp.addObject(o)
-        doc.commitTransaction()
-        doc.recompute()
-        info("Distributed load %.3g N/mm (Z) added to case '%s' on %d member(s)."
-             % (w, case, len(members)))
-
-
-class Combinations:
-    def GetResources(self):
-        return {"Pixmap": _icon("combo"), "MenuText": "Load Combinations",
-                "ToolTip": "Generate simplified EN 1990 ULS (1.35G + 1.5Q) and SLS "
-                           "(G + Q) combinations from the load cases, or add your own "
-                           "factored combination.", "Accel": "A, B"}
-
-    def IsActive(self):
-        return FreeCAD.ActiveDocument is not None
-
-    def Activated(self):
-        doc = FreeCAD.ActiveDocument
-        cases = _cases(doc)
-        mode, ok = get_item("Load Combinations", "Action:",
-                            ["Auto ULS + SLS (EN 1990)", "Add a custom combination",
-                             "Clear all combinations"], 0)
-        if not ok:
-            return
-        if mode.startswith("Clear"):
-            _set_combos(doc, [])
-            doc.recompute()
-            info("All combinations cleared.")
-            return
-        if mode.startswith("Auto"):
-            dead = [n for n, nat in cases if nat == "Dead"]
-            var = [n for n, nat in cases if nat in ("Live", "Wind", "Snow")]
-            if not dead and not var:
-                info("Define some load cases first (New Load Case).")
-                return
-            uls = " + ".join(["1.35*%s" % d for d in dead] + ["1.5*%s" % q for q in var])
-            sls = " + ".join(["1.0*%s" % c for c in (dead + var)])
-            pairs = _combos(doc)
-            have = {p[0] for p in pairs}
-            if uls and "ULS1" not in have:
-                pairs.append(("ULS1", uls))
-            if sls and "SLS1" not in have:
-                pairs.append(("SLS1", sls))
-            _set_combos(doc, pairs)
-            doc.recompute()
-            info("Combinations generated:\n\nULS1 = %s\nSLS1 = %s\n\n(Simplified "
-                 "EN 1990: ULS 1.35G + 1.5Q, SLS G + Q. Edit the 'Combinations' "
-                 "spreadsheet or add custom ones.)" % (uls or "-", sls or "-"))
-            return
-        # custom
-        name, ok = get_text("Add Combination", "Name:", "C%d" % (len(_combos(doc)) + 1))
-        if not ok or not name.strip():
-            return
-        hint = "e.g.  1.35*%s + 1.5*%s" % (cases[0][0], cases[-1][0])
-        defn, ok = get_text("Add Combination",
-                            "Definition (factor*Case + ...):\nCases: %s"
-                            % ", ".join(c[0] for c in cases), hint)
-        if not ok or not defn.strip():
-            return
-        pairs = [p for p in _combos(doc) if p[0] != name.strip()]
-        pairs.append((name.strip(), defn.strip()))
-        _set_combos(doc, pairs)
-        doc.recompute()
-        info("Combination '%s' = %s added." % (name.strip(), defn.strip()))
-
-
-class RunAnalysis:
-    def GetResources(self):
-        return {"Pixmap": _icon("analysis"), "MenuText": "Calculate",
-                "ToolTip": "Linear-static solve for a chosen load case or "
-                           "combination. Produces reactions, deformed shape, "
-                           "switchable N/V/M diagrams and result tables.",
-                "Accel": "A, C"}
-
-    def IsActive(self):
-        return FreeCAD.ActiveDocument is not None
-
-    def Activated(self):
-        import numpy as np
-        doc = FreeCAD.ActiveDocument
-        members = [o for o in doc.Objects if is_member(o)]
-        if not members:
-            info("No frame members found. Build a frame first.")
-            return
-
-        # ---- nodes & elements ----
-        nodes = []
-
-        def nid(p, make=True):
-            for i, q in enumerate(nodes):
-                if q.distanceToPoint(p) <= 1.0:
-                    return i
-            if not make:
-                return -1
-            nodes.append(FreeCAD.Vector(p))
-            return len(nodes) - 1
-
-        elems = []
-        for m in members:
-            sp = _section_props(m)
-            if sp is None:
-                continue
-            A, Iy, Iz, J, c = sp
-            s, e = skeleton(m)
-            n1, n2 = nid(s), nid(e)
-            if n1 == n2:
-                continue
-            elems.append({"m": m, "n1": n1, "n2": n2, "A": A, "Iy": Iy, "Iz": Iz,
-                          "J": J, "c": c, "w": FreeCAD.Vector(0, 0, 0)})
-        if not elems:
-            info("Could not build an analysis model from the members.")
-            return
-        by_member = {el["m"].Name: el for el in elems}
-
-        # ---- supports ----
-        fixed = set()
-        sup_nodes = []
-        for o in doc.Objects:
-            r = getattr(o, "Restrain", None)
-            at = getattr(o, "AtNode", None)
-            if r and at is not None:
-                i = nid(FreeCAD.Vector(at), make=False)
-                if i >= 0:
-                    sup_nodes.append(i)
-                    for k, ch in enumerate(r):
-                        if ch == "1":
-                            fixed.add(6 * i + k)
-        if not fixed:
-            err("No supports defined.\n\nSelect the base joint vertices and run "
-                "'Define Support' (e.g. Fixed or Pinned), then Calculate.")
-            return
-
-        # ---- choose what to run (case / combination / all) ----
-        cases = _cases(doc)
-        combos = _combos(doc)
-        run_opts = (["All loads"] + ["Case: %s" % c[0] for c in cases]
-                    + ["Combo: %s" % cb[0] for cb in combos])
-        pick, ok = get_item("Calculate", "Analyse:", run_opts, 0)
-        if not ok:
-            return
-        sw, ok = get_item("Calculate", "Include member self-weight (as Dead)?",
-                          ["Yes", "No"], 0)
-        if not ok:
-            return
-
-        # case -> factor map for this run, and a self-weight factor
-        if pick == "All loads":
-            factors = {c[0]: 1.0 for c in cases}
-            sw_factor = 1.0
-            run_name = "All loads"
-        elif pick.startswith("Case: "):
-            cn = pick[6:]
-            factors = {cn: 1.0}
-            sw_factor = 1.0 if _nature_of(doc, cn) == "Dead" else 0.0
-            run_name = "Case " + cn
-        else:
-            cn = pick[7:]
-            defn = dict(combos).get(cn, "")
-            factors = _parse_combo(defn)
-            sw_factor = sum(f for c, f in factors.items()
-                            if _nature_of(doc, c) == "Dead")
-            run_name = "Combo " + cn
-        if sw != "Yes":
-            sw_factor = 0.0
-
-        # ---- apply loads to the model for this run ----
-        for o in doc.Objects:
-            lt = getattr(o, "LoadType", None)
-            if lt == "Member":
-                f = factors.get(getattr(o, "LoadCase", ""), 0.0)
-                el = by_member.get(getattr(o, "OnMember", ""))
-                if f and el is not None:
-                    el["w"] = el["w"] + vscale(FreeCAD.Vector(getattr(o, "LoadVec")), f)
-        if sw_factor:
-            for el in elems:
-                el["w"] = el["w"] + FreeCAD.Vector(
-                    0, 0, -el["A"] * RHO_STEEL * GRAV * sw_factor)
-
-        # ---- assemble & solve ----
-        ndof = 6 * len(nodes)
-        K = np.zeros((ndof, ndof))
-        F = np.zeros(ndof)
-        for el in elems:
-            T, L = _beam_T(nodes[el["n1"]], nodes[el["n2"]])
-            el["T"] = T; el["L"] = L
-            kl = _beam_k_local(E_STEEL, G_STEEL, el["A"], el["Iy"], el["Iz"], el["J"], L)
-            el["kl"] = kl
-            dofs = ([6 * el["n1"] + i for i in range(6)]
-                    + [6 * el["n2"] + i for i in range(6)])
-            el["dofs"] = dofs
-            K[np.ix_(dofs, dofs)] += T.T @ kl @ T
-            w = el["w"]
-            wl = T[0:3, 0:3] @ np.array([w.x, w.y, w.z])
-            el["wx"], el["wy"], el["wz"] = float(wl[0]), float(wl[1]), float(wl[2])
-            if w.Length > 1e-12:
-                fl = _fef_udl(w, T[0:3, 0:3], L)
-                el["fef"] = fl
-                F[dofs] += T.T @ fl
-            else:
-                el["fef"] = np.zeros(12)
-        for o in doc.Objects:
-            if getattr(o, "LoadType", None) == "Nodal":
-                f = factors.get(getattr(o, "LoadCase", ""), 0.0)
-                at = getattr(o, "AtNode", None)
-                if f and at is not None:
-                    i = nid(FreeCAD.Vector(at), make=False)
-                    if i >= 0:
-                        v = FreeCAD.Vector(getattr(o, "LoadVec"))
-                        F[6 * i + 0] += v.x * f
-                        F[6 * i + 1] += v.y * f
-                        F[6 * i + 2] += v.z * f
-
-        free = [d for d in range(ndof) if d not in fixed]
-        u = np.zeros(ndof)
-        try:
-            u[free] = np.linalg.solve(K[np.ix_(free, free)], F[free])
-        except Exception:
-            err("The structure is a mechanism (unstable) with the supports given. "
-                "Add more supports (or restrain more directions), then Calculate.")
-            return
-        Rreac = K @ u - F
-
-        msize = _model_size(members)
-        maxd = max((u[6 * i] ** 2 + u[6 * i + 1] ** 2 + u[6 * i + 2] ** 2) ** 0.5
-                   for i in range(len(nodes)))
-
-        # ---- per-element internal force fields (sampled) ----
-        NS = 16
-        comp_max = {k: 0.0 for k in DIAG_KINDS}
-        max_util = 0.0
-        for el in elems:
-            dloc = el["T"] @ u[el["dofs"]]
-            el["dloc"] = dloc
-            fend = el["kl"] @ dloc - el["fef"]
-            el["fend"] = fend
-            L = el["L"]; wy, wz, wx = el["wy"], el["wz"], el["wx"]
-
-            # bind the current element's values as defaults so each stored
-            # closure keeps its own fend/L/w (avoids the loop-closure trap)
-            def val(kind, x, fend=fend, L=L, wx=wx, wy=wy, wz=wz):
-                if kind == "N":
-                    return -(fend[0] + wx * x)
-                if kind == "Vy":
-                    return fend[1] + wy * x
-                if kind == "Vz":
-                    return fend[2] + wz * x
-                if kind == "Mx":
-                    return -fend[3]
-                if kind == "My":
-                    return fend[4] * (1 - x / L) - fend[10] * (x / L) - wz * x * (L - x) / 2.0
-                return -fend[5] * (1 - x / L) + fend[11] * (x / L) - wy * x * (L - x) / 2.0
-
-            el["val"] = val
-            samp = {}
-            for kind in DIAG_KINDS:
-                vals = [val(kind, L * s / NS) for s in range(NS + 1)]
-                samp[kind] = vals
-                pk = max(abs(v) for v in vals)
-                comp_max[kind] = max(comp_max[kind], pk)
-            el["samp"] = samp
-            N = -fend[0]
-            Mpk = max((samp["My"][s] ** 2 + samp["Mz"][s] ** 2) ** 0.5
-                      for s in range(NS + 1))
-            Imin = min(el["Iy"], el["Iz"])
-            sigma = abs(N) / el["A"] + (Mpk * el["c"] / Imin if Imin > 1e-9 else 0.0)
-            util = sigma / FY_STEEL
-            max_util = max(max_util, util)
-            el["util"] = util; el["sigma"] = sigma
-            try:
-                uc = max(0.0, min(1.0, util))
-                el["m"].ViewObject.ShapeColor = (float(uc), float(1.0 - uc), 0.2)
-            except Exception:
-                pass
-
-        # ---- build visuals (deformed shape + N/V/M diagrams) ----
-        doc.openTransaction("DynFrame: results")
-        # clear previous diagrams / deformed shape so re-runs stay clean
-        # (match by property or name prefix to catch any 00x name suffixes)
-        for o in list(doc.Objects):
-            if getattr(o, "DiagKind", None) is not None \
-                    or o.Name.startswith(("Diagram_", "DeformedShape", "MomentDiagram")):
-                try:
-                    doc.removeObject(o.Name)
-                except Exception:
-                    pass
-        rg = _grp(doc, RES_GROUP)
-        dg = _grp(doc, DIA_GROUP)
-
-        # deformed shape: sample the real bent curve inside each member using
-        # the cubic (Hermite) shape functions, so single-span members still show
-        # their sag. Rotation signs match the element: uy uses +rot, uz uses -rot
-        # (local-y bending has the opposite coupling sign).
-        ND = 10
-        maxoff = 0.0
-        for el in elems:
-            T = el["T"]; L = el["L"]; d = el["dloc"]; R3 = T[0:3, 0:3]
-            lx = FreeCAD.Vector(float(R3[0][0]), float(R3[0][1]), float(R3[0][2]))
-            ly = FreeCAD.Vector(float(R3[1][0]), float(R3[1][1]), float(R3[1][2]))
-            lz = FreeCAD.Vector(float(R3[2][0]), float(R3[2][1]), float(R3[2][2]))
-            base = nodes[el["n1"]]
-            samp = []
-            for s in range(ND + 1):
-                xi = s / float(ND); x = L * xi
-                n1 = 1 - 3 * xi ** 2 + 2 * xi ** 3
-                n2 = L * (xi - 2 * xi ** 2 + xi ** 3)
-                n3 = 3 * xi ** 2 - 2 * xi ** 3
-                n4 = L * (-xi ** 2 + xi ** 3)
-                ux = d[0] + (d[6] - d[0]) * xi
-                uy = n1 * d[1] + n2 * d[5] + n3 * d[7] + n4 * d[11]
-                uz = n1 * d[2] - n2 * d[4] + n3 * d[8] - n4 * d[10]
-                off = vscale(lx, ux) + vscale(ly, uy) + vscale(lz, uz)
-                samp.append((base + vscale(lx, x), off))
-                maxoff = max(maxoff, off.Length)
-            el["defsamp"] = samp
-        dscale = (0.08 * msize / maxoff) if maxoff > 1e-9 else 1.0
-        dlines = []
-        for el in elems:
-            pts = [p + vscale(off, dscale) for (p, off) in el["defsamp"]]
-            w = _polyline(pts)
-            if w is not None:
-                dlines.append(w)
-        if dlines:
-            dob = doc.addObject("Part::Feature", "DeformedShape")
-            dob.Shape = Part.makeCompound(dlines)
-            dob.Label = "Deformed shape (x%.0f)" % dscale
-            try:
-                dob.ViewObject.ShapeColor = (0.1, 0.8, 0.3); dob.ViewObject.LineWidth = 2
-            except Exception:
-                pass
-            rg.addObject(dob)
-
-        # one diagram object per component (local offset dir per component)
-        off_axis = {"N": 2, "Vz": 2, "My": 2, "Mx": 2, "Vy": 1, "Mz": 1}
-        for kind in DIAG_KINDS:
-            if comp_max[kind] < 1e-9:
-                continue
-            scale = 0.13 * msize / comp_max[kind]
-            lines = []
-            labelpts = []
-            for el in elems:
-                T = el["T"]; L = el["L"]; R3 = T[0:3, 0:3]
-                lx = FreeCAD.Vector(float(R3[0][0]), float(R3[0][1]), float(R3[0][2]))
-                axis = off_axis[kind]
-                la = FreeCAD.Vector(float(R3[axis][0]), float(R3[axis][1]),
-                                    float(R3[axis][2]))
-                base = nodes[el["n1"]]
-                pts = [base]
-                pkv = 0.0; pkp = base
-                for s in range(NS + 1):
-                    x = L * s / NS
-                    v = el["samp"][kind][s]
-                    p = base + vscale(lx, x) + vscale(la, v * scale)
-                    pts.append(p)
-                    if abs(v) >= abs(pkv):
-                        pkv = v; pkp = p
-                pts.append(base + vscale(lx, L))
-                w = _polyline(pts)
-                if w is not None:
-                    lines.append(w)
-                if abs(pkv) > 1e-6:
-                    labelpts.append((pkp, pkv))
-            if not lines:
-                continue
-            dob2 = doc.addObject("Part::Feature", "Diagram_%s" % kind)
-            dob2.Shape = Part.makeCompound(lines)
-            dob2.Label = "%s diagram" % kind
-            _set(dob2, "App::PropertyString", "DiagKind", kind)
-            col = {"N": (0.2, 0.2, 0.9), "Vy": (0.0, 0.6, 0.6), "Vz": (0.0, 0.6, 0.6),
-                   "Mx": (0.6, 0.3, 0.8), "My": (0.9, 0.1, 0.1),
-                   "Mz": (0.9, 0.4, 0.1)}[kind]
-            try:
-                dob2.ViewObject.ShapeColor = col; dob2.ViewObject.LineWidth = 2
-                dob2.ViewObject.Visibility = (kind == "My")
-            except Exception:
-                pass
-            dg.addObject(dob2)
-            for (pp, vv) in labelpts:
-                t = _label_text(doc, dg, "%.4g" % vv, pp, kind,
-                                fontsize=max(8.0, msize * 0.03))
-                if t is not None:
-                    try:
-                        t.ViewObject.Visibility = (kind == "My")
-                    except Exception:
-                        pass
-        doc.commitTransaction()
-
-        # ---- result tables ----
-        self._tables(doc, nodes, sup_nodes, Rreac, u, elems, NS, run_name, rg)
-
-        try:
-            FreeCADGui.activeDocument().activeView().viewAxonometric()
-            FreeCADGui.SendMsgToActiveView("ViewFit")
-        except Exception:
-            pass
-        info("Analysis complete - %s.\n\n"
-             "Nodes %d | Members %d | Restrained DOFs %d\n"
-             "Max displacement:  %.3f mm\n"
-             "Max |My|:  %.0f N.mm   Max |Mz|:  %.0f N.mm\n"
-             "Max stress / utilisation:  %.1f MPa / %.2f  (yield %.0f MPa)\n\n"
-             "Shown: green 'Deformed shape' and the red 'My diagram'. Use "
-             "'Show Force Diagram' to switch to N, Vy, Vz, Mx, My or Mz. Tables: "
-             "Reactions, Displacements, BarForces.\n\nLinear static only - modal, "
-             "buckling, seismic and code checks are later phases." %
-             (run_name, len(nodes), len(elems), len(fixed), maxd,
-              comp_max["My"], comp_max["Mz"], max_util * FY_STEEL, max_util, FY_STEEL))
-
-    def _tables(self, doc, nodes, sup_nodes, Rreac, u, elems, NS, run_name, rg):
-        def sheet(name):
-            sh = doc.getObject(name) or doc.addObject("Spreadsheet::Sheet", name)
-            sh.Label = name; sh.clearAll()
-            if rg is not None and sh not in rg.Group:
-                rg.addObject(sh)
-            return sh
-        try:
-            sh = sheet("Reactions")
-            sh.set("A1", "REACTIONS - %s (steel)" % run_name)
-            for col, h in zip("ABCDEFG", ["Node", "Rx (N)", "Ry (N)", "Rz (N)",
-                                          "Mx (N.mm)", "My (N.mm)", "Mz (N.mm)"]):
-                sh.set("%s2" % col, h)
-            r = 3
-            for i in sorted(set(sup_nodes)):
-                sh.set("A%d" % r, "N%d (%.0f,%.0f,%.0f)"
-                       % (i, nodes[i].x, nodes[i].y, nodes[i].z))
-                for c, col in enumerate("BCDEFG"):
-                    sh.set("%s%d" % (col, r), "%.1f" % Rreac[6 * i + c])
-                r += 1
-
-            sh = sheet("Displacements")
-            sh.set("A1", "NODAL DISPLACEMENTS - %s" % run_name)
-            for col, h in zip("ABCDEFG", ["Node", "Ux (mm)", "Uy (mm)", "Uz (mm)",
-                                          "Rx (rad)", "Ry (rad)", "Rz (rad)"]):
-                sh.set("%s2" % col, h)
-            for i in range(len(nodes)):
-                r = i + 3
-                sh.set("A%d" % r, "N%d (%.0f,%.0f,%.0f)"
-                       % (i, nodes[i].x, nodes[i].y, nodes[i].z))
-                for c, col in zip(range(3), "BCD"):
-                    sh.set("%s%d" % (col, r), "%.4g" % u[6 * i + c])
-                for c, col in zip(range(3, 6), "EFG"):
-                    sh.set("%s%d" % (col, r), "%.3e" % u[6 * i + c])
-
-            sh = sheet("BarForces")
-            sh.set("A1", "MEMBER FORCES - %s  (Start x=0, End x=L)" % run_name)
-            heads = ["Member", "End", "N (N)", "Vy (N)", "Vz (N)", "Mx (N.mm)",
-                     "My (N.mm)", "Mz (N.mm)", "Stress(MPa)", "Util."]
-            for col, h in zip("ABCDEFGHIJ", heads):
-                sh.set("%s2" % col, h)
-            r = 3
-            for el in elems:
-                L = el["L"]; v = el["val"]
-                for endname, x in (("Start", 0.0), ("End", L)):
-                    sh.set("A%d" % r, str(el["m"].Label) if endname == "Start" else "")
-                    sh.set("B%d" % r, endname)
-                    sh.set("C%d" % r, "%.1f" % v("N", x))
-                    sh.set("D%d" % r, "%.1f" % v("Vy", x))
-                    sh.set("E%d" % r, "%.1f" % v("Vz", x))
-                    sh.set("F%d" % r, "%.0f" % v("Mx", x))
-                    sh.set("G%d" % r, "%.0f" % v("My", x))
-                    sh.set("H%d" % r, "%.0f" % v("Mz", x))
-                    if endname == "Start":
-                        sh.set("I%d" % r, "%.1f" % el["sigma"])
-                        sh.set("J%d" % r, "%.2f" % el["util"])
-                    r += 1
-            doc.recompute()
-        except Exception as e:
-            FreeCAD.Console.PrintError("DynFrame: result tables failed (%s)\n" % e)
-
-
-class ShowDiagram:
-    def GetResources(self):
-        return {"Pixmap": _icon("diagram"), "MenuText": "Show Force Diagram",
-                "ToolTip": "Switch the visible internal-force diagram: axial N, "
-                           "shears Vy/Vz, torsion Mx, or bending My/Mz (Robot-style "
-                           "NTM). Run Calculate first.", "Accel": "A, D"}
-
-    def IsActive(self):
-        return FreeCAD.ActiveDocument is not None
-
-    def Activated(self):
-        doc = FreeCAD.ActiveDocument
-        have = sorted({getattr(o, "DiagKind") for o in doc.Objects
-                       if getattr(o, "DiagKind", None)})
-        if not have:
-            info("No diagrams yet. Run Calculate first.")
-            return
-        order = [k for k in DIAG_KINDS if k in have]
-        labels = {"N": "N  - axial force", "Vy": "Vy - shear (local y)",
-                  "Vz": "Vz - shear (local z)", "Mx": "Mx - torsion",
-                  "My": "My - bending (major)", "Mz": "Mz - bending (minor)"}
-        pick, ok = get_item("Show Force Diagram", "Component:",
-                            [labels[k] for k in order] + ["(hide all)"], 0)
-        if not ok:
-            return
-        sel = None if pick.startswith("(hide") else order[[labels[k] for k in order].index(pick)]
-        for o in doc.Objects:
-            k = getattr(o, "DiagKind", None)
-            if k:
-                try:
-                    o.ViewObject.Visibility = (k == sel)
-                except Exception:
-                    pass
-        doc.recompute()
-
-
-class ClearAnalysis:
-    def GetResources(self):
-        return {"Pixmap": _icon("analysis"), "MenuText": "Clear Analysis",
-                "ToolTip": "Remove supports, loads, combinations, diagrams and result "
-                           "tables, and reset member colours.", "Accel": "A, X"}
-
-    def IsActive(self):
-        return FreeCAD.ActiveDocument is not None
-
-    def Activated(self):
-        doc = FreeCAD.ActiveDocument
-        doc.openTransaction("DynFrame: clear analysis")
-        res_sheets = ("Reactions", "Displacements", "BarForces", "LoadCases",
-                      "Combinations", "AnalysisResults")
-        to_del = []
-        for o in list(doc.Objects):
-            if getattr(o, "Restrain", None) is not None \
-                    or getattr(o, "LoadType", None) is not None \
-                    or getattr(o, "DiagKind", None) is not None \
-                    or o.Name in ("DeformedShape", "MomentDiagram", META_NAME) \
-                    or o.Name in res_sheets \
-                    or (o.TypeId == "App::DocumentObjectGroup"
-                        and o.Label in (SUP_GROUP, LOAD_GROUP, RES_GROUP, DIA_GROUP,
-                                        "Analysis Setup")):
-                to_del.append(o.Name)
-        for m in [o for o in doc.Objects if is_member(o)]:
-            try:
-                m.ViewObject.ShapeColor = (0.8, 0.8, 0.82)
-            except Exception:
-                pass
-        for name in to_del:
-            try:
-                doc.removeObject(name)
-            except Exception:
-                pass
-        doc.commitTransaction()
-        doc.recompute()
-        info("Cleared supports, loads, combinations, diagrams and results; "
-             "member colours reset.")
+def _polyface(pts):
+    clean = []
+    for p in pts:
+        if not clean or (p - clean[-1]).Length > 1e-7:
+            clean.append(p)
+    if len(clean) < 3:
+        return None
+    try:
+        return Part.Face(Part.makePolygon(clean + [clean[0]]))
+    except Exception:
+        return None
 
 
 class RebuildFromSketch:
@@ -2837,6 +3147,10 @@ _add("DynFrame_MirrorMembers", MirrorMembers)
 _add("DynFrame_RectPattern", RectPattern)
 _add("DynFrame_CircPattern", CircPattern)
 _add("DynFrame_BOM", BOM)
+_add("DynFrame_AddBars", AddBars)
+_add("DynFrame_BarsFromMembers", BarsFromMembers)
+_add("DynFrame_EditTables", EditTables)
+_add("DynFrame_BuildFromTables", BuildFromTables)
 _add("DynFrame_NewLoadCase", NewLoadCase)
 _add("DynFrame_DefineSupport", DefineSupport)
 _add("DynFrame_AddNodalLoad", AddNodalLoad)

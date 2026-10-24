@@ -50,10 +50,14 @@ class DynFrameWorkbench(FreeCADGui.Workbench):
         skel = ["DynFrame_Skeleton3D", "DynFrame_ConstrainedSketch"]
         model = ["DynFrame_Hole", "DynFrame_QuickFillet"]
         report = ["DynFrame_CutList", "DynFrame_BOM"]
-        analysis = ["DynFrame_NewLoadCase", "DynFrame_DefineSupport",
-                    "DynFrame_AddNodalLoad", "DynFrame_AddMemberLoad",
-                    "DynFrame_Combinations", "DynFrame_RunAnalysis",
-                    "DynFrame_ShowDiagram", "DynFrame_ClearAnalysis"]
+        structure = ["DynFrame_AddBars", "DynFrame_BarsFromMembers",
+                     "DynFrame_EditTables", "DynFrame_BuildFromTables"]
+        loads = ["DynFrame_NewLoadCase", "DynFrame_DefineSupport",
+                 "DynFrame_AddNodalLoad", "DynFrame_AddMemberLoad",
+                 "DynFrame_Combinations"]
+        results = ["DynFrame_RunAnalysis", "DynFrame_ShowDiagram",
+                   "DynFrame_ClearAnalysis"]
+        analysis = structure + loads + results
         io = ["DynFrame_ExportStep", "DynFrame_ExportStl"]
         setup = ["DynFrame_InventorNav"]
 
@@ -62,9 +66,13 @@ class DynFrameWorkbench(FreeCADGui.Workbench):
         self.appendToolbar("DynFrame · Skeleton", skel)
         self.appendToolbar("DynFrame · Model", model)
         self.appendToolbar("DynFrame · Report", report)
-        self.appendToolbar("DynFrame · Analysis", analysis)
+        self.appendToolbar("DynFrame · Structure", structure)
+        self.appendToolbar("DynFrame · Loads", loads)
+        self.appendToolbar("DynFrame · Results", results)
         self.appendToolbar("DynFrame · Export", io)
-        self.appendMenu("DynFrame · Analysis", analysis)
+        self.appendMenu(["DynFrame", "Analysis (Structure)"], structure)
+        self.appendMenu(["DynFrame", "Analysis (Loads)"], loads)
+        self.appendMenu(["DynFrame", "Analysis (Results)"], results)
         self.appendMenu("DynFrame", frame + pattern + skel + model + report
                         + analysis + io + setup)
         FreeCAD.Console.PrintMessage("DynFrame workbench loaded\n")

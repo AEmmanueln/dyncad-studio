@@ -47,49 +47,61 @@ tube, **T** sections, **flat bar**, **round bar**. Edit
   centre-lines in 3D, then insert members along them. (FreeCAD's Draft
   polyline is its 3D-sketch equivalent.)
 
-**Frame Analysis (Robot-style workflow)**
-A linear-static solver modelled on Autodesk Robot Structural Analysis:
-organise loads into named **load cases**, build **combinations**, run a
-chosen case or combination, then read the results as switchable **N/V/M
-diagrams** and reaction / displacement / bar-force tables. Commands live on
-the **DynFrame · Analysis** toolbar/menu, in workflow order:
+**Frame Analysis — Robot-style line/stick model**
+The analysis entity is a **bar**: a *line* (two nodes) carrying a **section**
+and a **material** — not a swept solid. That is how Autodesk Robot
+Structural Analysis works, and it is what scales to large structures (a
+high-rise is thousands of lines, which would be impossible as solids). The
+solid Frame Generator above stays for fabrication and cut-lists; the line
+model is what you analyse. Commands are on three toolbars/menus —
+**DynFrame · Structure**, **· Loads**, **· Results**.
 
-1. **New Load Case** — create a named case with a nature (Dead, Live, Wind,
-   Snow, Other). Loads you add belong to a case, and combinations are built
-   from the cases. (A default `DL1` Dead case is created if you add a load
-   before making one.)
-2. **Define Support** — select joint vertices and pick a support type
-   (Fixed, Pinned, or a Roller freeing specific directions). Blue cone.
-   Supports are global (shared by every case).
-3. **Add Nodal Load** — select joint vertices, pick a case, enter a point
-   force (Fx, Fy, Fz in N). Orange arrow.
-4. **Add Member Load** — select members, pick a case, apply a uniform
-   distributed load (N/mm along global Z). Row of arrows along the member.
-5. **Load Combinations** — auto-generate simplified EN 1990 combinations
-   (**ULS** = 1.35·G + 1.5·Q, **SLS** = G + Q) from the defined cases, or
-   enter your own factored combination (e.g. `1.35*DL1 + 1.5*LL1`). Stored
-   in the `Combinations` spreadsheet.
-6. **Calculate** — choose a single case, a combination, or *All loads*, and
-   whether to add member self-weight (as Dead). Assembles a 3D
-   Euler–Bernoulli direct-stiffness model (6 DOF/node) and solves. Produces:
-   - a green **Deformed shape** — the real bent curve inside each member
-     (cubic shape functions), so even single-span members show their sag;
-   - six internal-force diagrams **N, Vy, Vz, Mx, My, Mz**, one visible at a
-     time, with the peak value labelled on each member;
+*Build the line model (DynFrame · Structure) — any of three ways:*
+1. **Add Bars (from lines)** — draw the structure as sketch / Draft lines
+   (fast even for a big column grid), select them, pick a section + material
+   → one bar per line.
+2. **Bars from Members** — convert the solid members you already built into
+   bars, keeping each member's section.
+3. **Node/Bar Tables** + **Build from Tables** — type node coordinates and
+   bar connectivity (NodeI, NodeJ, Section, Material) into the `Nodes` and
+   `Bars` spreadsheets (Robot's tables), then build the model from them.
+
+*Loads (DynFrame · Loads):*
+4. **New Load Case** — a named case with a nature (Dead / Live / Wind /
+   Snow / Other). Loads belong to a case.
+5. **Define Support** — select node vertices → Fixed / Pinned / Roller.
+6. **Add Nodal Load** / **Add Bar Load** — point forces at nodes, or uniform
+   distributed loads on bars, each assigned to a case.
+7. **Load Combinations** — auto EN 1990 **ULS** (1.35G + 1.5Q) and **SLS**
+   (G + Q), or a custom factored combination (`1.35*DL1 + 1.5*LL1`).
+
+*Solve & results (DynFrame · Results):*
+8. **Calculate** — choose a case, a combination, or *All loads* (+ optional
+   self-weight). Solves a 3D Euler–Bernoulli direct-stiffness model
+   (6 DOF/node) **per material**. Produces:
+   - a green **Deformed shape** — the real bent curve inside each bar (cubic
+     shape functions), so single-span bars still show their sag;
+   - six **gradient-filled** force diagrams **N, Vy, Vz, Mx, My, Mz** plus a
+     combined **Stress** map — each coloured blue→red along the bar length
+     (a colour ramp, not two flat colours), with a legend;
    - **Reactions**, **Displacements** and **BarForces** (start/end N, Vy,
-     Vz, Mx, My, Mz, stress, utilisation) spreadsheets;
-   - members **coloured green→red by utilisation** against steel yield.
-7. **Show Force Diagram** — switch which component (N / Vy / Vz / Mx / My /
-   Mz) is displayed, Robot "NTM"-style.
-8. **Clear Analysis** — remove supports, loads, combinations, diagrams and
-   tables, and reset member colours.
+     Vz, Mx, My, Mz, stress, utilisation) spreadsheets, alongside your
+     `Nodes` / `Bars` tables.
+9. **Show Force Diagram** — switch which component (N / Vy / Vz / Mx / My /
+   Mz / Stress) is displayed, Robot "NTM"-style.
+10. **Clear Results** — remove results only, or everything (supports, loads,
+    combinations).
+
+**Materials:** Steel S235 / S275 / S355, Stainless 304, Aluminium 6061-T6
+(each with its own E, G, yield and density). Edit `MATERIALS` in
+`dynframe_commands.py` to add more.
 
 > The solver is validated to zero error against textbook cases in both
 > bending planes — cantilever (point and UDL), simply-supported and
 > fixed-fixed beams (tip = wL⁴/8EI, mid = 5wL⁴/384EI, M = wL²/8, end =
 > wL²/12), all six force components, and load-case superposition — and
-> solves portal/space frames. It is **linear static only**; modal,
-> buckling, seismic and code-checks are later phases.
+> solves portal/space frames on the line model. It is **linear static
+> only**; modal, buckling, seismic and code-checks are later phases.
 
 **Modeling / export / setup**
 - **Quick Fillet** — fillet selected solid edges by a radius.

@@ -2155,9 +2155,10 @@ def _make_bar(doc, p1, p2, section, material, grp):
     _set(o, "App::PropertyVector", "BarStart", FreeCAD.Vector(p1))
     _set(o, "App::PropertyVector", "BarEnd", FreeCAD.Vector(p2))
     try:
-        o.ViewObject.LineWidth = 4
-        o.ViewObject.LineColor = (0.30, 0.45, 0.65)
+        o.ViewObject.LineWidth = 3
+        o.ViewObject.LineColor = (0.85, 0.90, 1.0)   # light, so it reads on dark bg
         o.ViewObject.PointSize = 6
+        o.ViewObject.PointColor = (1.0, 0.9, 0.2)
     except Exception:
         pass
     if grp is not None:
@@ -2698,7 +2699,7 @@ class RunAnalysis:
             factors = {c[0]: 1.0 for c in cases}; sw_factor = 1.0; run_name = "All loads"
         elif pick.startswith("Case: "):
             cn = pick[6:]; factors = {cn: 1.0}
-            sw_factor = 1.0 if _nature_of(doc, cn) == "Dead" else 0.0
+            sw_factor = 1.0          # self-weight applied when the option is on
             run_name = "Case " + cn
         else:
             cn = pick[7:]; factors = _parse_combo(dict(combos).get(cn, ""))
@@ -2759,7 +2760,7 @@ class RunAnalysis:
         maxd = max((u[6 * i] ** 2 + u[6 * i + 1] ** 2 + u[6 * i + 2] ** 2) ** 0.5
                    for i in range(len(nodes)))
 
-        NS = 16
+        NS = 10
         comp_max = {k: 0.0 for k in DIAG_KINDS}
         comp_max["Disp"] = 0.0
         max_util = 0.0
@@ -2800,130 +2801,78 @@ class RunAnalysis:
             util = (max(samp["Stress"]) / Fy) if Fy > 0 else 0.0
             el["util"] = util; max_util = max(max_util, util)
 
-        # ---- build visuals ----
+        # ---- build visuals: colour the STRUCTURE by each result (thick tubes) ----
+        # Every result (Displacement, N, Vy, Vz, Mx, My, Mz, Stress) is drawn as
+        # the structure rendered in thick tube segments coloured blue->red by the
+        # value along each bar - the Inventor/Robot contour look, visible from any
+        # angle. Displacement uses the deformed shape; the rest use the real model.
         doc.openTransaction("DynFrame: results")
         for o in list(doc.Objects):
             if getattr(o, "DiagKind", None) is not None \
-                    or o.Name.startswith(("Diagram_", "DeformedShape", "Legend",
-                                          "MomentDiagram")):
+                    or o.Name.startswith(("Diagram_", "Result_", "DeformedShape",
+                                          "Legend", "MomentDiagram")):
                 try:
                     doc.removeObject(o.Name)
                 except Exception:
                     pass
         rg = _grp(doc, RES_GROUP); dg = _grp(doc, DIA_GROUP)
 
-        # displacement contour: the real bent curve inside each bar (cubic shape
-        # functions) drawn as a thin ribbon coloured blue->red by |u| - the
-        # Inventor/Robot-style deformed displacement plot.
-        ND = 12; maxoff = 0.0
+        # deformed geometry + displacement magnitude per bar (cubic shape fns)
+        maxoff = 0.0
         for el in elems:
             T = el["T"]; L = el["L"]; d = el["dloc"]; R3 = T[0:3, 0:3]
             lx = FreeCAD.Vector(*[float(R3[0][j]) for j in range(3)])
             ly = FreeCAD.Vector(*[float(R3[1][j]) for j in range(3)])
             lz = FreeCAD.Vector(*[float(R3[2][j]) for j in range(3)])
-            base = nodes[el["n1"]]; samp = []; disp = []
-            for s in range(ND + 1):
-                xi = s / float(ND); x = L * xi
+            base = nodes[el["n1"]]; statpts = []; offs = []; disp = []
+            for s in range(NS + 1):
+                xi = s / float(NS); x = L * xi
                 n1 = 1 - 3 * xi ** 2 + 2 * xi ** 3; n2 = L * (xi - 2 * xi ** 2 + xi ** 3)
                 n3 = 3 * xi ** 2 - 2 * xi ** 3; n4 = L * (-xi ** 2 + xi ** 3)
                 ux = d[0] + (d[6] - d[0]) * xi
                 uy = n1 * d[1] + n2 * d[5] + n3 * d[7] + n4 * d[11]
                 uz = n1 * d[2] - n2 * d[4] + n3 * d[8] - n4 * d[10]
                 off = vscale(lx, ux) + vscale(ly, uy) + vscale(lz, uz)
-                samp.append((base + vscale(lx, x), off)); disp.append(off.Length)
+                statpts.append(base + vscale(lx, x)); offs.append(off); disp.append(off.Length)
                 maxoff = max(maxoff, off.Length)
-            el["defsamp"] = samp; el["disp"] = disp
-            el["ribaxis"] = lz
+            el["statpts"] = statpts; el["offs"] = offs; el["disp"] = disp
             comp_max["Disp"] = max(comp_max["Disp"], max(disp))
         dscale = (0.08 * msize / maxoff) if maxoff > 1e-9 else 1.0
-        dmax = comp_max["Disp"]; hw = msize * 0.004 + 0.5
-        dfaces = []; dcolors = []
         for el in elems:
-            la = el["ribaxis"]
-            pts = [p + vscale(off, dscale) for (p, off) in el["defsamp"]]
-            top = [p + vscale(la, hw) for p in pts]
-            bot = [p - vscale(la, hw) for p in pts]
-            dd = el["disp"]
-            for s in range(len(pts) - 1):
-                q = _polyface([bot[s], bot[s + 1], top[s + 1], top[s]])
-                if q is None:
-                    continue
-                dfaces.append(q)
-                vmid = 0.5 * (dd[s] + dd[s + 1])
-                dcolors.append(_ramp(vmid / dmax if dmax > 1e-12 else 0.0) + (0.0,))
-        if dfaces:
-            dob = doc.addObject("Part::Feature", "Diagram_Disp")
-            dob.Shape = Part.makeCompound(dfaces)
-            dob.Label = "Displacement (mm)  x%.0f" % dscale
-            _set(dob, "App::PropertyString", "DiagKind", "Disp")
-            _set(dob, "App::PropertyFloat", "CompMax", float(dmax))
-            _set(dob, "App::PropertyFloat", "CompMin", 0.0)
-            try:
-                dob.ViewObject.Visibility = True
-                if len(dcolors) == len(dob.Shape.Faces):
-                    dob.ViewObject.DiffuseColor = dcolors
-                else:
-                    dob.ViewObject.ShapeColor = (0.1, 0.6, 0.9)
-            except Exception:
-                pass
-            rg.addObject(dob)
+            el["defpts"] = [el["statpts"][s] + vscale(el["offs"][s], dscale)
+                            for s in range(NS + 1)]
 
-        # gradient-filled force diagrams, one object per component
-        off_axis = {"N": 2, "Vz": 2, "My": 2, "Mx": 2, "Stress": 2, "Vy": 1, "Mz": 1}
+        radius = max(msize * 0.007, 2.0)
         default_kind = "Disp"
-        for kind in DIAG_KINDS:
+        for kind in ["Disp"] + DIAG_KINDS:
             cmax = comp_max[kind]
-            if cmax < 1e-9:
+            if cmax < 1e-12:
                 continue
-            scale = 0.13 * msize / cmax
-            faces = []; colors = []
+            perbar = []
             for el in elems:
-                T = el["T"]; L = el["L"]; R3 = T[0:3, 0:3]
-                lx = FreeCAD.Vector(*[float(R3[0][j]) for j in range(3)])
-                axis = off_axis[kind]
-                la = FreeCAD.Vector(*[float(R3[axis][j]) for j in range(3)])
-                base = nodes[el["n1"]]; vals = el["samp"][kind]
-                pcurve = [base + vscale(lx, L * s / NS) + vscale(la, vals[s] * scale)
-                          for s in range(NS + 1)]
-                pbase = [base + vscale(lx, L * s / NS) for s in range(NS + 1)]
-                for s in range(NS):
-                    quad = _polyface([pbase[s], pbase[s + 1], pcurve[s + 1], pcurve[s]])
-                    if quad is None:
-                        continue
-                    faces.append(quad)
-                    vmid = 0.5 * (abs(vals[s]) + abs(vals[s + 1]))
-                    colors.append(_ramp(vmid / cmax) + (0.0,))
-            if not faces:
-                continue
-            dob2 = doc.addObject("Part::Feature", "Diagram_%s" % kind)
-            dob2.Shape = Part.makeCompound(faces)
-            dob2.Label = "%s diagram" % kind
-            _set(dob2, "App::PropertyString", "DiagKind", kind)
-            _set(dob2, "App::PropertyFloat", "CompMax", float(cmax))
-            _set(dob2, "App::PropertyFloat", "CompMin", 0.0)
-            try:
-                dob2.ViewObject.Visibility = (kind == default_kind)
-                if len(colors) == len(dob2.Shape.Faces):
-                    dob2.ViewObject.DiffuseColor = colors
+                if kind == "Disp":
+                    perbar.append((el["defpts"], el["disp"]))
                 else:
-                    dob2.ViewObject.ShapeColor = (0.9, 0.2, 0.1)
-            except Exception:
-                pass
-            dg.addObject(dob2)
-            # label the global extreme of this component
+                    perbar.append((el["statpts"], [abs(v) for v in el["samp"][kind]]))
+            grp = rg if kind == "Disp" else dg
+            ob = _result_tube(doc, grp, "Diagram_%s" % kind, kind, perbar,
+                              radius, cmax, kind == default_kind)
+            if ob is None:
+                continue
+            ob.Label = ("Displacement (mm) x%.0f" % dscale) if kind == "Disp" \
+                else "%s result" % kind
+            # label the global peak of this result
             pk = 0.0; pkp = None
             for el in elems:
-                T = el["T"]; L = el["L"]; R3 = T[0:3, 0:3]
-                lx = FreeCAD.Vector(*[float(R3[0][j]) for j in range(3)])
-                la = FreeCAD.Vector(*[float(R3[off_axis[kind]][j]) for j in range(3)])
-                base = nodes[el["n1"]]; vals = el["samp"][kind]
+                vals = el["disp"] if kind == "Disp" else el["samp"][kind]
+                pts = el["defpts"] if kind == "Disp" else el["statpts"]
                 for s in range(NS + 1):
                     if abs(vals[s]) >= abs(pk):
-                        pk = vals[s]
-                        pkp = base + vscale(lx, L * s / NS) + vscale(la, vals[s] * scale)
-            if pkp is not None and abs(pk) > 1e-6:
-                t = _label_text(doc, dg, "%s max %.4g" % (kind, pk), pkp, kind,
-                                fontsize=max(8.0, msize * 0.035))
+                        pk = vals[s]; pkp = pts[s]
+            if pkp is not None and abs(pk) > 1e-9:
+                t = _label_text(doc, grp, "%s max %.4g" % (kind, pk),
+                                pkp + FreeCAD.Vector(0, 0, radius * 2.5), kind,
+                                fontsize=max(8.0, msize * 0.03))
                 if t is not None:
                     try:
                         t.ViewObject.Visibility = (kind == default_kind)
@@ -3343,12 +3292,16 @@ def _parse_spacings(s):
         if "@" in tok:
             n, v = tok.split("@", 1)
             try:
-                out += [float(v)] * int(float(n))
+                d = float(v)
+                if d > 1e-6:
+                    out += [d] * int(float(n))
             except Exception:
                 pass
         else:
             try:
-                out.append(float(tok))
+                d = float(tok)
+                if d > 1e-6:                 # drop zero / blank / negative bays
+                    out.append(d)
             except Exception:
                 pass
     return out
@@ -3375,9 +3328,15 @@ class GridGen:
     def Activated(self):
         doc = FreeCAD.ActiveDocument
         vals = form_dialog("Generate Grid Structure", [
-            {"key": "x", "label": "X bay spacings (mm)", "kind": "text", "default": "3@5000"},
-            {"key": "y", "label": "Y bay spacings (mm)", "kind": "text", "default": "2@4000"},
-            {"key": "z", "label": "Storey heights (mm)", "kind": "text", "default": "3@3500"},
+            {"key": "_i", "kind": "info", "default":
+             "Spacings = comma-separated bay lengths (mm).\n"
+             "  Unequal bays:  5000,4000,6000\n"
+             "  Equal bays:    3@5000  (= 5000,5000,5000)\n"
+             "  Mix:           3@5000,4000\n"
+             "Leave Y EMPTY for a flat 2D frame (one plane)."},
+            {"key": "x", "label": "X bay spacings", "kind": "text", "default": "5000,4000,5000"},
+            {"key": "y", "label": "Y bay spacings", "kind": "text", "default": "4000"},
+            {"key": "z", "label": "Storey heights", "kind": "text", "default": "3500,3500"},
             {"key": "sec", "label": "Section", "kind": "section"},
             {"key": "mat", "label": "Material", "kind": "combo",
              "options": list(MATERIALS.keys()), "default": DEFAULT_MAT},
@@ -3562,6 +3521,50 @@ def _polyface(pts):
         return Part.Face(Part.makePolygon(clean + [clean[0]]))
     except Exception:
         return None
+
+
+def _result_tube(doc, grp, name, kind, perbar, radius, vmax, visible):
+    """Render a result as the structure drawn in thick tube segments coloured
+    blue->red by |value| along each bar (per-face DiffuseColor, with a solid
+    fallback). `perbar` is a list of (points, values) per bar. Thick tubes read
+    clearly from any angle - the Inventor/Robot contour look."""
+    cyls = []
+    colors = []
+    for (pts, vals) in perbar:
+        for i in range(len(pts) - 1):
+            a = pts[i]; b = pts[i + 1]; v = b - a; ln = v.Length
+            if ln < 1e-6:
+                continue
+            try:
+                cyl = Part.makeCylinder(radius, ln, a, unit(v))
+            except Exception:
+                continue
+            try:
+                nf = len(cyl.Faces)
+            except Exception:
+                nf = 3
+            cyls.append(cyl)
+            t = (0.5 * (abs(vals[i]) + abs(vals[i + 1])) / vmax) if vmax > 1e-12 else 0.0
+            colors += [_ramp(t) + (0.0,)] * nf
+    if not cyls:
+        return None
+    ob = doc.addObject("Part::Feature", name)
+    ob.Shape = Part.makeCompound(cyls)
+    ob.Label = "%s result" % kind
+    _set(ob, "App::PropertyString", "DiagKind", kind)
+    _set(ob, "App::PropertyFloat", "CompMax", float(vmax))
+    _set(ob, "App::PropertyFloat", "CompMin", 0.0)
+    try:
+        ob.ViewObject.Visibility = bool(visible)
+        if len(colors) == len(ob.Shape.Faces):
+            ob.ViewObject.DiffuseColor = colors
+        else:
+            ob.ViewObject.ShapeColor = (0.2, 0.6, 0.95)
+    except Exception:
+        pass
+    if grp is not None:
+        grp.addObject(ob)
+    return ob
 
 
 class RebuildFromSketch:

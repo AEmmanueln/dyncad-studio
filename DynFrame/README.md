@@ -64,10 +64,12 @@ model is what you analyse. Commands are on the toolbars/menus
 > and now use single-form dialogs.
 
 *Build the line model (DynFrame · Structure) — any of four ways:*
-1. **Generate Grid Structure** — enter bay spacings and storey heights
-   (Robot-style `3@5000` means 3 bays of 5000) and get a full column +
-   beam grid: sheds, portal frames, multi-storey and high-rise frames in
-   one step.
+1. **Generate Grid Structure** — enter bay spacings and storey heights and
+   get a full column + beam grid in one step: sheds, portal frames,
+   multi-storey and high-rise frames. Spacings are comma-separated bay
+   lengths, so they can be **unequal** (`5000,4000,6000`); `3@5000` is
+   shorthand for three equal 5000 bays, and you can mix them
+   (`3@5000,4000`). Leave the **Y** field empty for a flat 2D frame.
 2. **Add Bars (from lines)** — draw the structure as sketch / Draft lines,
    select them, pick a section + material → one bar per line.
 3. **Bars from Members** — convert the solid members you already built into
@@ -89,12 +91,12 @@ model is what you analyse. Commands are on the toolbars/menus
 8. **Calculate** — choose a case, a combination, or *All loads* (+ optional
    self-weight). Solves a 3D Euler–Bernoulli direct-stiffness model
    (6 DOF/node) **per material**. Produces:
-   - a **Displacement contour** — the deformed structure coloured blue→red
-     by |u| with a **numeric colour bar** (0 … max), the way Inventor/Robot
-     show it (the default view);
-   - six **gradient-filled** force diagrams **N, Vy, Vz, Mx, My, Mz** plus a
-     combined **Stress** map — each coloured blue→red along the bar length;
-     the colour bar updates to the shown result's range;
+   - a **Displacement contour** — the deformed structure drawn as thick
+     tubes coloured blue→red by |u|, with a **numeric colour bar** (0 … max),
+     the way Inventor/Robot show it (the default view);
+   - the structure coloured by any force result **N, Vy, Vz, Mx, My, Mz** or
+     combined **Stress** — thick tubes coloured blue→red along each bar
+     (visible from any angle); the colour bar updates to the shown result;
    - **Reactions**, **Displacements** and **BarForces** (start/end N, Vy,
      Vz, Mx, My, Mz, stress, utilisation) spreadsheets, alongside your
      `Nodes` / `Bars` tables.

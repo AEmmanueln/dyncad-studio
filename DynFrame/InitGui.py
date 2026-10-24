@@ -57,8 +57,8 @@ class DynFrameWorkbench(FreeCADGui.Workbench):
         loads = ["DynFrame_NewLoadCase", "DynFrame_DefineSupport",
                  "DynFrame_AddNodalLoad", "DynFrame_AddMemberLoad",
                  "DynFrame_Combinations"]
-        results = ["DynFrame_RunAnalysis", "DynFrame_ShowDiagram",
-                   "DynFrame_ClearAnalysis"]
+        results = ["DynFrame_RunAnalysis", "DynFrame_ModalAnalysis",
+                   "DynFrame_ShowDiagram", "DynFrame_ClearAnalysis"]
         analysis = panel + structure + loads + results
         io = ["DynFrame_ExportStep", "DynFrame_ExportStl"]
         setup = ["DynFrame_InventorNav"]

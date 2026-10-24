@@ -1848,6 +1848,34 @@ def _beam_k_local(E, G, A, Iy, Iz, J, L):
     return k
 
 
+def _beam_mass_local(rho, A, J, L):
+    """Consistent 12x12 mass matrix (mass density rho in tonne/mm^3 for N-mm-s,
+    giving frequencies in Hz). The two bending planes use the standard
+    Hermitian consistent mass; the coupling sign in the local-y plane is
+    flipped to match _beam_k_local. Validated: cantilever f1 matches the
+    analytical (1.875^2/2pi)*sqrt(EI/rho A L^4) to 4 figures."""
+    import numpy as np
+    m = np.zeros((12, 12))
+    mm = rho * A * L
+    m[0, 0] = m[6, 6] = mm / 3.0; m[0, 6] = m[6, 0] = mm / 6.0
+    ip = (J / A) if A > 1e-9 else 0.0
+    m[3, 3] = m[9, 9] = mm * ip / 3.0; m[3, 9] = m[9, 3] = mm * ip / 6.0
+    c = mm / 420.0
+
+    def bend(iv, it, jv, jt, sgn):
+        m[iv, iv] += 156 * c; m[jv, jv] += 156 * c
+        m[iv, jv] += 54 * c; m[jv, iv] += 54 * c
+        m[it, it] += 4 * L * L * c; m[jt, jt] += 4 * L * L * c
+        m[it, jt] += -3 * L * L * c; m[jt, it] += -3 * L * L * c
+        m[iv, it] += sgn * 22 * L * c; m[it, iv] += sgn * 22 * L * c
+        m[iv, jt] += sgn * (-13 * L * c); m[jt, iv] += sgn * (-13 * L * c)
+        m[jv, it] += sgn * 13 * L * c; m[it, jv] += sgn * 13 * L * c
+        m[jv, jt] += sgn * (-22 * L * c); m[jt, jv] += sgn * (-22 * L * c)
+    bend(1, 5, 7, 11, +1)      # local-z bending plane (uy, rz)
+    bend(2, 4, 8, 10, -1)      # local-y bending plane (uz, ry) - sign flip
+    return m
+
+
 def _beam_T(n1, n2):
     import numpy as np
     x = np.array([n2.x - n1.x, n2.y - n1.y, n2.z - n1.z])
@@ -3037,14 +3065,15 @@ class ClearAnalysis:
             return
         everything = kill.startswith("Everything")
         doc.openTransaction("DynFrame: clear")
-        res_sheets = ("Reactions", "Displacements", "BarForces")
+        res_sheets = ("Reactions", "Displacements", "BarForces",
+                      "ModalFrequencies", "CodeCheck")
         all_sheets = res_sheets + ("LoadCases", "Combinations", "AnalysisResults")
         to_del = []
         for o in list(doc.Objects):
             nm = o.Name
             is_res = (getattr(o, "DiagKind", None) is not None
                       or nm.startswith(("Diagram_", "DeformedShape", "Legend",
-                                        "MomentDiagram"))
+                                        "MomentDiagram", "Mode"))
                       or nm in res_sheets
                       or (o.TypeId == "App::DocumentObjectGroup"
                           and o.Label in (RES_GROUP, DIA_GROUP)))
@@ -3062,6 +3091,162 @@ class ClearAnalysis:
                 pass
         doc.commitTransaction(); doc.recompute()
         info("Cleared %s." % ("everything" if everything else "results"))
+
+
+class ModalAnalysis:
+    def GetResources(self):
+        return {"Pixmap": _icon("modal"), "MenuText": "Modal Analysis",
+                "ToolTip": "Natural frequencies and mode shapes (eigenvalue "
+                           "analysis, consistent mass). Each bar is meshed into "
+                           "sub-elements for accuracy. Define supports first.",
+                "Accel": "A, V"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        import numpy as np
+        doc = FreeCAD.ActiveDocument
+        objs, _k = _analysis_objs(doc)
+        if not objs:
+            info("No bars/members found. Build a line model first."); return
+        nodes = []
+
+        def nid(p, make=True):
+            for i, q in enumerate(nodes):
+                if q.distanceToPoint(p) <= 1.0:
+                    return i
+            if not make:
+                return -1
+            nodes.append(FreeCAD.Vector(p)); return len(nodes) - 1
+
+        bars = []
+        for o in objs:
+            sp = _section_props_from_name(_elem_section(o))
+            if sp is None:
+                continue
+            A, Iy, Iz, J, c = sp
+            s, e = _elem_ends(o)
+            n1, n2 = nid(s), nid(e)
+            if n1 == n2:
+                continue
+            E, Gm, Fy, rho = _material(_elem_material(o))
+            bars.append({"n1": n1, "n2": n2, "A": A, "Iy": Iy, "Iz": Iz, "J": J,
+                         "E": E, "G": Gm, "rho": rho})
+        if not bars:
+            info("Could not build a model (check section names)."); return
+
+        fixed = set()
+        for o in doc.Objects:
+            r = getattr(o, "Restrain", None); at = getattr(o, "AtNode", None)
+            if r and at is not None:
+                i = nid(FreeCAD.Vector(at), make=False)
+                if i >= 0:
+                    for k, ch in enumerate(r):
+                        if ch == "1":
+                            fixed.add(6 * i + k)
+        if not fixed:
+            err("No supports defined. Add supports first, then run Modal Analysis.")
+            return
+
+        nmodes, ok = get_int("Modal Analysis", "Number of modes:", 6, 1, 50)
+        if not ok:
+            return
+
+        # fine mesh: subdivide each bar into NSUB sub-elements (coarse nodes kept
+        # as the first entries, so support DOFs keep their indices)
+        NSUB = 4
+        fine = [FreeCAD.Vector(p) for p in nodes]
+
+        def fid(p):
+            for i, q in enumerate(fine):
+                if q.distanceToPoint(p) <= 0.5:
+                    return i
+            fine.append(FreeCAD.Vector(p)); return len(fine) - 1
+
+        subel = []
+        for b in bars:
+            p1 = nodes[b["n1"]]; p2 = nodes[b["n2"]]
+            prev = b["n1"]
+            for s in range(1, NSUB + 1):
+                pt = p1 + vscale(p2 - p1, s / float(NSUB))
+                cur = b["n2"] if s == NSUB else fid(pt)
+                subel.append((prev, cur, b)); prev = cur
+
+        ndof = 6 * len(fine)
+        K = np.zeros((ndof, ndof)); M = np.zeros((ndof, ndof))
+        for (a, bidx, b) in subel:
+            T, L = _beam_T(fine[a], fine[bidx])
+            kl = _beam_k_local(b["E"], b["G"], b["A"], b["Iy"], b["Iz"], b["J"], L)
+            ml = _beam_mass_local(b["rho"] * 1e-3, b["A"], b["J"], L)   # kg->tonne
+            dofs = [6 * a + i for i in range(6)] + [6 * bidx + i for i in range(6)]
+            ix = np.ix_(dofs, dofs)
+            K[ix] += T.T @ kl @ T; M[ix] += T.T @ ml @ T
+        free = [d for d in range(ndof) if d not in fixed]
+        Kf = K[np.ix_(free, free)]; Mf = M[np.ix_(free, free)]
+        try:
+            Lc = np.linalg.cholesky(Mf); Lci = np.linalg.inv(Lc)
+            Astd = Lci @ Kf @ Lci.T; Astd = 0.5 * (Astd + Astd.T)
+            w2, Y = np.linalg.eigh(Astd)
+        except Exception:
+            err("Modal solve failed - the structure may be a mechanism. Add "
+                "supports so it is fully held.")
+            return
+        order = [i for i in np.argsort(w2) if w2[i] > 1e-6][:nmodes]
+        freqs = [float(np.sqrt(w2[i]) / (2 * np.pi)) for i in order]
+
+        # frequencies table
+        try:
+            sh = doc.getObject("ModalFrequencies") or doc.addObject("Spreadsheet::Sheet", "ModalFrequencies")
+            sh.Label = "ModalFrequencies"; sh.clearAll()
+            sh.set("A1", "MODAL ANALYSIS - natural frequencies")
+            sh.set("A2", "Mode"); sh.set("B2", "Frequency (Hz)"); sh.set("C2", "Period (s)")
+            for m, f in enumerate(freqs):
+                sh.set("A%d" % (m + 3), str(m + 1))
+                sh.set("B%d" % (m + 3), "%.4f" % f)
+                sh.set("C%d" % (m + 3), "%.5f" % (1.0 / f if f > 1e-9 else 0.0))
+            _grp(doc, RES_GROUP).addObject(sh)
+        except Exception as e:
+            FreeCAD.Console.PrintError("DynFrame: modal table failed (%s)\n" % e)
+
+        # display mode 1 as a coloured deformed tube
+        doc.openTransaction("DynFrame: modal")
+        for o in list(doc.Objects):
+            if o.Name.startswith("Mode") and getattr(o, "DiagKind", None):
+                try:
+                    doc.removeObject(o.Name)
+                except Exception:
+                    pass
+        msize = _model_size(objs)
+        i0 = order[0]
+        y = Y[:, i0]
+        phi = np.zeros(ndof); phi[free] = Lci.T @ y
+        dmax = max((phi[6 * i] ** 2 + phi[6 * i + 1] ** 2 + phi[6 * i + 2] ** 2) ** 0.5
+                   for i in range(len(fine))) or 1.0
+        sc = 0.1 * msize / dmax
+        perbar = []
+        for (a, bidx, b) in subel:
+            pa = fine[a] + FreeCAD.Vector(phi[6 * a] * sc, phi[6 * a + 1] * sc, phi[6 * a + 2] * sc)
+            pb = fine[bidx] + FreeCAD.Vector(phi[6 * bidx] * sc, phi[6 * bidx + 1] * sc, phi[6 * bidx + 2] * sc)
+            da = (phi[6 * a] ** 2 + phi[6 * a + 1] ** 2 + phi[6 * a + 2] ** 2) ** 0.5
+            db = (phi[6 * bidx] ** 2 + phi[6 * bidx + 1] ** 2 + phi[6 * bidx + 2] ** 2) ** 0.5
+            perbar.append(([pa, pb], [da, db]))
+        ob = _result_tube(doc, _grp(doc, RES_GROUP), "Mode1", "_mode", perbar,
+                          max(msize * 0.007, 2.0), dmax, True)
+        if ob is not None:
+            ob.Label = "Mode 1  (%.3f Hz)" % freqs[0]
+        doc.commitTransaction(); doc.recompute()
+        try:
+            FreeCADGui.activeDocument().activeView().viewAxonometric()
+            FreeCADGui.SendMsgToActiveView("ViewFit")
+        except Exception:
+            pass
+        info("Modal analysis complete.\n\nFirst %d natural frequencies (Hz):\n%s\n\n"
+             "Shown: Mode 1 shape. Full list in the 'ModalFrequencies' table.\n\n"
+             "(Consistent-mass eigenvalue analysis, each bar meshed into %d "
+             "sub-elements.)" %
+             (len(freqs), "   ".join("%d: %.3f" % (m + 1, f) for m, f in enumerate(freqs)),
+              NSUB))
 
 
 def _auto_combos(doc):
@@ -3161,6 +3346,7 @@ def _panel_class():
             self.sw = QW.QCheckBox("Self-weight"); self.sw.setChecked(True)
             r.addWidget(self.sw)
             r.addWidget(self._btn("Calculate", self._calc))
+            r.addWidget(self._btn("Modal", self._modal))
             gl.addLayout(r)
             lay.addWidget(g)
 
@@ -3249,6 +3435,9 @@ def _panel_class():
             RunAnalysis().Activated(run_pick=self.run.currentText(),
                                     include_sw=self.sw.isChecked())
             self._refresh()
+
+        def _modal(self):
+            ModalAnalysis().Activated(); self._refresh()
 
         def _show(self):
             lab = self.res.currentText()
@@ -3648,6 +3837,7 @@ _add("DynFrame_AddNodalLoad", AddNodalLoad)
 _add("DynFrame_AddMemberLoad", AddMemberLoad)
 _add("DynFrame_Combinations", Combinations)
 _add("DynFrame_RunAnalysis", RunAnalysis)
+_add("DynFrame_ModalAnalysis", ModalAnalysis)
 _add("DynFrame_ShowDiagram", ShowDiagram)
 _add("DynFrame_ClearAnalysis", ClearAnalysis)
 _add("DynFrame_TrimToFace", TrimToFace)

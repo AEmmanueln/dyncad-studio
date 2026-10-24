@@ -53,16 +53,26 @@ and a **material** — not a swept solid. That is how Autodesk Robot
 Structural Analysis works, and it is what scales to large structures (a
 high-rise is thousands of lines, which would be impossible as solids). The
 solid Frame Generator above stays for fabrication and cut-lists; the line
-model is what you analyse. Commands are on three toolbars/menus —
-**DynFrame · Structure**, **· Loads**, **· Results**.
+model is what you analyse. Commands are on the toolbars/menus
+**DynFrame · Analysis Panel**, **· Structure**, **· Loads**, **· Results**.
 
-*Build the line model (DynFrame · Structure) — any of three ways:*
-1. **Add Bars (from lines)** — draw the structure as sketch / Draft lines
-   (fast even for a big column grid), select them, pick a section + material
-   → one bar per line.
-2. **Bars from Members** — convert the solid members you already built into
+> **One panel for everything.** **Frame Analysis Panel** (DynFrame ·
+> Analysis Panel) opens a single window where you build the model, apply
+> supports and loads to the current 3D selection, manage cases and
+> combinations, Calculate, and switch the shown result — all in one place,
+> instead of a chain of pop-ups. The individual commands below still exist
+> and now use single-form dialogs.
+
+*Build the line model (DynFrame · Structure) — any of four ways:*
+1. **Generate Grid Structure** — enter bay spacings and storey heights
+   (Robot-style `3@5000` means 3 bays of 5000) and get a full column +
+   beam grid: sheds, portal frames, multi-storey and high-rise frames in
+   one step.
+2. **Add Bars (from lines)** — draw the structure as sketch / Draft lines,
+   select them, pick a section + material → one bar per line.
+3. **Bars from Members** — convert the solid members you already built into
    bars, keeping each member's section.
-3. **Node/Bar Tables** + **Build from Tables** — type node coordinates and
+4. **Node/Bar Tables** + **Build from Tables** — type node coordinates and
    bar connectivity (NodeI, NodeJ, Section, Material) into the `Nodes` and
    `Bars` spreadsheets (Robot's tables), then build the model from them.
 
@@ -70,8 +80,8 @@ model is what you analyse. Commands are on three toolbars/menus —
 4. **New Load Case** — a named case with a nature (Dead / Live / Wind /
    Snow / Other). Loads belong to a case.
 5. **Define Support** — select node vertices → Fixed / Pinned / Roller.
-6. **Add Nodal Load** / **Add Bar Load** — point forces at nodes, or uniform
-   distributed loads on bars, each assigned to a case.
+6. **Add Nodal Load** (on selected node vertices) / **Add Bar Load** (on
+   selected bars/lines) — one dialog each, assigned to a load case.
 7. **Load Combinations** — auto EN 1990 **ULS** (1.35G + 1.5Q) and **SLS**
    (G + Q), or a custom factored combination (`1.35*DL1 + 1.5*LL1`).
 
@@ -79,16 +89,17 @@ model is what you analyse. Commands are on three toolbars/menus —
 8. **Calculate** — choose a case, a combination, or *All loads* (+ optional
    self-weight). Solves a 3D Euler–Bernoulli direct-stiffness model
    (6 DOF/node) **per material**. Produces:
-   - a green **Deformed shape** — the real bent curve inside each bar (cubic
-     shape functions), so single-span bars still show their sag;
+   - a **Displacement contour** — the deformed structure coloured blue→red
+     by |u| with a **numeric colour bar** (0 … max), the way Inventor/Robot
+     show it (the default view);
    - six **gradient-filled** force diagrams **N, Vy, Vz, Mx, My, Mz** plus a
-     combined **Stress** map — each coloured blue→red along the bar length
-     (a colour ramp, not two flat colours), with a legend;
+     combined **Stress** map — each coloured blue→red along the bar length;
+     the colour bar updates to the shown result's range;
    - **Reactions**, **Displacements** and **BarForces** (start/end N, Vy,
      Vz, Mx, My, Mz, stress, utilisation) spreadsheets, alongside your
      `Nodes` / `Bars` tables.
-9. **Show Force Diagram** — switch which component (N / Vy / Vz / Mx / My /
-   Mz / Stress) is displayed, Robot "NTM"-style.
+9. **Show Result / Diagram** — switch the displayed result: Displacement
+   contour, or an N / Vy / Vz / Mx / My / Mz / Stress diagram.
 10. **Clear Results** — remove results only, or everything (supports, loads,
     combinations).
 

@@ -123,6 +123,10 @@ model is what you analyse. Commands are on the toolbars/menus
   eigenvalue analysis, each bar meshed into sub-elements); first *N*
   frequencies in a `ModalFrequencies` table, Mode 1 drawn as a mode-shape
   tube.
+- **Buckling Analysis** — linear (Euler) buckling: the critical load factor
+  by which the analysed loads must be multiplied to buckle the structure
+  (λ < 1 = unsafe), plus the buckling mode shape, from the geometric
+  stiffness built on the analysed axial forces.
 
 **Materials:** Steel S235 / S275 / S355, Stainless 304, Aluminium 6061-T6
 (each with its own E, G, yield and density). Edit `MATERIALS` in
@@ -134,11 +138,12 @@ model is what you analyse. Commands are on the toolbars/menus
 > M = wL²/8, end = wL²/12), all six force components and load-case
 > superposition; **releases** reproduce the propped cantilever (wL²/8);
 > **modal** matches the cantilever f₁ = (1.875²/2π)·√(EI/ρAL⁴) to four
-> figures; the **EC3** buckling reduction factors match the code tables and
-> a worked column check (χ = 0.441, Nb,Rd = 558 kN). It is **linear static
-> + modal**; second-order (P-Δ), buckling-load and seismic analysis, and a
-> full (non-simplified) code check are later phases. FreeCAD is not Robot —
-> this reproduces Robot's *workflow and core engineering* on its kernel.
+> figures; **buckling** matches the Euler load Pcr = π²EI/(2L)² (ratio
+> 1.000); the **EC3** buckling reduction factors match the code tables and
+> a worked column check (χ = 0.441, Nb,Rd = 558 kN). It is **linear static,
+> modal and linear-buckling**; second-order (P-Δ) and seismic analysis, and
+> a full (non-simplified) code check are later phases. FreeCAD is not Robot
+> — this reproduces Robot's *workflow and core engineering* on its kernel.
 
 **Modeling / export / setup**
 - **Quick Fillet** — fillet selected solid edges by a radius.

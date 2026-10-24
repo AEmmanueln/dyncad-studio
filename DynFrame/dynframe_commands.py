@@ -610,7 +610,7 @@ class InsertMembers:
 
 class ChangeProfile:
     def GetResources(self):
-        return {"Pixmap": _icon("member"), "MenuText": "Change Profile / Align",
+        return {"Pixmap": _icon("changeprofile"), "MenuText": "Change Profile / Align",
                 "ToolTip": "Change the profile, alignment or twist of selected members.",
                 "Accel": "F, P"}
 
@@ -881,7 +881,7 @@ class MirrorMembers:
 
 class TrimToFace:
     def GetResources(self):
-        return {"Pixmap": _icon("trim"), "MenuText": "Trim to Face / Plane",
+        return {"Pixmap": _icon("trimface"), "MenuText": "Trim to Face / Plane",
                 "ToolTip": "Trim the selected member(s) at a selected planar face.",
                 "Accel": "F, F"}
 
@@ -1101,7 +1101,7 @@ class HoleFeature:
 
 class ExtendToFace:
     def GetResources(self):
-        return {"Pixmap": _icon("lengthen"), "MenuText": "Lengthen / Shorten to Face",
+        return {"Pixmap": _icon("extend"), "MenuText": "Lengthen / Shorten to Face",
                 "ToolTip": "Extend or trim the selected member(s) along their axis "
                            "so the nearest end lands on a selected planar face.",
                 "Accel": "F, E"}
@@ -1291,7 +1291,7 @@ class ExportStep:
 
 class ExportStl:
     def GetResources(self):
-        return {"Pixmap": _icon("export"), "MenuText": "Export each body to STL",
+        return {"Pixmap": _icon("exportstl"), "MenuText": "Export each body to STL",
                 "ToolTip": "Export selected objects (or all) to individual STL files.",
                 "Accel": "E, L"}
 
@@ -1541,7 +1541,7 @@ class CircPattern:
 
 class BOM:
     def GetResources(self):
-        return {"Pixmap": _icon("cutlist"), "MenuText": "Bill of Materials",
+        return {"Pixmap": _icon("bom"), "MenuText": "Bill of Materials",
                 "ToolTip": "Parts list of every solid (grouped by type, with "
                            "quantity, volume and estimated steel mass).",
                 "Accel": "F, B"}
@@ -2316,7 +2316,7 @@ class AddBars:
 
 class BarsFromMembers:
     def GetResources(self):
-        return {"Pixmap": _icon("bar"), "MenuText": "Bars from Members",
+        return {"Pixmap": _icon("convert"), "MenuText": "Bars from Members",
                 "ToolTip": "Convert the solid frame members you already built into "
                            "analysis bars (line model), keeping each member's section.",
                 "Accel": "A, F"}
@@ -2402,7 +2402,7 @@ class EditTables:
 
 class BuildFromTables:
     def GetResources(self):
-        return {"Pixmap": _icon("table"), "MenuText": "Build from Tables",
+        return {"Pixmap": _icon("buildtable"), "MenuText": "Build from Tables",
                 "ToolTip": "Read the 'Nodes' and 'Bars' spreadsheets and create the "
                            "bar line model from them.", "Accel": "A, G"}
 
@@ -2649,7 +2649,7 @@ class AddNodalLoad:
 
 class AddMemberLoad:
     def GetResources(self):
-        return {"Pixmap": _icon("load"), "MenuText": "Add Bar Load",
+        return {"Pixmap": _icon("barload"), "MenuText": "Add Bar Load",
                 "ToolTip": "Select bars (lines) or members, then enter case + uniform "
                            "distributed load (N/mm along global Z) in one dialog.",
                 "Accel": "A, M"}
@@ -2780,7 +2780,7 @@ class MemberReleases:
 
 class RunAnalysis:
     def GetResources(self):
-        return {"Pixmap": _icon("analysis"), "MenuText": "Calculate",
+        return {"Pixmap": _icon("calculate"), "MenuText": "Calculate",
                 "ToolTip": "Linear-static solve on the bar line model for a chosen "
                            "load case or combination. Produces reactions, deformed "
                            "shape, gradient N/V/M diagrams and result tables.",
@@ -3212,7 +3212,7 @@ class ShowDiagram:
 
 class ClearAnalysis:
     def GetResources(self):
-        return {"Pixmap": _icon("analysis"), "MenuText": "Clear Results",
+        return {"Pixmap": _icon("clear"), "MenuText": "Clear Results",
                 "ToolTip": "Remove analysis results (diagrams, deformed shape, legend "
                            "and result tables). Keeps the bar model, supports and "
                            "loads.", "Accel": "A, X"}
@@ -3524,7 +3524,7 @@ class CodeCheck:
 
 class Envelope:
     def GetResources(self):
-        return {"Pixmap": _icon("analysis"), "MenuText": "Envelope (all combinations)",
+        return {"Pixmap": _icon("envelope"), "MenuText": "Envelope (all combinations)",
                 "ToolTip": "Solve every load combination and keep the worst N, My, "
                            "Mz and utilisation per member - the design envelope. The "
                            "envelope forces are stored so a following code check uses "
@@ -3812,7 +3812,7 @@ def _panel_class():
 
 class Manager:
     def GetResources(self):
-        return {"Pixmap": _icon("analysis"), "MenuText": "Frame Analysis Panel",
+        return {"Pixmap": _icon("panel"), "MenuText": "Frame Analysis Panel",
                 "ToolTip": "Open the single Frame Analysis panel - build the model, "
                            "supports, loads, cases, combinations, solve and switch "
                            "results, all in one window.", "Accel": "A, P"}

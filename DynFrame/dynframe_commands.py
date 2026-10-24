@@ -1876,6 +1876,28 @@ def _beam_mass_local(rho, A, J, L):
     return m
 
 
+def _beam_kg_local(N, L):
+    """Consistent 12x12 geometric stiffness matrix for a beam element carrying
+    axial force N (tension +). Used for linear buckling: (K + lam Kg) phi = 0.
+    The local-y plane rotation coupling is sign-flipped to match the stiffness
+    convention. Validated: cantilever column Pcr = pi^2 EI/(2L)^2 (ratio 1.000)."""
+    import numpy as np
+    kg = np.zeros((12, 12)); g = N / L
+
+    def bend(iv, it, jv, jt, sgn):
+        kg[iv, iv] += g * 6 / 5; kg[jv, jv] += g * 6 / 5
+        kg[iv, jv] += -g * 6 / 5; kg[jv, iv] += -g * 6 / 5
+        kg[it, it] += g * 2 * L * L / 15; kg[jt, jt] += g * 2 * L * L / 15
+        kg[it, jt] += -g * L * L / 30; kg[jt, it] += -g * L * L / 30
+        kg[iv, it] += sgn * g * L / 10; kg[it, iv] += sgn * g * L / 10
+        kg[iv, jt] += sgn * g * L / 10; kg[jt, iv] += sgn * g * L / 10
+        kg[jv, it] += sgn * (-g * L / 10); kg[it, jv] += sgn * (-g * L / 10)
+        kg[jv, jt] += sgn * (-g * L / 10); kg[jt, jv] += sgn * (-g * L / 10)
+    bend(1, 5, 7, 11, +1)
+    bend(2, 4, 8, 10, -1)
+    return kg
+
+
 def _condense(kl, fef, rel):
     """Static condensation of released local DOFs (member end releases). `rel`
     is a set of local DOF indices (0-11) released at the member ends (e.g.
@@ -3238,7 +3260,7 @@ class ClearAnalysis:
             nm = o.Name
             is_res = (getattr(o, "DiagKind", None) is not None
                       or nm.startswith(("Diagram_", "DeformedShape", "Legend",
-                                        "MomentDiagram", "Mode"))
+                                        "MomentDiagram", "Mode", "Buckling"))
                       or nm in res_sheets
                       or (o.TypeId == "App::DocumentObjectGroup"
                           and o.Label in (RES_GROUP, DIA_GROUP)))
@@ -3412,6 +3434,153 @@ class ModalAnalysis:
              "sub-elements.)" %
              (len(freqs), "   ".join("%d: %.3f" % (m + 1, f) for m, f in enumerate(freqs)),
               NSUB))
+
+
+class BucklingAnalysis:
+    def GetResources(self):
+        return {"Pixmap": _icon("buckling"), "MenuText": "Buckling Analysis",
+                "ToolTip": "Linear (Euler) buckling: the critical load factor by "
+                           "which the analysed loads must be multiplied to buckle the "
+                           "structure, and the buckling mode. Run Calculate first.",
+                "Accel": "A, U"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        import numpy as np
+        doc = FreeCAD.ActiveDocument
+        objs, _k = _analysis_objs(doc)
+        bars = [o for o in objs if hasattr(o, "ResN")]
+        if not bars:
+            info("Run Calculate first - buckling uses the member axial forces from "
+                 "the latest analysis.")
+            return
+        nodes = []
+
+        def nid(p, make=True):
+            for i, q in enumerate(nodes):
+                if q.distanceToPoint(p) <= 1.0:
+                    return i
+            if not make:
+                return -1
+            nodes.append(FreeCAD.Vector(p)); return len(nodes) - 1
+
+        bardata = []
+        for o in bars:
+            sp = _section_props_from_name(_elem_section(o))
+            if sp is None:
+                continue
+            A, Iy, Iz, J, c = sp
+            s, e = _elem_ends(o)
+            n1, n2 = nid(s), nid(e)
+            if n1 == n2:
+                continue
+            E, Gm, Fy, rho = _material(_elem_material(o))
+            bardata.append({"n1": n1, "n2": n2, "A": A, "Iy": Iy, "Iz": Iz, "J": J,
+                            "E": E, "G": Gm, "N": float(getattr(o, "ResN", 0.0))})
+        if not bardata:
+            info("Could not build a model (check section names)."); return
+
+        fixed = set()
+        for o in doc.Objects:
+            r = getattr(o, "Restrain", None); at = getattr(o, "AtNode", None)
+            if r and at is not None:
+                i = nid(FreeCAD.Vector(at), make=False)
+                if i >= 0:
+                    for k, ch in enumerate(r):
+                        if ch == "1":
+                            fixed.add(6 * i + k)
+        if not fixed:
+            err("No supports defined. Add supports first, then Buckling Analysis.")
+            return
+        if all(abs(b["N"]) < 1e-6 for b in bardata):
+            info("All members have ~zero axial force, so there is nothing to buckle "
+                 "in this load case. Apply axial/compression loads and Calculate.")
+            return
+
+        NSUB = 4
+        fine = [FreeCAD.Vector(p) for p in nodes]
+
+        def fid(p):
+            for i, q in enumerate(fine):
+                if q.distanceToPoint(p) <= 0.5:
+                    return i
+            fine.append(FreeCAD.Vector(p)); return len(fine) - 1
+
+        subel = []
+        for b in bardata:
+            p1 = nodes[b["n1"]]; p2 = nodes[b["n2"]]; prev = b["n1"]
+            for s in range(1, NSUB + 1):
+                pt = p1 + vscale(p2 - p1, s / float(NSUB))
+                cur = b["n2"] if s == NSUB else fid(pt)
+                subel.append((prev, cur, b)); prev = cur
+
+        ndof = 6 * len(fine)
+        K = np.zeros((ndof, ndof)); Kg = np.zeros((ndof, ndof))
+        for (a, bidx, b) in subel:
+            T, L = _beam_T(fine[a], fine[bidx])
+            kl = _beam_k_local(b["E"], b["G"], b["A"], b["Iy"], b["Iz"], b["J"], L)
+            kgl = _beam_kg_local(b["N"], L)
+            dofs = [6 * a + i for i in range(6)] + [6 * bidx + i for i in range(6)]
+            ix = np.ix_(dofs, dofs)
+            K[ix] += T.T @ kl @ T; Kg[ix] += T.T @ kgl @ T
+        free = [d for d in range(ndof) if d not in fixed]
+        Kf = K[np.ix_(free, free)]; Kgf = Kg[np.ix_(free, free)]
+        try:
+            # (K + lam Kg) phi = 0  ->  eig(-K^-1 Kg) = 1/lam ; smallest positive lam
+            M = -np.linalg.solve(Kf, Kgf)
+            ev, vecs = np.linalg.eig(M)
+        except Exception:
+            err("Buckling solve failed (unstable model). Add supports and retry.")
+            return
+        mu = ev.real
+        good = [(mu[i], i) for i in range(len(mu))
+                if abs(ev[i].imag) < 1e-5 and mu[i] > 1e-9]
+        if not good:
+            info("No positive buckling factor found - the analysed load case puts "
+                 "the members in tension (no buckling)."); return
+        good.sort(reverse=True)          # largest mu = smallest lam = critical
+        lam_cr = 1.0 / good[0][0]
+        i_cr = good[0][1]
+
+        # buckling mode shape as a tube
+        doc.openTransaction("DynFrame: buckling")
+        for o in list(doc.Objects):
+            if o.Name.startswith("Buckling") and getattr(o, "DiagKind", None):
+                try:
+                    doc.removeObject(o.Name)
+                except Exception:
+                    pass
+        phi = np.zeros(ndof); phi[free] = vecs[:, i_cr].real
+        msize = _model_size(objs)
+        dmax = max((phi[6 * i] ** 2 + phi[6 * i + 1] ** 2 + phi[6 * i + 2] ** 2) ** 0.5
+                   for i in range(len(fine))) or 1.0
+        sc = 0.1 * msize / dmax
+        perbar = []
+        for (a, bidx, b) in subel:
+            pa = fine[a] + FreeCAD.Vector(phi[6 * a] * sc, phi[6 * a + 1] * sc, phi[6 * a + 2] * sc)
+            pb = fine[bidx] + FreeCAD.Vector(phi[6 * bidx] * sc, phi[6 * bidx + 1] * sc, phi[6 * bidx + 2] * sc)
+            da = (phi[6 * a] ** 2 + phi[6 * a + 1] ** 2 + phi[6 * a + 2] ** 2) ** 0.5
+            db = (phi[6 * bidx] ** 2 + phi[6 * bidx + 1] ** 2 + phi[6 * bidx + 2] ** 2) ** 0.5
+            perbar.append(([pa, pb], [da, db]))
+        ob = _result_tube(doc, _grp(doc, RES_GROUP), "Buckling1", "_buckling", perbar,
+                          max(msize * 0.007, 2.0), dmax, True)
+        if ob is not None:
+            ob.Label = "Buckling mode 1  (factor %.3f)" % lam_cr
+        doc.commitTransaction(); doc.recompute()
+        try:
+            FreeCADGui.activeDocument().activeView().viewAxonometric()
+            FreeCADGui.SendMsgToActiveView("ViewFit")
+        except Exception:
+            pass
+        verdict = ("SAFE (factor > 1)" if lam_cr > 1.0 else
+                   "UNSAFE - buckles below the applied load!")
+        info("Buckling analysis complete.\n\nCritical load factor:  %.3f\n%s\n\n"
+             "The structure buckles when the analysed loads are multiplied by "
+             "%.3f. Mode 1 shape is shown.\n\n(Linear Euler buckling with the "
+             "geometric stiffness from the analysed axial forces; each bar meshed "
+             "into %d sub-elements.)" % (lam_cr, verdict, lam_cr, NSUB))
 
 
 class CodeCheck:
@@ -3700,6 +3869,7 @@ def _panel_class():
             r.addWidget(self.sw)
             r.addWidget(self._btn("Calculate", self._calc))
             r.addWidget(self._btn("Modal", self._modal))
+            r.addWidget(self._btn("Buckling", self._buckling))
             gl.addLayout(r)
             r2 = QW.QHBoxLayout()
             r2.addWidget(self._btn("Envelope (all combos)", self._envelope))
@@ -3795,6 +3965,9 @@ def _panel_class():
 
         def _modal(self):
             ModalAnalysis().Activated(); self._refresh()
+
+        def _buckling(self):
+            BucklingAnalysis().Activated(); self._refresh()
 
         def _codecheck(self):
             CodeCheck().Activated(); self._refresh()
@@ -4202,6 +4375,7 @@ _add("DynFrame_Combinations", Combinations)
 _add("DynFrame_MemberReleases", MemberReleases)
 _add("DynFrame_RunAnalysis", RunAnalysis)
 _add("DynFrame_ModalAnalysis", ModalAnalysis)
+_add("DynFrame_BucklingAnalysis", BucklingAnalysis)
 _add("DynFrame_Envelope", Envelope)
 _add("DynFrame_CodeCheck", CodeCheck)
 _add("DynFrame_ShowDiagram", ShowDiagram)

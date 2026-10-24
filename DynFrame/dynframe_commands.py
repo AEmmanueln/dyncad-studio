@@ -2510,24 +2510,35 @@ def _apply_support(doc, type_label, pts):
     return len(pts)
 
 
-def _apply_nodal(doc, case, fvec, pts):
+def _apply_nodal(doc, case, fvec, pts, mvec=None):
     grp = _grp(doc, LOAD_GROUP)
     objs, _k = _analysis_objs(doc)
     ln = _model_size(objs) * 0.15 + 100.0
     fvec = FreeCAD.Vector(fvec)
-    dirn = unit(fvec)
+    mvec = FreeCAD.Vector(mvec) if mvec is not None else FreeCAD.Vector(0, 0, 0)
+    dirn = unit(fvec) if fvec.Length > 1e-9 else FreeCAD.Vector(0, 0, -1)
     for p in pts:
         p = FreeCAD.Vector(p)
-        tail = p - vscale(dirn, ln)
-        shaft = Part.makeLine(FreeCAD.Vector(tail), FreeCAD.Vector(p))
-        head = Part.makeCone(ln * 0.12, 0.0, ln * 0.25,
-                             p - vscale(dirn, ln * 0.25), dirn)
+        shapes = []
+        if fvec.Length > 1e-9:
+            tail = p - vscale(dirn, ln)
+            shapes.append(Part.makeLine(FreeCAD.Vector(tail), FreeCAD.Vector(p)))
+            shapes.append(Part.makeCone(ln * 0.12, 0.0, ln * 0.25,
+                                        p - vscale(dirn, ln * 0.25), dirn))
+        if mvec.Length > 1e-9:                 # moment: small double ring marker
+            md = unit(mvec)
+            shapes.append(Part.makeCircle(ln * 0.22, p, md))
+            shapes.append(Part.makeCircle(ln * 0.17, p, md))
+        if not shapes:
+            continue
         o = doc.addObject("Part::Feature", "NodalLoad")
-        o.Shape = Part.makeCompound([shaft, head])
-        o.Label = "%s: (%.0f,%.0f,%.0f)N" % (case, fvec.x, fvec.y, fvec.z)
+        o.Shape = Part.makeCompound(shapes)
+        o.Label = "%s: F(%.0f,%.0f,%.0f) M(%.0f,%.0f,%.0f)" % (
+            case, fvec.x, fvec.y, fvec.z, mvec.x, mvec.y, mvec.z)
         _set(o, "App::PropertyString", "LoadType", "Nodal")
         _set(o, "App::PropertyString", "LoadCase", case)
         _set(o, "App::PropertyVector", "LoadVec", fvec)
+        _set(o, "App::PropertyVector", "LoadMom", mvec)
         _set(o, "App::PropertyVector", "AtNode", p)
         try:
             o.ViewObject.ShapeColor = (1.0, 0.3, 0.0); o.ViewObject.LineWidth = 3
@@ -2618,15 +2629,19 @@ class AddNodalLoad:
             {"key": "fx", "label": "Fx (N)", "kind": "float", "default": 0.0},
             {"key": "fy", "label": "Fy (N)", "kind": "float", "default": 0.0},
             {"key": "fz", "label": "Fz (N, + up / - down)", "kind": "float", "default": -1000.0},
+            {"key": "mx", "label": "Mx (N.mm)", "kind": "float", "default": 0.0},
+            {"key": "my", "label": "My (N.mm)", "kind": "float", "default": 0.0},
+            {"key": "mz", "label": "Mz (N.mm)", "kind": "float", "default": 0.0},
         ])
         if not vals:
             return
         fvec = FreeCAD.Vector(vals["fx"], vals["fy"], vals["fz"])
-        if fvec.Length < 1e-9:
+        mvec = FreeCAD.Vector(vals["mx"], vals["my"], vals["mz"])
+        if fvec.Length < 1e-9 and mvec.Length < 1e-9:
             warn("Load is zero - nothing added.")
             return
         doc.openTransaction("DynFrame: nodal load")
-        _apply_nodal(doc, vals["case"], fvec, pts)
+        _apply_nodal(doc, vals["case"], fvec, pts, mvec)
         doc.commitTransaction()
         doc.recompute()
         info("Nodal load added to case '%s' on %d node(s)." % (vals["case"], len(pts)))
@@ -2898,6 +2913,11 @@ class RunAnalysis:
                     if i >= 0:
                         v = FreeCAD.Vector(getattr(o, "LoadVec"))
                         F[6 * i] += v.x * f; F[6 * i + 1] += v.y * f; F[6 * i + 2] += v.z * f
+                        mv = getattr(o, "LoadMom", None)
+                        if mv is not None:
+                            F[6 * i + 3] += mv.x * f
+                            F[6 * i + 4] += mv.y * f
+                            F[6 * i + 5] += mv.z * f
 
         free = [d for d in range(ndof) if d not in fixed]
         u = np.zeros(ndof)
@@ -2969,6 +2989,7 @@ class RunAnalysis:
                 _set(o, "App::PropertyFloat", "ResMz", float(max(abs(v) for v in samp["Mz"])))
                 _set(o, "App::PropertyFloat", "ResVy", float(max(abs(v) for v in samp["Vy"])))
                 _set(o, "App::PropertyFloat", "ResVz", float(max(abs(v) for v in samp["Vz"])))
+                _set(o, "App::PropertyFloat", "ResUtil", float(util))
                 _set(o, "App::PropertyFloat", "ResL", float(L))
             except Exception:
                 pass
@@ -3210,7 +3231,7 @@ class ClearAnalysis:
         everything = kill.startswith("Everything")
         doc.openTransaction("DynFrame: clear")
         res_sheets = ("Reactions", "Displacements", "BarForces",
-                      "ModalFrequencies", "CodeCheck")
+                      "ModalFrequencies", "CodeCheck", "Envelope")
         all_sheets = res_sheets + ("LoadCases", "Combinations", "AnalysisResults")
         to_del = []
         for o in list(doc.Objects):
@@ -3501,6 +3522,86 @@ class CodeCheck:
               "" if not restrained else " (restrained, no)"))
 
 
+class Envelope:
+    def GetResources(self):
+        return {"Pixmap": _icon("analysis"), "MenuText": "Envelope (all combinations)",
+                "ToolTip": "Solve every load combination and keep the worst N, My, "
+                           "Mz and utilisation per member - the design envelope. The "
+                           "envelope forces are stored so a following code check uses "
+                           "them.", "Accel": "A, O"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        doc = FreeCAD.ActiveDocument
+        combos = _combos(doc)
+        if not combos:
+            info("No combinations defined. Create them with 'Load Combinations' "
+                 "first, then run the envelope.")
+            return
+        bars = [o for o in doc.Objects if is_analysis_elem(o)]
+        env = {}
+        for (cn, cd) in combos:
+            RunAnalysis().Activated(run_pick="Combo: " + cn, include_sw=True)
+            for o in bars:
+                if not hasattr(o, "ResN"):
+                    continue
+                e = env.setdefault(o.Name, {"label": str(o.Label),
+                                            "sec": _elem_section(o), "Nc": 0.0,
+                                            "Nt": 0.0, "My": 0.0, "Mz": 0.0, "util": 0.0})
+                N = getattr(o, "ResN", 0.0)
+                e["Nc"] = min(e["Nc"], N); e["Nt"] = max(e["Nt"], N)
+                e["My"] = max(e["My"], getattr(o, "ResMy", 0.0))
+                e["Mz"] = max(e["Mz"], getattr(o, "ResMz", 0.0))
+                e["util"] = max(e["util"], getattr(o, "ResUtil", 0.0))
+        if not env:
+            info("No results - check that members have sections and loads.")
+            return
+        doc.openTransaction("DynFrame: envelope")
+        worst = 0.0; wn = "-"
+        for o in bars:
+            e = env.get(o.Name)
+            if e is None:
+                continue
+            # store the governing envelope forces so a code check uses them
+            Ngov = e["Nc"] if abs(e["Nc"]) >= abs(e["Nt"]) else e["Nt"]
+            _set(o, "App::PropertyFloat", "ResN", float(Ngov))
+            _set(o, "App::PropertyFloat", "ResMy", float(e["My"]))
+            _set(o, "App::PropertyFloat", "ResMz", float(e["Mz"]))
+            _set(o, "App::PropertyFloat", "ResUtil", float(e["util"]))
+            if e["util"] > worst:
+                worst = e["util"]; wn = e["label"]
+            try:
+                uc = max(0.0, min(1.0, e["util"]))
+                o.ViewObject.LineColor = (float(uc), float(1.0 - uc), 0.1)
+                o.ViewObject.LineWidth = 4
+            except Exception:
+                pass
+        try:
+            sh = doc.getObject("Envelope") or doc.addObject("Spreadsheet::Sheet", "Envelope")
+            sh.Label = "Envelope"; sh.clearAll()
+            sh.set("A1", "ENVELOPE - worst across %d combination(s)" % len(combos))
+            for c, h in zip("ABCDEFG", ["Member", "Section", "N comp (N)", "N tens (N)",
+                                        "max|My| (N.mm)", "max|Mz| (N.mm)", "max Util"]):
+                sh.set("%s2" % c, h)
+            r = 3
+            for nm, e in env.items():
+                sh.set("A%d" % r, e["label"]); sh.set("B%d" % r, e["sec"])
+                sh.set("C%d" % r, "%.1f" % e["Nc"]); sh.set("D%d" % r, "%.1f" % e["Nt"])
+                sh.set("E%d" % r, "%.0f" % e["My"]); sh.set("F%d" % r, "%.0f" % e["Mz"])
+                sh.set("G%d" % r, "%.2f" % e["util"]); r += 1
+            _grp(doc, RES_GROUP).addObject(sh)
+        except Exception as ex:
+            FreeCAD.Console.PrintError("DynFrame: envelope table failed (%s)\n" % ex)
+        doc.commitTransaction(); doc.recompute()
+        info("Envelope complete over %d combination(s).\n\nWorst utilisation: %.2f "
+             "(on %s)\n\nPer-member worst N / My / Mz / utilisation in the "
+             "'Envelope' table; the envelope forces are now stored, so 'Steel Code "
+             "Check' uses them. (The 3D view shows the last combination's result.)"
+             % (len(combos), worst, wn))
+
+
 def _auto_combos(doc):
     cases = _cases(doc)
     dead = [n for n, nat in cases if nat == "Dead"]
@@ -3600,7 +3701,10 @@ def _panel_class():
             r.addWidget(self._btn("Calculate", self._calc))
             r.addWidget(self._btn("Modal", self._modal))
             gl.addLayout(r)
-            gl.addWidget(self._btn("Steel code check (EC3)", self._codecheck))
+            r2 = QW.QHBoxLayout()
+            r2.addWidget(self._btn("Envelope (all combos)", self._envelope))
+            r2.addWidget(self._btn("Steel code check (EC3)", self._codecheck))
+            gl.addLayout(r2)
             lay.addWidget(g)
 
             g, gl = self._box("7. Result shown")
@@ -3694,6 +3798,9 @@ def _panel_class():
 
         def _codecheck(self):
             CodeCheck().Activated(); self._refresh()
+
+        def _envelope(self):
+            Envelope().Activated(); self._refresh()
 
         def _show(self):
             lab = self.res.currentText()
@@ -4095,6 +4202,7 @@ _add("DynFrame_Combinations", Combinations)
 _add("DynFrame_MemberReleases", MemberReleases)
 _add("DynFrame_RunAnalysis", RunAnalysis)
 _add("DynFrame_ModalAnalysis", ModalAnalysis)
+_add("DynFrame_Envelope", Envelope)
 _add("DynFrame_CodeCheck", CodeCheck)
 _add("DynFrame_ShowDiagram", ShowDiagram)
 _add("DynFrame_ClearAnalysis", ClearAnalysis)

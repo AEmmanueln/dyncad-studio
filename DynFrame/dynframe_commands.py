@@ -2811,7 +2811,7 @@ class RunAnalysis:
     def IsActive(self):
         return FreeCAD.ActiveDocument is not None
 
-    def Activated(self, run_pick=None, include_sw=None):
+    def Activated(self, run_pick=None, include_sw=None, second_order=False):
         import numpy as np
         doc = FreeCAD.ActiveDocument
         objs, kind = _analysis_objs(doc)
@@ -2882,6 +2882,11 @@ class RunAnalysis:
                               ["Yes", "No"], 0)
             if not ok:
                 return
+            order, ok = get_item("Calculate", "Analysis order:",
+                                 ["1st order (linear)", "2nd order (P-Delta)"], 0)
+            if not ok:
+                return
+            second_order = order.startswith("2nd")
         if pick == "All loads":
             factors = {c[0]: 1.0 for c in cases}; sw_factor = 1.0; run_name = "All loads"
         elif pick.startswith("Case: "):
@@ -2949,7 +2954,40 @@ class RunAnalysis:
             err("The structure is a mechanism (unstable) with the supports given. "
                 "Add more supports (or restrain more directions), then Calculate.")
             return
-        Rreac = K @ u - F
+        Ktot = K
+        po_note = ""
+        if second_order:
+            # P-Delta: iterate with the geometric stiffness from the current
+            # axial forces until the displacements converge (validated: the
+            # amplification matches 1/(1-P/Pcr)).
+            conv = False
+            for _it in range(12):
+                Kg = np.zeros((ndof, ndof))
+                for el in elems:
+                    dl = el["T"] @ u[el["dofs"]]
+                    fe = el["kl"] @ dl - el["fef"]
+                    N = -fe[0]
+                    Kg[np.ix_(el["dofs"], el["dofs"])] += \
+                        el["T"].T @ _beam_kg_local(N, el["L"]) @ el["T"]
+                Ktot = K + Kg
+                un = np.zeros(ndof)
+                try:
+                    un[free] = np.linalg.solve(Ktot[np.ix_(free, free)], F[free])
+                except Exception:
+                    err("Second-order solve diverged - the loads are at or above "
+                        "the buckling load (run Buckling Analysis). Reduce the load "
+                        "or add bracing.")
+                    return
+                d = np.linalg.norm(un[free] - u[free])
+                base = np.linalg.norm(un[free]) or 1.0
+                u = un
+                if d / base < 1e-5:
+                    conv = True
+                    break
+            po_note = ("  [2nd order, %s]"
+                       % ("converged" if conv else "max iterations"))
+        run_name = run_name + po_note
+        Rreac = Ktot @ u - F
         msize = _model_size(objs)
         maxd = max((u[6 * i] ** 2 + u[6 * i + 1] ** 2 + u[6 * i + 2] ** 2) ** 0.5
                    for i in range(len(nodes)))
@@ -3867,6 +3905,7 @@ def _panel_class():
             self.run = QW.QComboBox(); r.addWidget(self.run, 1)
             self.sw = QW.QCheckBox("Self-weight"); self.sw.setChecked(True)
             r.addWidget(self.sw)
+            self.po = QW.QCheckBox("P-Δ"); r.addWidget(self.po)
             r.addWidget(self._btn("Calculate", self._calc))
             r.addWidget(self._btn("Modal", self._modal))
             r.addWidget(self._btn("Buckling", self._buckling))
@@ -3960,7 +3999,8 @@ def _panel_class():
 
         def _calc(self):
             RunAnalysis().Activated(run_pick=self.run.currentText(),
-                                    include_sw=self.sw.isChecked())
+                                    include_sw=self.sw.isChecked(),
+                                    second_order=self.po.isChecked())
             self._refresh()
 
         def _modal(self):

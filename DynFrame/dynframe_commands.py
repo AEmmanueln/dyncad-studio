@@ -1915,6 +1915,41 @@ def _section_props(obj):
     return _section_props_from_name(getattr(obj, "MemberProfile", ""))
 
 
+def _section_props_full(name):
+    """Richer section properties for code checks:
+    (A, Iy, Iz, Wel_y, Wel_z, iy, iz, hy, hz) where hy/hz are the overall
+    depths used for the elastic section moduli and radii of gyration. Iy/Iz
+    match _section_props (Iz=about face-x, Iy=about face-y)."""
+    face = build_face(name, "Center", 0.0, 0.0)
+    if face is None:
+        return None
+    A = face.Area
+    try:
+        m = face.MatrixOfInertia
+        Iz = abs(m.A11); Iy = abs(m.A22)
+    except Exception:
+        bb = face.BoundBox
+        Iz = A * bb.YLength ** 2 / 12.0; Iy = A * bb.XLength ** 2 / 12.0
+    bb = face.BoundBox
+    hx = max(bb.XLength, 1e-6); hy = max(bb.YLength, 1e-6)
+    Wel_y = Iy / (hx / 2.0)     # bending about face-y, extreme fibre at x = hx/2
+    Wel_z = Iz / (hy / 2.0)     # bending about face-x, extreme fibre at y = hy/2
+    iy = (Iy / A) ** 0.5 if A > 1e-9 else 0.0
+    iz = (Iz / A) ** 0.5 if A > 1e-9 else 0.0
+    return A, Iy, Iz, Wel_y, Wel_z, iy, iz, hx, hy
+
+
+def _chi_buckling(lam, alpha):
+    """EC3 flexural-buckling reduction factor chi for non-dimensional
+    slenderness `lam` and imperfection factor `alpha` (curve a=0.21, b=0.34,
+    c=0.49, d=0.76). chi = 1/(Phi+sqrt(Phi^2-lam^2)) <= 1."""
+    if lam <= 0.2:
+        return 1.0
+    phi = 0.5 * (1.0 + alpha * (lam - 0.2) + lam * lam)
+    chi = 1.0 / (phi + (phi * phi - lam * lam) ** 0.5)
+    return min(chi, 1.0)
+
+
 # ── materials (name -> E, G, Fy, density) in N/mm^2 and kg/mm^3 ──────
 MATERIALS = {
     "Steel S235": (210000.0, 80769.0, 235.0, 7.85e-6),
@@ -2828,6 +2863,18 @@ class RunAnalysis:
             el["samp"] = samp
             util = (max(samp["Stress"]) / Fy) if Fy > 0 else 0.0
             el["util"] = util; max_util = max(max_util, util)
+            # persist peak member forces for the code check (ResN signed:
+            # + tension, - compression)
+            try:
+                o = el["o"]
+                _set(o, "App::PropertyFloat", "ResN", float(-el["fend"][0]))
+                _set(o, "App::PropertyFloat", "ResMy", float(max(samp["My"])))
+                _set(o, "App::PropertyFloat", "ResMz", float(max(samp["Mz"])))
+                _set(o, "App::PropertyFloat", "ResVy", float(max(samp["Vy"])))
+                _set(o, "App::PropertyFloat", "ResVz", float(max(samp["Vz"])))
+                _set(o, "App::PropertyFloat", "ResL", float(L))
+            except Exception:
+                pass
 
         # ---- build visuals: colour the STRUCTURE by each result (thick tubes) ----
         # Every result (Displacement, N, Vy, Vz, Mx, My, Mz, Stress) is drawn as
@@ -3249,6 +3296,114 @@ class ModalAnalysis:
               NSUB))
 
 
+class CodeCheck:
+    def GetResources(self):
+        return {"Pixmap": _icon("check"), "MenuText": "Steel Code Check (EC3)",
+                "ToolTip": "Verify steel members to EN 1993-1-1 (simplified): "
+                           "cross-section resistance, flexural buckling and lateral-"
+                           "torsional buckling -> utilisation and pass/fail. Run "
+                           "Calculate first.", "Accel": "A, K"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        import math
+        doc = FreeCAD.ActiveDocument
+        bars = [o for o in doc.Objects if is_analysis_elem(o) and hasattr(o, "ResN")]
+        if not bars:
+            info("Run Calculate first - the code check uses the latest member "
+                 "forces (N, My, Mz) from the analysis.")
+            return
+        vals = form_dialog("Steel Code Check (EC3, simplified)", [
+            {"key": "_i", "kind": "info", "default":
+             "Verifies the members against EN 1993-1-1 using the latest analysis "
+             "forces. Conservative simplified method."},
+            {"key": "gm", "label": "gamma_M1", "kind": "float", "default": 1.0},
+            {"key": "kcr", "label": "Buckling length factor K", "kind": "float", "default": 1.0},
+            {"key": "curve", "label": "Buckling curve", "kind": "combo",
+             "options": ["a", "b", "c", "d"], "default": "b"},
+            {"key": "ltb", "label": "Compression flange restrained?", "kind": "combo",
+             "options": ["Yes", "No"], "default": "Yes"},
+        ])
+        if not vals:
+            return
+        acurve = {"a": 0.21, "b": 0.34, "c": 0.49, "d": 0.76}
+        alpha = acurve[vals["curve"]]
+        K = max(vals["kcr"], 1e-6); gM = max(vals["gm"], 1e-6)
+        restrained = (vals["ltb"] == "Yes")
+        rows = []; worst = 0.0; worstbar = "-"
+        doc.openTransaction("DynFrame: code check")
+        for o in bars:
+            sp = _section_props_full(_elem_section(o))
+            if sp is None:
+                continue
+            A, Iy, Iz, Wel_y, Wel_z, iy, iz, hx, hy = sp
+            E, Gm, Fy, rho = _material(_elem_material(o))
+            N = getattr(o, "ResN", 0.0)
+            My = abs(getattr(o, "ResMy", 0.0)); Mz = abs(getattr(o, "ResMz", 0.0))
+            L = getattr(o, "ResL", 1000.0); Lcr = K * L
+            NRd = A * Fy / gM
+            McyRd = Wel_y * Fy / gM; MczRd = Wel_z * Fy / gM
+            # cross-section (conservative linear interaction)
+            U = abs(N) / NRd + (My / McyRd if McyRd > 1e-9 else 0.0) \
+                + (Mz / MczRd if MczRd > 1e-9 else 0.0)
+            gov = "Section"
+            if N < -1e-6:                       # compression -> stability
+                Ncry = math.pi ** 2 * E * Iy / Lcr ** 2
+                Ncrz = math.pi ** 2 * E * Iz / Lcr ** 2
+                lamy = (A * Fy / Ncry) ** 0.5 if Ncry > 1e-9 else 99.0
+                lamz = (A * Fy / Ncrz) ** 0.5 if Ncrz > 1e-9 else 99.0
+                chi = min(_chi_buckling(lamy, alpha), _chi_buckling(lamz, alpha))
+                NbRd = chi * A * Fy / gM
+                chiLT = 1.0 if restrained else _chi_buckling(lamz, alpha)
+                MbRd = chiLT * McyRd
+                nc = abs(N)
+                kyy = 1.0 / max(1e-3, 1.0 - nc / Ncry) if Ncry > nc else 1e3
+                kzz = 1.0 / max(1e-3, 1.0 - nc / Ncrz) if Ncrz > nc else 1e3
+                Ub = nc / NbRd + (kyy * My / MbRd if MbRd > 1e-9 else 0.0) \
+                    + (kzz * Mz / MczRd if MczRd > 1e-9 else 0.0)
+                if Ub > U:
+                    U = Ub; gov = "Buckling"
+            verdict = "OK" if U <= 1.0 else "FAIL"
+            rows.append((str(o.Label), _elem_section(o), N, My, Mz, U, gov, verdict))
+            if U > worst:
+                worst = U; worstbar = str(o.Label)
+            try:
+                uc = max(0.0, min(1.0, U))
+                o.ViewObject.LineColor = (float(uc), float(1.0 - uc), 0.1)
+                o.ViewObject.LineWidth = 4
+            except Exception:
+                pass
+        try:
+            sh = doc.getObject("CodeCheck") or doc.addObject("Spreadsheet::Sheet", "CodeCheck")
+            sh.Label = "CodeCheck"; sh.clearAll()
+            sh.set("A1", "STEEL CODE CHECK (EN 1993-1-1, simplified) - gammaM1=%.2f, curve %s"
+                   % (gM, vals["curve"]))
+            for c, h in zip("ABCDEFGH", ["Member", "Section", "N (N)", "My (N.mm)",
+                                         "Mz (N.mm)", "Utilisation", "Governs", "Verdict"]):
+                sh.set("%s2" % c, h)
+            r = 3
+            for row in rows:
+                for c, v in zip("ABCDEFGH", row):
+                    sh.set("%s%d" % (c, r), ("%.4g" % v if isinstance(v, float) else str(v)))
+                r += 1
+            _grp(doc, RES_GROUP).addObject(sh)
+        except Exception as e:
+            FreeCAD.Console.PrintError("DynFrame: code-check table failed (%s)\n" % e)
+        doc.commitTransaction(); doc.recompute()
+        info("Steel code check complete (EC3, simplified).\n\n"
+             "Members checked: %d\nMax utilisation: %.2f  (on %s)\n"
+             "Overall: %s\n\nMembers are coloured green->red by utilisation; full "
+             "results in the 'CodeCheck' table.\n\nChecks: cross-section (N+My+Mz), "
+             "flexural buckling (both axes), and%s lateral-torsional buckling. "
+             "Conservative simplified EN 1993-1-1; not a substitute for a full "
+             "code check." %
+             (len(rows), worst, worstbar, "PASS" if worst <= 1.0 else
+              "FAIL - over-stressed members",
+              "" if not restrained else " (restrained, no)"))
+
+
 def _auto_combos(doc):
     cases = _cases(doc)
     dead = [n for n, nat in cases if nat == "Dead"]
@@ -3348,6 +3503,7 @@ def _panel_class():
             r.addWidget(self._btn("Calculate", self._calc))
             r.addWidget(self._btn("Modal", self._modal))
             gl.addLayout(r)
+            gl.addWidget(self._btn("Steel code check (EC3)", self._codecheck))
             lay.addWidget(g)
 
             g, gl = self._box("7. Result shown")
@@ -3438,6 +3594,9 @@ def _panel_class():
 
         def _modal(self):
             ModalAnalysis().Activated(); self._refresh()
+
+        def _codecheck(self):
+            CodeCheck().Activated(); self._refresh()
 
         def _show(self):
             lab = self.res.currentText()
@@ -3838,6 +3997,7 @@ _add("DynFrame_AddMemberLoad", AddMemberLoad)
 _add("DynFrame_Combinations", Combinations)
 _add("DynFrame_RunAnalysis", RunAnalysis)
 _add("DynFrame_ModalAnalysis", ModalAnalysis)
+_add("DynFrame_CodeCheck", CodeCheck)
 _add("DynFrame_ShowDiagram", ShowDiagram)
 _add("DynFrame_ClearAnalysis", ClearAnalysis)
 _add("DynFrame_TrimToFace", TrimToFace)

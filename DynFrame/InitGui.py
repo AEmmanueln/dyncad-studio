@@ -56,7 +56,7 @@ class DynFrameWorkbench(FreeCADGui.Workbench):
                      "DynFrame_BuildFromTables"]
         loads = ["DynFrame_NewLoadCase", "DynFrame_DefineSupport",
                  "DynFrame_AddNodalLoad", "DynFrame_AddMemberLoad",
-                 "DynFrame_Combinations"]
+                 "DynFrame_MemberReleases", "DynFrame_Combinations"]
         results = ["DynFrame_RunAnalysis", "DynFrame_ModalAnalysis",
                    "DynFrame_CodeCheck", "DynFrame_ShowDiagram",
                    "DynFrame_ClearAnalysis"]

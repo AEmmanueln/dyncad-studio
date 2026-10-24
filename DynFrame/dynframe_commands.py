@@ -1876,6 +1876,49 @@ def _beam_mass_local(rho, A, J, L):
     return m
 
 
+def _condense(kl, fef, rel):
+    """Static condensation of released local DOFs (member end releases). `rel`
+    is a set of local DOF indices (0-11) released at the member ends (e.g.
+    My/Mz rotations for a pinned connection). Returns (k_cond, f_cond,
+    rec_info) with the released rows/cols zeroed so the released actions are
+    zero; rec_info recovers the released displacements afterwards. Validated:
+    fixed-fixed UDL with My released at one end -> propped cantilever (My_i =
+    wL^2/8, My_j = 0)."""
+    import numpy as np
+    if not rel:
+        return kl, fef, None
+    c = sorted(rel); r = [d for d in range(12) if d not in rel]
+    kcc = kl[np.ix_(c, c)]
+    try:
+        kcci = np.linalg.inv(kcc)
+    except Exception:
+        return kl, fef, None
+    krr = kl[np.ix_(r, r)]; krc = kl[np.ix_(r, c)]; kcr = kl[np.ix_(c, r)]
+    kstar = krr - krc @ kcci @ kcr
+    fstar = fef[r] - krc @ kcci @ fef[c]
+    kf = np.zeros((12, 12)); ff = np.zeros(12)
+    for i, ri in enumerate(r):
+        ff[ri] = fstar[i]
+        for j, rj in enumerate(r):
+            kf[ri, rj] = kstar[i, j]
+    return kf, ff, (r, c, kcci, kcr, fef[c])
+
+
+def _bar_releases(o):
+    """Local DOF indices released at the ends of a bar, from its RelI/RelJ
+    6-char flags ('100000'=release ux ... index 0..5). End j maps to 6+k."""
+    rel = set()
+    ri = getattr(o, "RelI", None) or ""
+    rj = getattr(o, "RelJ", None) or ""
+    for k, ch in enumerate(str(ri)[:6]):
+        if ch == "1":
+            rel.add(k)
+    for k, ch in enumerate(str(rj)[:6]):
+        if ch == "1":
+            rel.add(6 + k)
+    return rel
+
+
 def _beam_T(n1, n2):
     import numpy as np
     x = np.array([n2.x - n1.x, n2.y - n1.y, n2.z - n1.z])
@@ -2676,6 +2719,50 @@ class Combinations:
         info("Combination '%s' = %s added." % (name.strip(), defn.strip()))
 
 
+class MemberReleases:
+    _PRESETS = {
+        "Rigid (no release)": ("000000", "000000"),
+        "Pinned both ends (My, Mz)": ("000011", "000011"),
+        "Pinned start (My, Mz)": ("000011", "000000"),
+        "Pinned end (My, Mz)": ("000000", "000011"),
+        "Pinned + torsion both ends": ("000111", "000111"),
+    }
+
+    def GetResources(self):
+        return {"Pixmap": _icon("release"), "MenuText": "Member Releases",
+                "ToolTip": "Release member end DOFs (e.g. moment releases for a "
+                           "pinned connection, or pin both ends for a truss member) "
+                           "on the selected bars.", "Accel": "A, E"}
+
+    def IsActive(self):
+        return bool(selected_elems())
+
+    def Activated(self):
+        elems = [m for m in selected_elems() if is_bar(m)]
+        if not elems:
+            info("Select one or more bars, then set their end releases.")
+            return
+        doc = FreeCAD.ActiveDocument
+        vals = form_dialog("Member Releases (%d bar(s))" % len(elems), [
+            {"key": "_i", "kind": "info", "default":
+             "A release frees that DOF at the member end (the member transfers no "
+             "moment there). Pin both ends = a truss-type member."},
+            {"key": "p", "label": "Release", "kind": "combo",
+             "options": list(self._PRESETS.keys()),
+             "default": "Pinned both ends (My, Mz)"},
+        ])
+        if not vals:
+            return
+        ri, rj = self._PRESETS[vals["p"]]
+        doc.openTransaction("DynFrame: member releases")
+        for m in elems:
+            _set(m, "App::PropertyString", "RelI", ri)
+            _set(m, "App::PropertyString", "RelJ", rj)
+        doc.commitTransaction(); doc.recompute()
+        info("Set '%s' on %d bar(s). Re-run Calculate to apply."
+             % (vals["p"], len(elems)))
+
+
 class RunAnalysis:
     def GetResources(self):
         return {"Pixmap": _icon("analysis"), "MenuText": "Calculate",
@@ -2792,14 +2879,16 @@ class RunAnalysis:
             dofs = ([6 * el["n1"] + i for i in range(6)]
                     + [6 * el["n2"] + i for i in range(6)])
             el["dofs"] = dofs
-            K[np.ix_(dofs, dofs)] += T.T @ kl @ T
             w = el["w"]
             wl = T[0:3, 0:3] @ np.array([w.x, w.y, w.z])
             el["wx"], el["wy"], el["wz"] = float(wl[0]), float(wl[1]), float(wl[2])
-            if w.Length > 1e-12:
-                fl = _fef_udl(w, T[0:3, 0:3], L); el["fef"] = fl; F[dofs] += T.T @ fl
-            else:
-                el["fef"] = np.zeros(12)
+            fl = _fef_udl(w, T[0:3, 0:3], L) if w.Length > 1e-12 else np.zeros(12)
+            el["fef"] = fl
+            # member end releases (condensation of released local DOFs)
+            rel = _bar_releases(el["o"])
+            kc, fc, el["rel_info"] = _condense(kl, fl, rel)
+            K[np.ix_(dofs, dofs)] += T.T @ kc @ T
+            F[dofs] += T.T @ fc
         for o in doc.Objects:
             if getattr(o, "LoadType", None) == "Nodal":
                 f = factors.get(getattr(o, "LoadCase", ""), 0.0)
@@ -2828,7 +2917,15 @@ class RunAnalysis:
         comp_max["Disp"] = 0.0
         max_util = 0.0
         for el in elems:
-            dloc = el["T"] @ u[el["dofs"]]; el["dloc"] = dloc
+            dloc = el["T"] @ u[el["dofs"]]
+            ri = el.get("rel_info")
+            if ri is not None:                 # recover released DOF displacements
+                r, c, kcci, kcr, fc = ri        # zero released end force: q_c = 0
+                uc = kcci @ (fc - kcr @ dloc[r])
+                dloc = dloc.copy()
+                for idx, ci in enumerate(c):
+                    dloc[ci] = uc[idx]
+            el["dloc"] = dloc
             fend = el["kl"] @ dloc - el["fef"]; el["fend"] = fend
             L = el["L"]; wy, wz, wx = el["wy"], el["wz"], el["wx"]
             A = el["A"]; c = el["c"]; Imin = min(el["Iy"], el["Iz"]); Fy = el["Fy"]
@@ -2868,10 +2965,10 @@ class RunAnalysis:
             try:
                 o = el["o"]
                 _set(o, "App::PropertyFloat", "ResN", float(-el["fend"][0]))
-                _set(o, "App::PropertyFloat", "ResMy", float(max(samp["My"])))
-                _set(o, "App::PropertyFloat", "ResMz", float(max(samp["Mz"])))
-                _set(o, "App::PropertyFloat", "ResVy", float(max(samp["Vy"])))
-                _set(o, "App::PropertyFloat", "ResVz", float(max(samp["Vz"])))
+                _set(o, "App::PropertyFloat", "ResMy", float(max(abs(v) for v in samp["My"])))
+                _set(o, "App::PropertyFloat", "ResMz", float(max(abs(v) for v in samp["Mz"])))
+                _set(o, "App::PropertyFloat", "ResVy", float(max(abs(v) for v in samp["Vy"])))
+                _set(o, "App::PropertyFloat", "ResVz", float(max(abs(v) for v in samp["Vz"])))
                 _set(o, "App::PropertyFloat", "ResL", float(L))
             except Exception:
                 pass
@@ -3995,6 +4092,7 @@ _add("DynFrame_DefineSupport", DefineSupport)
 _add("DynFrame_AddNodalLoad", AddNodalLoad)
 _add("DynFrame_AddMemberLoad", AddMemberLoad)
 _add("DynFrame_Combinations", Combinations)
+_add("DynFrame_MemberReleases", MemberReleases)
 _add("DynFrame_RunAnalysis", RunAnalysis)
 _add("DynFrame_ModalAnalysis", ModalAnalysis)
 _add("DynFrame_CodeCheck", CodeCheck)

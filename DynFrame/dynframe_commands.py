@@ -2476,7 +2476,7 @@ def _tube_radius(msize):
     """Radius of the result tubes - a bold fraction of the model size so the
     contour reads clearly as a thick 3D shape from any angle, not a thin line
     (the Inventor/Robot contour look). Floored so small models stay visible."""
-    return max(msize * 0.016, 6.0)
+    return max(msize * 0.022, 8.0)
 
 
 # ── Frame analysis — Robot-style line/stick model ────────────────
@@ -3776,6 +3776,8 @@ class RunAnalysis:
         doc.commitTransaction()
 
         self._tables(doc, nodes, sup_nodes, Rreac, u, elems, run_name, rg, kind)
+        doc.recompute()
+        _apply_result_colors(doc)       # restore per-face gradient after recompute
 
         try:
             FreeCADGui.activeDocument().activeView().viewAxonometric()
@@ -3909,6 +3911,7 @@ class ShowDiagram:
             _color_bar(doc, _grp(doc, DIA_GROUP), vmin, vmax,
                        RESULT_LABELS[sel], objs, _model_size(objs))
         doc.recompute()
+        _apply_result_colors(doc)
 
 
 class ClearAnalysis:
@@ -4101,7 +4104,7 @@ class ModalAnalysis:
                           _tube_radius(msize), dmax, True)
         if ob is not None:
             ob.Label = "Mode 1  (%.3f Hz)" % freqs[0]
-        doc.commitTransaction(); doc.recompute()
+        doc.commitTransaction(); doc.recompute(); _apply_result_colors(doc)
         try:
             FreeCADGui.activeDocument().activeView().viewAxonometric()
             FreeCADGui.SendMsgToActiveView("ViewFit")
@@ -4247,7 +4250,7 @@ class BucklingAnalysis:
                           _tube_radius(msize), dmax, True)
         if ob is not None:
             ob.Label = "Buckling mode 1  (factor %.3f)" % lam_cr
-        doc.commitTransaction(); doc.recompute()
+        doc.commitTransaction(); doc.recompute(); _apply_result_colors(doc)
         try:
             FreeCADGui.activeDocument().activeView().viewAxonometric()
             FreeCADGui.SendMsgToActiveView("ViewFit")
@@ -4440,7 +4443,7 @@ class ResponseSpectrum:
                           _tube_radius(msize), dmax, True)
         if ob is not None:
             ob.Label = "Seismic displacement (SRSS)"
-        doc.commitTransaction(); doc.recompute()
+        doc.commitTransaction(); doc.recompute(); _apply_result_colors(doc)
         try:
             FreeCADGui.activeDocument().activeView().viewAxonometric()
             FreeCADGui.SendMsgToActiveView("ViewFit")
@@ -4763,6 +4766,7 @@ def _draw_deformed(doc, scale_mult=1.0):
     objs = [o for o in doc.Objects if is_analysis_elem(o)]
     _color_bar(doc, _grp(doc, DIA_GROUP), 0.0, maxd, "Displacement (mm)", objs, msize)
     doc.recompute()
+    _apply_result_colors(doc)
     return True
 
 
@@ -5569,8 +5573,10 @@ def _color_bar(doc, grp, vmin, vmax, title, objs, msize):
         lg.Label = "Legend: " + title
         _set(lg, "App::PropertyString", "DiagKind", "_legend")
         try:
+            lg.ViewObject.DisplayMode = "Shaded"
             if len(colors) == len(lg.Shape.Faces):
                 lg.ViewObject.DiffuseColor = colors
+                _RESULT_COLORS[lg.Name] = colors
         except Exception:
             pass
         grp.addObject(lg)
@@ -5657,11 +5663,41 @@ def _polyface(pts):
         return None
 
 
+# Per-face colours of result objects, kept so they can be RE-APPLIED after a
+# doc.recompute(): FreeCAD resets ViewObject.DiffuseColor to a single colour
+# when a touched object is recomputed, which is what made every bar show one
+# flat colour instead of the gradient. _apply_result_colors() restores them.
+_RESULT_COLORS = {}
+
+
+def _apply_result_colors(doc):
+    """Re-apply the stored per-face colours to result objects and force a
+    shaded (edge-free) display, so the gradient survives recompute and is not
+    hidden behind wireframe edge rings."""
+    for name in list(_RESULT_COLORS.keys()):
+        o = doc.getObject(name)
+        if o is None:
+            _RESULT_COLORS.pop(name, None)
+            continue
+        colors = _RESULT_COLORS[name]
+        try:
+            if len(colors) == len(o.Shape.Faces):
+                o.ViewObject.DiffuseColor = colors
+        except Exception:
+            pass
+        try:
+            o.ViewObject.DisplayMode = "Shaded"
+        except Exception:
+            pass
+
+
 def _result_tube(doc, grp, name, kind, perbar, radius, vmax, visible):
     """Render a result as the structure drawn in thick tube segments coloured
-    blue->red by |value| along each bar (per-face DiffuseColor, with a solid
-    fallback). `perbar` is a list of (points, values) per bar. Thick tubes read
-    clearly from any angle - the Inventor/Robot contour look."""
+    blue->red by |value| along each bar. Each short segment gets its own colour
+    from the value there, so the colour varies ALONG every bar (bending, stress
+    and displacement all change along a member). `perbar` is a list of
+    (points, values) per bar. Thick, shaded tubes read clearly from any angle -
+    the Inventor/Robot contour look."""
     cyls = []
     colors = []
     for (pts, vals) in perbar:
@@ -5690,10 +5726,12 @@ def _result_tube(doc, grp, name, kind, perbar, radius, vmax, visible):
     _set(ob, "App::PropertyFloat", "CompMin", 0.0)
     try:
         ob.ViewObject.Visibility = bool(visible)
+        # a mid-ramp solid colour as the base, then the per-face gradient on top
+        ob.ViewObject.ShapeColor = _ramp(0.5)
+        ob.ViewObject.DisplayMode = "Shaded"      # no wireframe edge rings
         if len(colors) == len(ob.Shape.Faces):
             ob.ViewObject.DiffuseColor = colors
-        else:
-            ob.ViewObject.ShapeColor = (0.2, 0.6, 0.95)
+            _RESULT_COLORS[ob.Name] = colors       # re-applied after recompute
     except Exception:
         pass
     if grp is not None:

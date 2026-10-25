@@ -5285,13 +5285,14 @@ def _result_list(doc):
             out.append((RESULT_LABELS[k], k, "diag"))
         elif float(compmax.get(k, 0.0)) > 1e-9:
             out.append((RESULT_LABELS[k], k, "diag"))
+    # mode / buckling / seismic / plate shapes are drawn as colour-band objects
+    # sharing one DiagKind each; list each kind once and toggle it by DiagKind
+    seen = set()
     for o in doc.Objects:
-        nm = o.Name
-        if getattr(o, "DiagKind", None) and (nm.startswith("Mode")
-                                             or nm.startswith("Buckling")
-                                             or nm.startswith("Seismic")
-                                             or nm.startswith("PlateStress")):
-            out.append((o.Label or nm, nm, "obj"))
+        dk = getattr(o, "DiagKind", None)
+        if dk in ("_mode", "_buckling", "_seismic", "_plate") and dk not in seen:
+            seen.add(dk)
+            out.append((o.Label or dk.strip("_").title(), dk, "obj"))
     return out
 
 
@@ -5506,16 +5507,24 @@ def _results_panel_class():
                 sc = self.scale.value() if key == "Disp" else 1.0
                 _render_result(doc, key, scale_mult=sc)
             else:
-                # a mode / buckling / seismic shape: show just this one and hide
-                # every other result (static contours and other shapes)
+                # a mode / buckling / seismic / plate shape (band objects share
+                # one DiagKind): show every object of that kind, hide other
+                # results; refresh the legend from the shown range
                 for o in doc.Objects:
                     k = getattr(o, "DiagKind", None)
                     if not k or k in ("_legend", "_anim"):
                         continue
                     try:
-                        o.ViewObject.Visibility = (o.Name == key)
+                        o.ViewObject.Visibility = (k == key)
                     except Exception:
                         pass
+                objs = [o for o in doc.Objects if is_analysis_elem(o)]
+                vm = 0.0
+                for o in doc.Objects:
+                    if getattr(o, "DiagKind", None) == key:
+                        vm = float(getattr(o, "CompMax", 0.0)); break
+                _color_bar(doc, _grp(doc, DIA_GROUP), 0.0, vm,
+                           label, objs, _model_size(objs))
                 doc.recompute()
             self.summary.setText(_result_summary(doc))
             self._update_legend()
@@ -6017,27 +6026,22 @@ def _color_bar(doc, grp, vmin, vmax, title, objs, msize):
             return
         x0 = bb.XMax + msize * 0.08; y0 = bb.YMin; z0 = bb.ZMin
         h = msize * 0.6; w = msize * 0.075; nseg = 12
-        faces = []; colors = []
+        # one object per band with a plain ShapeColor (reliable gradient)
         for s in range(nseg):
             z1 = z0 + h * s / nseg; z2 = z0 + h * (s + 1) / nseg
             f = _polyface([FreeCAD.Vector(x0, y0, z1), FreeCAD.Vector(x0 + w, y0, z1),
                            FreeCAD.Vector(x0 + w, y0, z2), FreeCAD.Vector(x0, y0, z2)])
-            if f is not None:
-                faces.append(f); colors.append(_ramp(s / float(nseg - 1)) + (0.0,))
-        if not faces:
-            return
-        lg = doc.addObject("Part::Feature", "Legend")
-        lg.Shape = Part.makeCompound(faces)
-        lg.Label = "Legend: " + title
-        _set(lg, "App::PropertyString", "DiagKind", "_legend")
-        try:
-            lg.ViewObject.DisplayMode = "Shaded"
-            if len(colors) == len(lg.Shape.Faces):
-                lg.ViewObject.DiffuseColor = colors
-                _RESULT_COLORS[lg.Name] = colors
-        except Exception:
-            pass
-        grp.addObject(lg)
+            if f is None:
+                continue
+            lg = doc.addObject("Part::Feature", "Legend_b%d" % s)
+            lg.Shape = f
+            lg.Label = "Legend: " + title
+            _set(lg, "App::PropertyString", "DiagKind", "_legend")
+            try:
+                lg.ViewObject.ShapeColor = _ramp(s / float(nseg - 1))
+            except Exception:
+                pass
+            grp.addObject(lg)
         fs = max(12.0, msize * 0.045)
         nlab = 6
         for i in range(nlab + 1):
@@ -6190,8 +6194,13 @@ def _result_tube(doc, grp, name, kind, perbar, radius, vmax, visible,
     (points, values) per bar. Segments are thick tubes by default, or - with
     solid=True and a known section per bar - the member's real swept profile
     (solid beams, the Inventor look). Shaded display, so no wireframe rings."""
-    cyls = []
-    colors = []
+    # Bin the coloured segments into a fixed set of value bands and make ONE
+    # object per band, coloured with a plain ShapeColor. ShapeColor (unlike
+    # per-face DiffuseColor) always renders and never resets on recompute, so
+    # the colour reliably varies along each bar - this is what makes the
+    # gradient actually show.
+    NBAND = 16
+    bands = [[] for _ in range(NBAND)]
     for bi, (pts, vals) in enumerate(perbar):
         face = None
         if solid and sections is not None and bi < len(sections):
@@ -6206,46 +6215,43 @@ def _result_tube(doc, grp, name, kind, perbar, radius, vmax, visible,
                     seg = Part.makeCylinder(radius, ln, a, unit(v))
                 except Exception:
                     continue
-            try:
-                nf = len(seg.Faces)
-            except Exception:
-                nf = 3
-            cyls.append(seg)
             t = (0.5 * (abs(vals[i]) + abs(vals[i + 1])) / vmax) if vmax > 1e-12 else 0.0
-            colors += [_ramp(t) + (0.0,)] * nf
-    if not cyls:
-        return None
-    ob = doc.addObject("Part::Feature", name)
-    ob.Shape = Part.makeCompound(cyls)
-    ob.Label = "%s result" % kind
-    _set(ob, "App::PropertyString", "DiagKind", kind)
-    _set(ob, "App::PropertyFloat", "CompMax", float(vmax))
-    _set(ob, "App::PropertyFloat", "CompMin", 0.0)
-    try:
-        ob.ViewObject.Visibility = bool(visible)
-        # a mid-ramp solid colour as the base, then the per-face gradient on top
-        ob.ViewObject.ShapeColor = _ramp(0.5)
-        ob.ViewObject.DisplayMode = "Shaded"      # no wireframe edge rings
-        if len(colors) == len(ob.Shape.Faces):
-            ob.ViewObject.DiffuseColor = colors
-            _RESULT_COLORS[ob.Name] = colors       # re-applied after recompute
-    except Exception:
-        pass
-    if grp is not None:
-        grp.addObject(ob)
-    return ob
+            k = min(NBAND - 1, max(0, int(t * NBAND)))
+            bands[k].append(seg)
+    first = None
+    for k, segs in enumerate(bands):
+        if not segs:
+            continue
+        ob = doc.addObject("Part::Feature", "%s_b%d" % (name, k))
+        ob.Shape = Part.makeCompound(segs)
+        ob.Label = "%s result" % kind
+        _set(ob, "App::PropertyString", "DiagKind", kind)
+        _set(ob, "App::PropertyFloat", "CompMax", float(vmax))
+        _set(ob, "App::PropertyFloat", "CompMin", 0.0)
+        try:
+            ob.ViewObject.Visibility = bool(visible)
+            ob.ViewObject.ShapeColor = _ramp((k + 0.5) / NBAND)
+        except Exception:
+            pass
+        if grp is not None:
+            grp.addObject(ob)
+        if first is None:
+            first = ob
+    return first
 
 
 def _build_plate_stress(doc, grp, shells, vmmax, visible=False):
-    """Plate/shell von Mises stress contour: each shell triangle coloured
-    blue->red by its stress, so the contour varies across the plate surface."""
-    old = doc.getObject("PlateStress")
-    if old is not None:
-        try:
-            doc.removeObject(old.Name)
-        except Exception:
-            pass
-    faces = []; colors = []
+    """Plate/shell von Mises stress contour: each triangle binned into a colour
+    band and drawn with a plain ShapeColor (one object per band), so the stress
+    gradient across the plate reliably shows."""
+    for o in list(doc.Objects):
+        if o.Name.startswith("PlateStress"):
+            try:
+                doc.removeObject(o.Name)
+            except Exception:
+                pass
+    NBAND = 16
+    bands = [[] for _ in range(NBAND)]
     for sh in shells:
         pervm = sh.get("pervm", [])
         for k, (ni, pts) in enumerate(sh["tris"]):
@@ -6255,34 +6261,29 @@ def _build_plate_stress(doc, grp, shells, vmmax, visible=False):
                      FreeCAD.Vector(pts[2]), FreeCAD.Vector(pts[0])]))
             except Exception:
                 continue
-            faces.append(f)
             vm = pervm[k] if k < len(pervm) else 0.0
             t = (vm / vmmax) if vmmax > 1e-12 else 0.0
-            try:
-                nf = len(f.Faces)
-            except Exception:
-                nf = 1
-            colors += [_ramp(t) + (0.0,)] * nf
-    if not faces:
-        return None
-    ob = doc.addObject("Part::Feature", "PlateStress")
-    ob.Shape = Part.makeCompound(faces)
-    ob.Label = "Plate stress (von Mises, MPa)"
-    _set(ob, "App::PropertyString", "DiagKind", "_plate")
-    _set(ob, "App::PropertyFloat", "CompMax", float(vmmax))
-    _set(ob, "App::PropertyFloat", "CompMin", 0.0)
-    try:
-        ob.ViewObject.Visibility = bool(visible)
-        ob.ViewObject.ShapeColor = _ramp(0.5)
-        ob.ViewObject.DisplayMode = "Shaded"
-        if len(colors) == len(ob.Shape.Faces):
-            ob.ViewObject.DiffuseColor = colors
-            _RESULT_COLORS[ob.Name] = colors
-    except Exception:
-        pass
-    if grp is not None:
-        grp.addObject(ob)
-    return ob
+            bands[min(NBAND - 1, max(0, int(t * NBAND)))].append(f)
+    first = None
+    for k, fs in enumerate(bands):
+        if not fs:
+            continue
+        ob = doc.addObject("Part::Feature", "PlateStress_b%d" % k)
+        ob.Shape = Part.makeCompound(fs)
+        ob.Label = "Plate stress (von Mises, MPa)"
+        _set(ob, "App::PropertyString", "DiagKind", "_plate")
+        _set(ob, "App::PropertyFloat", "CompMax", float(vmmax))
+        _set(ob, "App::PropertyFloat", "CompMin", 0.0)
+        try:
+            ob.ViewObject.Visibility = bool(visible)
+            ob.ViewObject.ShapeColor = _ramp((k + 0.5) / NBAND)
+        except Exception:
+            pass
+        if grp is not None:
+            grp.addObject(ob)
+        if first is None:
+            first = ob
+    return first
 
 
 class RebuildFromSketch:

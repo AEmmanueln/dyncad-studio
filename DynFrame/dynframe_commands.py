@@ -1956,6 +1956,243 @@ def _beam_T(n1, n2):
     return T, L
 
 
+# ── flat shell triangle: CST membrane + DKT thin-plate bending ───────
+# Validated against the simply-supported square plate (w_c = 0.00406 q a^4/D,
+# converging to ~0.998 of exact) and shown to be frame-invariant on a tilted
+# plane. 6 DOF/node (ux,uy,uz,rx,ry,rz) to match the beam model.
+def _tri_area2d(xy):
+    (x1, y1), (x2, y2), (x3, y3) = xy
+    return 0.5 * abs((x2 - x1) * (y3 - y1) - (x3 - x1) * (y2 - y1))
+
+
+def _membrane_D(E, nu):
+    import numpy as np
+    return E / (1 - nu * nu) * np.array([[1, nu, 0], [nu, 1, 0],
+                                         [0, 0, (1 - nu) / 2.0]])
+
+
+def _bending_D(E, nu, t):
+    import numpy as np
+    return E * t ** 3 / (12 * (1 - nu * nu)) * np.array(
+        [[1, nu, 0], [nu, 1, 0], [0, 0, (1 - nu) / 2.0]])
+
+
+def _cst_B(xy):
+    """Constant strain-displacement matrix (3x6) and area of a CST."""
+    import numpy as np
+    (x1, y1), (x2, y2), (x3, y3) = xy
+    A = _tri_area2d(xy)
+    b = [y2 - y3, y3 - y1, y1 - y2]
+    c = [x3 - x2, x1 - x3, x2 - x1]
+    B = np.zeros((3, 6))
+    for i in range(3):
+        B[0, 2 * i] = b[i]; B[1, 2 * i + 1] = c[i]
+        B[2, 2 * i] = c[i]; B[2, 2 * i + 1] = b[i]
+    return B / (2.0 * A), A
+
+
+def _dkt_B(xy, xi, eta):
+    """DKT bending strain (curvature) matrix (3x9) at natural coords (xi,eta).
+    DOF order per node: w, rx, ry."""
+    import numpy as np
+    (x1, y1), (x2, y2), (x3, y3) = [(float(a), float(b)) for (a, b) in xy]
+    x23, y23 = x2 - x3, y2 - y3
+    x31, y31 = x3 - x1, y3 - y1
+    x12, y12 = x1 - x2, y1 - y2
+    A = _tri_area2d(xy)
+    l23, l31, l12 = x23**2 + y23**2, x31**2 + y31**2, x12**2 + y12**2
+    P4, P5, P6 = -6*x23/l23, -6*x31/l31, -6*x12/l12
+    t4, t5, t6 = -6*y23/l23, -6*y31/l31, -6*y12/l12
+    q4, q5, q6 = 3*x23*y23/l23, 3*x31*y31/l31, 3*x12*y12/l12
+    r4, r5, r6 = 3*y23**2/l23, 3*y31**2/l31, 3*y12**2/l12
+    Hx_xi = np.array([
+        P6*(1-2*xi)+(P5-P6)*eta, q6*(1-2*xi)-(q5+q6)*eta,
+        -4+6*(xi+eta)+r6*(1-2*xi)-eta*(r5+r6),
+        -P6*(1-2*xi)+eta*(P4+P6), q6*(1-2*xi)+eta*(q4-q6),
+        -2+6*xi+r6*(1-2*xi)+eta*(r4-r6),
+        -eta*(P5+P4), eta*(q4-q5), -eta*(r5-r4)])
+    Hy_xi = np.array([
+        t6*(1-2*xi)+(t5-t6)*eta, 1+r6*(1-2*xi)-eta*(r5+r6),
+        -q6*(1-2*xi)+eta*(q5+q6),
+        -t6*(1-2*xi)+eta*(t4+t6), -1+r6*(1-2*xi)+eta*(r4-r6),
+        -q6*(1-2*xi)-eta*(q4-q6),
+        -eta*(t5+t4), eta*(r4-r5), -eta*(q4-q5)])
+    Hx_eta = np.array([
+        -P5*(1-2*eta)-(P6-P5)*xi, q5*(1-2*eta)-(q5+q6)*xi,
+        -4+6*(xi+eta)+r5*(1-2*eta)-xi*(r5+r6),
+        xi*(P4+P6), xi*(q4-q6), -xi*(r6-r4),
+        P5*(1-2*eta)-xi*(P4+P5), q5*(1-2*eta)+xi*(q4-q5),
+        -2+6*eta+r5*(1-2*eta)+xi*(r4-r5)])
+    Hy_eta = np.array([
+        -t5*(1-2*eta)-(t6-t5)*xi, 1+r5*(1-2*eta)-xi*(r5+r6),
+        -q5*(1-2*eta)+xi*(q5+q6),
+        xi*(t4+t6), xi*(r4-r6), -xi*(q4-q6),
+        t5*(1-2*eta)-xi*(t4+t5), -1+r5*(1-2*eta)+xi*(r4-r5),
+        -q5*(1-2*eta)-xi*(q4-q5)])
+    B = np.zeros((3, 9))
+    B[0, :] = (y31*Hx_xi + y12*Hx_eta) / (2*A)
+    B[1, :] = (-x31*Hy_xi - x12*Hy_eta) / (2*A)
+    B[2, :] = (-x31*Hx_xi - x12*Hx_eta + y31*Hy_xi + y12*Hy_eta) / (2*A)
+    return B
+
+
+def _shell_frame(pts):
+    """Local axes R (rows ex,ey,ez), local 2D node coords and the 18x18
+    global<-local DOF transform T for a flat shell at 3D points `pts`."""
+    import numpy as np
+    p1, p2, p3 = [np.array([p.x, p.y, p.z], float) for p in pts]
+    ex = p2 - p1; ex = ex / np.linalg.norm(ex)
+    ez = np.cross(ex, p3 - p1); ez = ez / np.linalg.norm(ez)
+    ey = np.cross(ez, ex)
+    R = np.vstack([ex, ey, ez])
+    xy = [tuple((R @ (p - p1))[:2]) for p in (p1, p2, p3)]
+    T = np.zeros((18, 18))
+    for n in range(3):
+        T[6*n:6*n+3, 6*n:6*n+3] = R
+        T[6*n+3:6*n+6, 6*n+3:6*n+6] = R
+    return R, xy, T
+
+
+def _shell_k_global(pts, E, nu, t):
+    """18x18 global stiffness of a flat 3-node shell (CST + DKT + small drilling
+    stiffness). DOF order per node: ux,uy,uz,rx,ry,rz."""
+    import numpy as np
+    R, xy, T = _shell_frame(pts)
+    Bm, A = _cst_B(xy)
+    Km = (Bm.T @ _membrane_D(E, nu) @ Bm) * t * A
+    Db = _bending_D(E, nu, t)
+    Kb = np.zeros((9, 9))
+    for (xi, eta) in [(0.5, 0.0), (0.5, 0.5), (0.0, 0.5)]:
+        Bb = _dkt_B(xy, xi, eta)
+        Kb += Bb.T @ Db @ Bb
+    Kb *= A / 3.0
+    Kl = np.zeros((18, 18))
+    mi = [0, 1, 6, 7, 12, 13]
+    bi = [2, 3, 4, 8, 9, 10, 14, 15, 16]
+    for a in range(6):
+        for b in range(6):
+            Kl[mi[a], mi[b]] += Km[a, b]
+    for a in range(9):
+        for b in range(9):
+            Kl[bi[a], bi[b]] += Kb[a, b]
+    kdr = 1e-3 * abs(min(Kb.diagonal().min(), Km.diagonal().min()))
+    for n in range(3):
+        Kl[6*n+5, 6*n+5] += kdr
+    return T.T @ Kl @ T
+
+
+def _shell_vm_stress(pts, E, nu, t, u_glob18):
+    """Peak von Mises stress (top/bottom surface, at the centroid) of a flat
+    shell triangle from its 18 global nodal displacements."""
+    import numpy as np
+    R, xy, T = _shell_frame(pts)
+    ul = T @ np.asarray(u_glob18, float)
+    mi = [0, 1, 6, 7, 12, 13]; bi = [2, 3, 4, 8, 9, 10, 14, 15, 16]
+    Bm, A = _cst_B(xy)
+    sig_m = _membrane_D(E, nu) @ (Bm @ ul[mi])          # membrane stress
+    Bb = _dkt_B(xy, 1/3.0, 1/3.0)
+    M = _bending_D(E, nu, t) @ (Bb @ ul[bi])            # moments / unit width
+    sig_b = 6.0 * M / (t * t)                           # surface bending stress
+
+    def vm(s):
+        return (s[0]**2 - s[0]*s[1] + s[1]**2 + 3*s[2]**2) ** 0.5
+    top = sig_m + sig_b; bot = sig_m - sig_b
+    return max(vm(top), vm(bot))
+
+
+def _tri_normal_area(pts):
+    """Unit normal (FreeCAD.Vector) and area of a 3D triangle."""
+    import numpy as np
+    p1, p2, p3 = [np.array([p.x, p.y, p.z], float) for p in pts]
+    n = np.cross(p2 - p1, p3 - p1)
+    L = float(np.linalg.norm(n))
+    nrm = (n / L) if L > 1e-12 else np.array([0.0, 0.0, 1.0])
+    return FreeCAD.Vector(float(nrm[0]), float(nrm[1]), float(nrm[2])), 0.5 * L
+
+
+def _shell_tris(o):
+    """Triangle mesh of a plate/shell object as [[v1,v2,v3], ...] (Vectors)."""
+    import json
+    try:
+        return [[FreeCAD.Vector(*p) for p in tri]
+                for tri in json.loads(getattr(o, "ShellTris", "[]"))]
+    except Exception:
+        return []
+
+
+def _shell_material(o):
+    return getattr(o, "Material", DEFAULT_MAT)
+
+
+def _poisson(E, G):
+    """Poisson's ratio from E and G (nu = E/2G - 1), clamped to a sane range."""
+    return max(0.0, min(0.49, E / (2.0 * G) - 1.0)) if G > 1e-9 else 0.3
+
+
+def _mesh_quad(p1, p2, p3, p4, nx, ny):
+    """Mesh a (possibly warped) quad p1->p2->p3->p4 into nx*ny*2 triangles by
+    bilinear interpolation. Returns a list of [v1,v2,v3] triangles."""
+    def bil(u, v):
+        a = p1 + vscale(p2 - p1, u)
+        b = p4 + vscale(p3 - p4, u)
+        return a + vscale(b - a, v)
+    tris = []
+    for j in range(ny):
+        for i in range(nx):
+            A = bil(i / float(nx), j / float(ny))
+            B = bil((i + 1) / float(nx), j / float(ny))
+            C = bil((i + 1) / float(nx), (j + 1) / float(ny))
+            D = bil(i / float(nx), (j + 1) / float(ny))
+            tris.append([A, B, C]); tris.append([A, C, D])
+    return tris
+
+
+def _order_quad(pts):
+    """Order 4 corner points into a convex cyclic quad (by angle about their
+    centroid in the plate plane), so a rectangle meshes correctly whatever the
+    selection order."""
+    import numpy as np
+    P = [np.array([p.x, p.y, p.z], float) for p in pts]
+    c = sum(P) / 4.0
+    n = np.cross(P[1] - P[0], P[2] - P[0])
+    ln = np.linalg.norm(n)
+    nn = n / ln if ln > 1e-9 else np.array([0, 0, 1.0])
+    u = P[0] - c
+    u = u / np.linalg.norm(u) if np.linalg.norm(u) > 1e-9 else np.array([1., 0, 0])
+    v = np.cross(nn, u)
+    ang = [float(np.arctan2(np.dot(p - c, v), np.dot(p - c, u))) for p in P]
+    return [pts[i] for i in sorted(range(4), key=lambda i: ang[i])]
+
+
+def _make_plate(doc, tris, thk, mat):
+    """Create a plate/shell analysis object from a triangle mesh."""
+    import json
+    faces = []
+    for tri in tris:
+        try:
+            faces.append(Part.Face(Part.makePolygon(
+                [FreeCAD.Vector(tri[0]), FreeCAD.Vector(tri[1]),
+                 FreeCAD.Vector(tri[2]), FreeCAD.Vector(tri[0])])))
+        except Exception:
+            pass
+    if not faces:
+        return None
+    o = doc.addObject("Part::Feature", "Plate")
+    o.Shape = Part.makeCompound(faces)
+    o.Label = "Plate (%s, t=%g mm)" % (mat, thk)
+    _set(o, "App::PropertyBool", "IsShell", True)
+    _set(o, "App::PropertyFloat", "ShellThk", float(thk))
+    _set(o, "App::PropertyString", "Material", mat)
+    _set(o, "App::PropertyString", "ShellTris",
+         json.dumps([[[p.x, p.y, p.z] for p in tri] for tri in tris]))
+    try:
+        o.ViewObject.ShapeColor = (0.6, 0.6, 0.65)
+        o.ViewObject.Transparency = 35
+    except Exception:
+        pass
+    return o
+
+
 def _section_props_from_name(name):
     """Section properties (A, Iy, Iz, J, c) from a profile name in the library.
     Works for both solid members and line bars (the analysis entity carries a
@@ -3281,6 +3518,124 @@ class AddMemberLoad:
         info(msg)
 
 
+class AddPlate:
+    def GetResources(self):
+        return {"Pixmap": _icon("plate"), "MenuText": "Add Plate / Shell",
+                "ToolTip": "Select 3 or 4 node vertices (the plate corners) in the "
+                           "3D view, then create a plate/shell: a meshed 2D element "
+                           "(walls, slabs, floor diaphragms) analysed with a validated "
+                           "flat shell (membrane + plate bending).", "Accel": "A, T"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        pts = _sel_vertices()
+        if len(pts) not in (3, 4):
+            info("Select 3 or 4 node vertices (the plate corners) in the 3D view "
+                 "first.\n\nTip: draw a rectangle/box edges or bar nodes, then pick "
+                 "the four corner vertices. A plate shares nodes with any bars at "
+                 "the same points (a slab on beams).")
+            return
+        doc = FreeCAD.ActiveDocument
+        mats = list(MATERIALS.keys())
+        isquad = (len(pts) == 4)
+        fields = [
+            {"key": "_i", "kind": "info", "default":
+             "A plate/shell meshed into triangles. Thickness and material set its "
+             "stiffness; mesh divisions set the accuracy (more = finer)."},
+            {"key": "thk", "label": "Thickness (mm)", "kind": "float", "default": 150.0},
+            {"key": "mat", "label": "Material", "kind": "combo",
+             "options": mats, "default": DEFAULT_MAT}]
+        if isquad:
+            fields += [
+                {"key": "nx", "label": "Mesh divisions, side 1", "kind": "float", "default": 6},
+                {"key": "ny", "label": "Mesh divisions, side 2", "kind": "float", "default": 6}]
+        vals = form_dialog("Add Plate / Shell", fields)
+        if not vals or abs(vals["thk"]) < 1e-6:
+            return
+        if isquad:
+            P = _order_quad(pts)
+            nx = max(1, int(round(vals.get("nx", 4))))
+            ny = max(1, int(round(vals.get("ny", 4))))
+            tris = _mesh_quad(P[0], P[1], P[2], P[3], nx, ny)
+        else:
+            tris = [[pts[0], pts[1], pts[2]]]
+        doc.openTransaction("DynFrame: add plate")
+        o = _make_plate(doc, tris, vals["thk"], vals["mat"])
+        doc.commitTransaction(); doc.recompute()
+        if o is None:
+            info("Could not build the plate (degenerate corners?)."); return
+        info("Plate created: %d triangle element(s), t=%g mm, %s.\n\nAdd supports "
+             "at its edge nodes, a pressure (Add Plate Pressure) or other loads, "
+             "then Calculate. The plate von Mises stress appears in the Results "
+             "Viewer and the 'PlateForces' table." % (len(tris), vals["thk"], vals["mat"]))
+
+
+class AddPlateLoad:
+    def GetResources(self):
+        return {"Pixmap": _icon("barload"), "MenuText": "Add Plate Pressure",
+                "ToolTip": "Select one or more plates, then apply a surface pressure "
+                           "(N/mm^2) normal to the plate, assigned to a load case.",
+                "Accel": "A, R"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        doc = FreeCAD.ActiveDocument
+        sel = [s.Object for s in FreeCADGui.Selection.getSelectionEx()
+               if getattr(s.Object, "IsShell", False)]
+        if not sel:
+            info("Select one or more plates in the 3D view first, then add a "
+                 "pressure.")
+            return
+        cs = [c[0] for c in _cases(doc)]
+        vals = form_dialog("Add Plate Pressure (%d plate(s))" % len(sel), [
+            {"key": "case", "label": "Load case", "kind": "combo",
+             "options": cs, "default": cs[-1]},
+            {"key": "p", "label": "Pressure (N/mm^2, + along plate normal)",
+             "kind": "float", "default": -0.005}])
+        if not vals or abs(vals["p"]) < 1e-12:
+            return
+        doc.openTransaction("DynFrame: plate pressure")
+        grp = _grp(doc, LOAD_GROUP)
+        for pl in sel:
+            tris = _shell_tris(pl)
+            arrows = []
+            if tris:
+                nrm, _a = _tri_normal_area(tris[0])
+                allp = [p for tri in tris for p in tri]
+                c = FreeCAD.Vector(sum(p.x for p in allp) / len(allp),
+                                   sum(p.y for p in allp) / len(allp),
+                                   sum(p.z for p in allp) / len(allp))
+                ln = _model_size([pl]) * 0.15 + 50.0
+                d = nrm if vals["p"] >= 0 else vscale(nrm, -1.0)
+                try:
+                    arrows.append(Part.makeLine(FreeCAD.Vector(c - vscale(d, ln)),
+                                                FreeCAD.Vector(c)))
+                    arrows.append(Part.makeCone(ln * 0.14, 0.0, ln * 0.3,
+                                                c - vscale(d, ln * 0.3), d))
+                except Exception:
+                    pass
+            o = doc.addObject("Part::Feature", "PlatePressure")
+            if arrows:
+                o.Shape = Part.makeCompound(arrows)
+            o.Label = "%s: %.4g N/mm^2 on %s" % (vals["case"], vals["p"], pl.Label)
+            _set(o, "App::PropertyString", "LoadType", "Pressure")
+            _set(o, "App::PropertyString", "LoadCase", vals["case"])
+            _set(o, "App::PropertyString", "OnShell", pl.Name)
+            _set(o, "App::PropertyFloat", "Pressure", float(vals["p"]))
+            try:
+                o.ViewObject.ShapeColor = (0.9, 0.2, 0.9); o.ViewObject.LineWidth = 2
+            except Exception:
+                pass
+            grp.addObject(o)
+        doc.commitTransaction(); doc.recompute()
+        info("Pressure %.4g N/mm^2 added to case '%s' on %d plate(s)."
+             % (vals["p"], vals["case"], len(sel)))
+
+
 class Combinations:
     def GetResources(self):
         return {"Pixmap": _icon("combo"), "MenuText": "Load Combinations",
@@ -3393,9 +3748,10 @@ class RunAnalysis:
         import numpy as np
         doc = FreeCAD.ActiveDocument
         objs, kind = _analysis_objs(doc)
-        if not objs:
-            info("No bars or members found. Build a line model first (Add Bars, "
-                 "Bars from Members, or Node/Bar Tables + Build from Tables).")
+        shell_objs = [o for o in doc.Objects if getattr(o, "IsShell", False)]
+        if not objs and not shell_objs:
+            info("No bars, members or plates found. Build a line model (Add Bars, "
+                 "Bars from Members, or Node/Bar Tables) or add a plate (Add Plate).")
             return
 
         nodes = []
@@ -3423,7 +3779,21 @@ class RunAnalysis:
             elems.append({"o": o, "n1": n1, "n2": n2, "A": A, "Iy": Iy, "Iz": Iz,
                           "J": J, "c": c, "E": E, "G": G, "Fy": Fy, "rho": rho,
                           "sec": sec, "w": FreeCAD.Vector(0, 0, 0)})
-        if not elems:
+        # plates/shells: mesh triangles, share nodes with the bars, store for
+        # assembly + stress recovery (validated CST+DKT flat shell)
+        shells = []
+        for o in shell_objs:
+            E, G, Fy, rho = _material(_shell_material(o))
+            nu = _poisson(E, G); t = float(getattr(o, "ShellThk", 10.0))
+            selem = []
+            for tri in _shell_tris(o):
+                ni = tuple(nid(p) for p in tri)
+                if len(set(ni)) == 3:
+                    selem.append((ni, [FreeCAD.Vector(p) for p in tri]))
+            if selem:
+                shells.append({"o": o, "tris": selem, "E": E, "nu": nu, "t": t,
+                               "Fy": Fy, "rho": rho})
+        if not elems and not shells:
             info("Could not build an analysis model (check that bars have valid "
                  "section names).")
             return
@@ -3537,6 +3907,14 @@ class RunAnalysis:
             kc, fc, el["rel_info"] = _condense(kl, fl, rel)
             K[np.ix_(dofs, dofs)] += T.T @ kc @ T
             F[dofs] += T.T @ fc
+        # plate/shell stiffness (flat CST + DKT shell, 6 dof/node)
+        for sh in shells:
+            for (ni, pts) in sh["tris"]:
+                Ke = _shell_k_global(pts, sh["E"], sh["nu"], sh["t"])
+                dofs = []
+                for n in ni:
+                    dofs += [6 * n + i for i in range(6)]
+                K[np.ix_(dofs, dofs)] += Ke
         for o in doc.Objects:
             if getattr(o, "LoadType", None) == "Nodal":
                 f = factors.get(getattr(o, "LoadCase", ""), 0.0)
@@ -3551,6 +3929,28 @@ class RunAnalysis:
                             F[6 * i + 3] += mv.x * f
                             F[6 * i + 4] += mv.y * f
                             F[6 * i + 5] += mv.z * f
+        # pressure loads on plates (normal to each shell triangle)
+        for o in doc.Objects:
+            if getattr(o, "LoadType", None) == "Pressure":
+                f = factors.get(getattr(o, "LoadCase", ""), 0.0)
+                sh = next((s for s in shells
+                           if s["o"].Name == getattr(o, "OnShell", "")), None)
+                if f and sh is not None:
+                    pres = f * float(getattr(o, "Pressure", 0.0))
+                    for (ni, pts) in sh["tris"]:
+                        nrm, Ae = _tri_normal_area(pts)
+                        fn = pres * Ae / 3.0
+                        for n in ni:
+                            F[6 * n] += fn * nrm.x
+                            F[6 * n + 1] += fn * nrm.y
+                            F[6 * n + 2] += fn * nrm.z
+        if sw_factor:
+            for sh in shells:          # plate self-weight (downward, as Dead)
+                for (ni, pts) in sh["tris"]:
+                    _nrm, Ae = _tri_normal_area(pts)
+                    fz = -sh["t"] * sh["rho"] * GRAV * sw_factor * Ae / 3.0
+                    for n in ni:
+                        F[6 * n + 2] += fz
 
         free = [d for d in range(ndof) if d not in fixed]
         u = np.zeros(ndof)
@@ -3594,7 +3994,7 @@ class RunAnalysis:
                        % ("converged" if conv else "max iterations"))
         run_name = run_name + po_note
         Rreac = Ktot @ u - F
-        msize = _model_size(objs)
+        msize = _model_size(list(objs) + shell_objs)
         maxd = max((u[6 * i] ** 2 + u[6 * i + 1] ** 2 + u[6 * i + 2] ** 2) ** 0.5
                    for i in range(len(nodes)))
 
@@ -3691,6 +4091,26 @@ class RunAnalysis:
             except Exception:
                 pass
 
+        # plate/shell stress recovery (peak von Mises per triangle)
+        shell_vm_max = 0.0
+        for sh in shells:
+            pervm = []
+            for (ni, pts) in sh["tris"]:
+                ug = []
+                for n in ni:
+                    ug += list(u[6 * n:6 * n + 6])
+                vm = _shell_vm_stress(pts, sh["E"], sh["nu"], sh["t"], ug)
+                pervm.append(vm)
+            sh["pervm"] = pervm
+            sh["vmmax"] = max(pervm) if pervm else 0.0
+            shell_vm_max = max(shell_vm_max, sh["vmmax"])
+            try:
+                _set(sh["o"], "App::PropertyFloat", "ShellVM", float(sh["vmmax"]))
+                _set(sh["o"], "App::PropertyFloat", "ShellUtil",
+                     float(sh["vmmax"] / sh["Fy"]) if sh["Fy"] > 0 else 0.0)
+            except Exception:
+                pass
+
         # ---- results are rendered lazily, one at a time, on demand ----
         # The solve stores the per-bar force samples + deformed state; a single
         # result is then drawn by _render_result (coloured contour - tubes or
@@ -3717,6 +4137,10 @@ class RunAnalysis:
         doc.commitTransaction()
 
         _render_result(doc, "Disp", scale_mult=1.0)     # default view
+        if shells:
+            _build_plate_stress(doc, dg, shells, shell_vm_max,
+                                visible=(not elems))
+            self._plate_table(doc, shells, rg)
         self._tables(doc, nodes, sup_nodes, Rreac, u, elems, run_name, rg, "Disp")
         doc.recompute()
         _apply_result_colors(doc)       # restore per-face gradient after recompute
@@ -3726,19 +4150,43 @@ class RunAnalysis:
             FreeCADGui.SendMsgToActiveView("ViewFit")
         except Exception:
             pass
-        info("Analysis complete - %s  (line model, %d bars).\n\n"
+        pnote = ""
+        if shells:
+            ntri = sum(len(s["tris"]) for s in shells)
+            pnote = ("\n\n%d plate(s) / %d shell elements: max von Mises %.1f MPa. "
+                     "See the 'Plate stress' result in the Results Viewer and the "
+                     "'PlateForces' table." % (len(shells), ntri, shell_vm_max))
+        info("Analysis complete - %s  (%d bars, %d plates).\n\n"
              "Nodes %d | Restrained DOFs %d\n"
              "Max displacement:  %.3f mm\n"
              "Max |My| %.0f | Max |Mz| %.0f | Max |N| %.0f  N(.mm)\n"
              "Max utilisation:  %.2f  (stress / yield)\n\n"
-             "Showing the DISPLACEMENT contour (deformed shape coloured blue->red "
-             "by |u|, with a value colour bar). Use 'Show Force Diagram' to switch "
-             "to N, Vy, Vz, Mx, My, Mz or Stress - the colour bar updates to that "
-             "result. Tables: Reactions, Displacements, BarForces, plus your Nodes/"
-             "Bars.\n\nLinear static only; modal / buckling / seismic / code-checks "
-             "are later phases." %
-             (run_name, len(elems), len(nodes), len(fixed), maxd,
-              comp_max["My"], comp_max["Mz"], comp_max["N"], max_util))
+             "Showing the DISPLACEMENT contour. Use the Results Viewer (or 'Show "
+             "Result / Diagram') to switch to N, Vy, Vz, Mx, My, Mz, Stress or the "
+             "plate stress contour. Tables: Reactions, Displacements, BarForces, "
+             "plus your Nodes/Bars.%s" %
+             (run_name, len(elems), len(shells), len(nodes), len(fixed), maxd,
+              comp_max["My"], comp_max["Mz"], comp_max["N"], max_util, pnote))
+
+    def _plate_table(self, doc, shells, rg):
+        try:
+            sh = doc.getObject("PlateForces") or doc.addObject("Spreadsheet::Sheet", "PlateForces")
+            sh.Label = "PlateForces"; sh.clearAll()
+            sh.set("A1", "PLATE / SHELL RESULTS (von Mises)")
+            for c, h in zip("ABCDE", ["Plate", "Thk (mm)", "Elements",
+                                      "Max von Mises (MPa)", "Utilisation"]):
+                sh.set("%s2" % c, h)
+            r = 3
+            for s in shells:
+                row = [str(s["o"].Label), s["t"], len(s["tris"]), s.get("vmmax", 0.0),
+                       (s.get("vmmax", 0.0) / s["Fy"]) if s["Fy"] > 0 else 0.0]
+                for c, v in zip("ABCDE", row):
+                    sh.set("%s%d" % (c, r), ("%.4g" % v if isinstance(v, float) else str(v)))
+                r += 1
+            if rg is not None and sh not in rg.Group:
+                rg.addObject(sh)
+        except Exception as e:
+            FreeCAD.Console.PrintError("DynFrame: plate table failed (%s)\n" % e)
 
     def _tables(self, doc, nodes, sup_nodes, Rreac, u, elems, run_name, rg, akind):
         def sheet(name):
@@ -4841,7 +5289,8 @@ def _result_list(doc):
         nm = o.Name
         if getattr(o, "DiagKind", None) and (nm.startswith("Mode")
                                              or nm.startswith("Buckling")
-                                             or nm.startswith("Seismic")):
+                                             or nm.startswith("Seismic")
+                                             or nm.startswith("PlateStress")):
             out.append((o.Label or nm, nm, "obj"))
     return out
 
@@ -5787,6 +6236,55 @@ def _result_tube(doc, grp, name, kind, perbar, radius, vmax, visible,
     return ob
 
 
+def _build_plate_stress(doc, grp, shells, vmmax, visible=False):
+    """Plate/shell von Mises stress contour: each shell triangle coloured
+    blue->red by its stress, so the contour varies across the plate surface."""
+    old = doc.getObject("PlateStress")
+    if old is not None:
+        try:
+            doc.removeObject(old.Name)
+        except Exception:
+            pass
+    faces = []; colors = []
+    for sh in shells:
+        pervm = sh.get("pervm", [])
+        for k, (ni, pts) in enumerate(sh["tris"]):
+            try:
+                f = Part.Face(Part.makePolygon(
+                    [FreeCAD.Vector(pts[0]), FreeCAD.Vector(pts[1]),
+                     FreeCAD.Vector(pts[2]), FreeCAD.Vector(pts[0])]))
+            except Exception:
+                continue
+            faces.append(f)
+            vm = pervm[k] if k < len(pervm) else 0.0
+            t = (vm / vmmax) if vmmax > 1e-12 else 0.0
+            try:
+                nf = len(f.Faces)
+            except Exception:
+                nf = 1
+            colors += [_ramp(t) + (0.0,)] * nf
+    if not faces:
+        return None
+    ob = doc.addObject("Part::Feature", "PlateStress")
+    ob.Shape = Part.makeCompound(faces)
+    ob.Label = "Plate stress (von Mises, MPa)"
+    _set(ob, "App::PropertyString", "DiagKind", "_plate")
+    _set(ob, "App::PropertyFloat", "CompMax", float(vmmax))
+    _set(ob, "App::PropertyFloat", "CompMin", 0.0)
+    try:
+        ob.ViewObject.Visibility = bool(visible)
+        ob.ViewObject.ShapeColor = _ramp(0.5)
+        ob.ViewObject.DisplayMode = "Shaded"
+        if len(colors) == len(ob.Shape.Faces):
+            ob.ViewObject.DiffuseColor = colors
+            _RESULT_COLORS[ob.Name] = colors
+    except Exception:
+        pass
+    if grp is not None:
+        grp.addObject(ob)
+    return ob
+
+
 class RebuildFromSketch:
     def GetResources(self):
         return {"Pixmap": _icon("rebuild"), "MenuText": "Rebuild Members from Sketch",
@@ -5866,6 +6364,8 @@ _add("DynFrame_NewLoadCase", NewLoadCase)
 _add("DynFrame_DefineSupport", DefineSupport)
 _add("DynFrame_AddNodalLoad", AddNodalLoad)
 _add("DynFrame_AddMemberLoad", AddMemberLoad)
+_add("DynFrame_AddPlate", AddPlate)
+_add("DynFrame_AddPlateLoad", AddPlateLoad)
 _add("DynFrame_Combinations", Combinations)
 _add("DynFrame_MemberReleases", MemberReleases)
 _add("DynFrame_RunAnalysis", RunAnalysis)

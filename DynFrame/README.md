@@ -167,6 +167,17 @@ model is what you analyse. Commands are on the toolbars/menus
   per-mode period / modal mass % / spectral acceleration / base shear, the
   **SRSS base shear**, and the SRSS seismic displacement shape (warns if
   < 90 % modal mass is captured).
+- **Plates / Shells (2D elements)** — model walls, slabs and floor
+  diaphragms. **Add Plate** turns 3 or 4 selected node vertices into a
+  meshed plate (pick thickness, material and mesh divisions); it shares
+  nodes with any bars at the same points, so a **slab sits on its beams**
+  and they work together. **Add Plate Pressure** applies a surface pressure
+  (plus plate self-weight as Dead). The solver uses a validated **flat shell
+  = CST membrane + DKT thin-plate bending** (6 DOF/node), so plates and
+  frames solve in one combined model. Results: the plate **von Mises stress
+  contour** (each triangle coloured by its stress — a "Plate stress" result
+  in the Results Viewer), a `PlateForces` table (max stress + utilisation per
+  plate), and the plate nodes' deflections in the `Displacements` table.
 
 **Materials:** Steel S235 / S275 / S355, Stainless 304, Aluminium 6061-T6
 (each with its own E, G, yield and density). Edit `MATERIALS` in
@@ -189,10 +200,12 @@ model is what you analyse. Commands are on the toolbars/menus
 > buckling curves and a worked column check (χ_z = 0.452, Nb,z = 551 kN,
 > U = 0.73) and reproduces the LTB reduction (χ_LT ≈ 0.52 for a long
 > unrestrained span); **P-Δ** reproduces the 1/(1−P/Pcr) amplification;
-> **seismic** effective modal masses sum to 100 % of the total mass. It
-> covers **static, P-Δ, modal, buckling, seismic (response-spectrum) and a
-> full EN 1993-1-1 design check**; plate/shell (2D) elements are a later
-> phase. FreeCAD is not Robot — this reproduces Robot's *workflow and core
+> **seismic** effective modal masses sum to 100 % of the total mass; the
+> **plate/shell** element converges to the exact simply-supported-plate
+> deflection (w_c = 0.00406 q a⁴/D, ratio ≈ 0.996) and is frame-invariant on
+> a tilted plane. It covers **static, P-Δ, modal, buckling, seismic
+> (response-spectrum), plates/shells and a full EN 1993-1-1 design check**.
+> FreeCAD is not Robot — this reproduces Robot's *workflow and core
 > engineering* on its kernel.
 
 **Modeling / export / setup**

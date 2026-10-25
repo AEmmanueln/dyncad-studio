@@ -53,10 +53,11 @@ class DynFrameWorkbench(FreeCADGui.Workbench):
         panel = ["DynFrame_Manager", "DynFrame_ResultsViewer"]
         structure = ["DynFrame_GridGen", "DynFrame_AddBars",
                      "DynFrame_BarsFromMembers", "DynFrame_EditTables",
-                     "DynFrame_BuildFromTables"]
+                     "DynFrame_BuildFromTables", "DynFrame_AddPlate"]
         loads = ["DynFrame_NewLoadCase", "DynFrame_DefineSupport",
                  "DynFrame_AddNodalLoad", "DynFrame_AddMemberLoad",
-                 "DynFrame_MemberReleases", "DynFrame_Combinations"]
+                 "DynFrame_AddPlateLoad", "DynFrame_MemberReleases",
+                 "DynFrame_Combinations"]
         results = ["DynFrame_RunAnalysis", "DynFrame_ModalAnalysis",
                    "DynFrame_BucklingAnalysis", "DynFrame_ResponseSpectrum",
                    "DynFrame_Envelope", "DynFrame_CodeCheck",

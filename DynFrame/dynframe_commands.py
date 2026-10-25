@@ -2472,6 +2472,13 @@ def _ramp(t):
     f = (t - 0.75) / 0.25; return (1.0, 1.0 - f, 0.0)
 
 
+def _tube_radius(msize):
+    """Radius of the result tubes - a bold fraction of the model size so the
+    contour reads clearly as a thick 3D shape from any angle, not a thin line
+    (the Inventor/Robot contour look). Floored so small models stay visible."""
+    return max(msize * 0.016, 6.0)
+
+
 # ── Frame analysis — Robot-style line/stick model ────────────────
 # The analysis entity is a BAR: a line (two nodes) carrying a section and a
 # material, not a swept solid. That is how Robot Structural Analysis works
@@ -3725,7 +3732,7 @@ class RunAnalysis:
             el["defpts"] = [el["statpts"][s] + vscale(el["offs"][s], dscale)
                             for s in range(NS + 1)]
 
-        radius = max(msize * 0.007, 2.0)
+        radius = _tube_radius(msize)
         # persist the state the Results Viewer needs to re-draw the deformed
         # shape at any exaggeration (and animate it) without re-solving
         _store_analysis_state(doc, nodes, u, elems, dscale, msize, radius,
@@ -4091,7 +4098,7 @@ class ModalAnalysis:
             db = (phi[6 * bidx] ** 2 + phi[6 * bidx + 1] ** 2 + phi[6 * bidx + 2] ** 2) ** 0.5
             perbar.append(([pa, pb], [da, db]))
         ob = _result_tube(doc, _grp(doc, RES_GROUP), "Mode1", "_mode", perbar,
-                          max(msize * 0.007, 2.0), dmax, True)
+                          _tube_radius(msize), dmax, True)
         if ob is not None:
             ob.Label = "Mode 1  (%.3f Hz)" % freqs[0]
         doc.commitTransaction(); doc.recompute()
@@ -4237,7 +4244,7 @@ class BucklingAnalysis:
             db = (phi[6 * bidx] ** 2 + phi[6 * bidx + 1] ** 2 + phi[6 * bidx + 2] ** 2) ** 0.5
             perbar.append(([pa, pb], [da, db]))
         ob = _result_tube(doc, _grp(doc, RES_GROUP), "Buckling1", "_buckling", perbar,
-                          max(msize * 0.007, 2.0), dmax, True)
+                          _tube_radius(msize), dmax, True)
         if ob is not None:
             ob.Label = "Buckling mode 1  (factor %.3f)" % lam_cr
         doc.commitTransaction(); doc.recompute()
@@ -4430,7 +4437,7 @@ class ResponseSpectrum:
             db = (u_srss[6 * bidx] ** 2 + u_srss[6 * bidx + 1] ** 2 + u_srss[6 * bidx + 2] ** 2) ** 0.5
             perbar.append(([pa, pb], [da, db]))
         ob = _result_tube(doc, _grp(doc, RES_GROUP), "SeismicShape", "_seismic", perbar,
-                          max(msize * 0.007, 2.0), dmax, True)
+                          _tube_radius(msize), dmax, True)
         if ob is not None:
             ob.Label = "Seismic displacement (SRSS)"
         doc.commitTransaction(); doc.recompute()
@@ -4686,20 +4693,11 @@ def _store_analysis_state(doc, nodes, u, elems, dscale, msize, radius, run_name)
         pass
 
 
-def _draw_deformed(doc, scale_mult=1.0):
-    """Rebuild the displacement contour (deformed tube, coloured by |u|) at
-    `scale_mult` times the auto exaggeration, from the stored solved state."""
-    import json
+def _deformed_points(nodes, u, elpairs, scale, NS=10):
+    """Per-bar deformed station points (cubic Hermite from the nodal
+    displacements) at the given exaggeration, plus the true |u| per station and
+    the peak |u|. Shared by the displacement contour and the animation frames."""
     import numpy as np
-    st = doc.getObject("AnalysisState")
-    if st is None:
-        return False
-    nodes = [FreeCAD.Vector(*p) for p in json.loads(st.StNodes)]
-    u = np.array(json.loads(st.StU))
-    elpairs = json.loads(st.StElems)
-    base = st.StScale; msize = st.StMsize; radius = st.StRadius
-    scale = base * max(float(scale_mult), 0.0)
-    NS = 10
     perbar = []; maxd = 0.0
     for (n1, n2) in elpairs:
         T, L = _beam_T(nodes[n1], nodes[n2]); R3 = T[0:3, 0:3]
@@ -4708,7 +4706,7 @@ def _draw_deformed(doc, scale_mult=1.0):
         lz = FreeCAD.Vector(*[float(R3[2][j]) for j in range(3)])
         dg = np.concatenate([u[6 * n1:6 * n1 + 6], u[6 * n2:6 * n2 + 6]])
         dl = T @ dg
-        bpt = nodes[n1]; defpts = []; disp = []
+        bpt = nodes[n1]; pts = []; disp = []
         for s in range(NS + 1):
             xi = s / float(NS); x = L * xi
             h1 = 1 - 3 * xi ** 2 + 2 * xi ** 3; h2 = L * (xi - 2 * xi ** 2 + xi ** 3)
@@ -4717,9 +4715,34 @@ def _draw_deformed(doc, scale_mult=1.0):
             uy = h1 * dl[1] + h2 * dl[5] + h3 * dl[7] + h4 * dl[11]
             uz = h1 * dl[2] - h2 * dl[4] + h3 * dl[8] - h4 * dl[10]
             off = vscale(lx, ux) + vscale(ly, uy) + vscale(lz, uz)
-            defpts.append(bpt + vscale(lx, x) + vscale(off, scale))
+            pts.append(bpt + vscale(lx, x) + vscale(off, scale))
             disp.append(off.Length); maxd = max(maxd, off.Length)
-        perbar.append((defpts, disp))
+        perbar.append((pts, disp))
+    return perbar, maxd
+
+
+def _load_state(doc):
+    """(nodes, u, elpairs, base_scale, msize, radius) from the stored solved
+    state, or None if there is no analysis yet."""
+    import json
+    import numpy as np
+    st = doc.getObject("AnalysisState")
+    if st is None:
+        return None
+    return ([FreeCAD.Vector(*p) for p in json.loads(st.StNodes)],
+            np.array(json.loads(st.StU)), json.loads(st.StElems),
+            st.StScale, st.StMsize, st.StRadius)
+
+
+def _draw_deformed(doc, scale_mult=1.0):
+    """Rebuild the displacement contour (deformed tube, coloured by |u|) at
+    `scale_mult` times the auto exaggeration, from the stored solved state."""
+    state = _load_state(doc)
+    if state is None:
+        return False
+    nodes, u, elpairs, base, msize, radius = state
+    scale = base * max(float(scale_mult), 0.0)
+    perbar, maxd = _deformed_points(nodes, u, elpairs, scale)
     old = doc.getObject("Diagram_Disp")
     if old is not None:
         try:
@@ -4741,6 +4764,72 @@ def _draw_deformed(doc, scale_mult=1.0):
     _color_bar(doc, _grp(doc, DIA_GROUP), 0.0, maxd, "Displacement (mm)", objs, msize)
     doc.recompute()
     return True
+
+
+def _make_anim_frames(doc, amp=1.0, nframes=12):
+    """Pre-build the deformed-shape animation as `nframes` lightweight wire
+    objects (one smooth 0->amp->0 oscillation), hidden, so the animation can
+    play by just toggling visibility - no geometry rebuild or recompute per
+    frame (which is what made it unstoppable before). Returns the frame list."""
+    import math
+    state = _load_state(doc)
+    if state is None:
+        return []
+    nodes, u, elpairs, base, msize, radius = state
+    _clear_anim_frames(doc)
+    grp = _grp(doc, RES_GROUP)
+    frames = []
+    for i in range(nframes):
+        m = amp * 0.5 * (1.0 - math.cos(2.0 * math.pi * i / nframes))
+        perbar, _ = _deformed_points(nodes, u, elpairs, base * m)
+        wires = []
+        for (pts, _d) in perbar:
+            if len(pts) > 1:
+                try:
+                    wires.append(Part.makePolygon([FreeCAD.Vector(p) for p in pts]))
+                except Exception:
+                    pass
+        if not wires:
+            continue
+        ob = doc.addObject("Part::Feature", "AnimFrame%d" % i)
+        ob.Shape = Part.makeCompound(wires)
+        _set(ob, "App::PropertyString", "DiagKind", "_anim")
+        try:
+            ob.ViewObject.Visibility = False
+            ob.ViewObject.LineWidth = 5
+            ob.ViewObject.LineColor = (0.1, 0.9, 0.25)
+        except Exception:
+            pass
+        grp.addObject(ob)
+        frames.append(ob)
+    doc.recompute()          # one-time; animation then only toggles visibility
+    return frames
+
+
+def _clear_anim_frames(doc):
+    for o in list(doc.Objects):
+        if getattr(o, "DiagKind", None) == "_anim":
+            try:
+                doc.removeObject(o.Name)
+            except Exception:
+                pass
+
+
+def _shown_range(doc):
+    """(title, vmin, vmax) of the result currently visible in the 3D view, for
+    the Results Viewer legend - read from the shown tube's stored range."""
+    for o in doc.Objects:
+        if not hasattr(o, "CompMax"):
+            continue
+        try:
+            if o.ViewObject.Visibility:
+                k = getattr(o, "DiagKind", "")
+                title = RESULT_LABELS.get(k, o.Label or str(k))
+                return (title, float(getattr(o, "CompMin", 0.0)),
+                        float(getattr(o, "CompMax", 0.0)))
+        except Exception:
+            pass
+    return None
 
 
 def _result_list(doc):
@@ -4807,9 +4896,59 @@ def _result_summary(doc):
 
 def _results_panel_class():
     """Second interface: an Inventor-style results browser (result list +
-    contour + value legend + min/max probe + deformation scale + animation).
-    Built lazily so importing the module never needs Qt."""
+    contour + readable value legend + min/max probe + deformation scale +
+    animation). Built lazily so importing the module never needs Qt."""
     from PySide import QtCore
+
+    class _RampBar(QW.QWidget):
+        """A 2D colour-ramp legend painted in the panel (readable regardless of
+        the 3D view angle), with numeric value ticks - the Inventor result
+        legend."""
+        def __init__(self):
+            super(_RampBar, self).__init__()
+            self._title = "Result"; self._vmin = 0.0; self._vmax = 0.0
+            self.setMinimumHeight(190); self.setMinimumWidth(150)
+
+        def set_range(self, title, vmin, vmax):
+            self._title = title; self._vmin = vmin; self._vmax = vmax
+            self.update()
+
+        def paintEvent(self, ev):
+            p = QtGui.QPainter(self)
+            try:
+                w = self.width(); h = self.height()
+                bx, bw, top, bot = 10, 30, 26, h - 14
+                bh = max(bot - top, 1)
+                grad = QtGui.QLinearGradient(0, top, 0, bot)
+                for i in range(13):
+                    t = i / 12.0
+                    r, g, b = _ramp(1.0 - t)
+                    grad.setColorAt(t, QtGui.QColor(int(r * 255), int(g * 255), int(b * 255)))
+                p.fillRect(QtCore.QRectF(bx, top, bw, bh), QtGui.QBrush(grad))
+                p.setPen(QtGui.QColor(110, 110, 110))
+                p.drawRect(QtCore.QRectF(bx, top, bw, bh))
+                tc = self.palette().windowText().color()
+                p.setPen(tc)
+                f = p.font(); f.setBold(True); p.setFont(f)
+                p.drawText(QtCore.QRectF(0, 2, w, 18), int(QtCore.Qt.AlignLeft),
+                           self._title)
+                f.setBold(False); p.setFont(f)
+                if self._vmax <= self._vmin:
+                    p.drawText(QtCore.QRectF(bx + bw + 8, top, w, 18),
+                               int(QtCore.Qt.AlignLeft), "(no result shown)")
+                    return
+                for i in range(7):
+                    frac = i / 6.0
+                    val = self._vmax - (self._vmax - self._vmin) * frac
+                    yy = top + bh * frac
+                    p.drawLine(QtCore.QPointF(bx + bw, yy),
+                               QtCore.QPointF(bx + bw + 5, yy))
+                    p.drawText(QtCore.QRectF(bx + bw + 9, yy - 9,
+                               w - (bx + bw + 9), 18),
+                               int(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter),
+                               "%.4g" % val)
+            finally:
+                p.end()
 
     class ResultsViewerPanel(QW.QDialog):
         def __init__(self):
@@ -4817,7 +4956,9 @@ def _results_panel_class():
             self.setWindowTitle("DynFrame - Results Viewer")
             self.setModal(False)
             self._timer = None
-            self._anim_t = 0.0
+            self._frames = []
+            self._fi = 0
+            self._loops = 0
             self._build()
             self._refresh()
 
@@ -4832,24 +4973,35 @@ def _results_panel_class():
             self.hdr = QW.QLabel("Results"); self.hdr.setWordWrap(True)
             lay.addWidget(self.hdr)
 
+            row = QW.QHBoxLayout()
             g = QW.QGroupBox("Result"); gl = QW.QVBoxLayout(g)
             self.list = QW.QListWidget()
-            self.list.setMinimumHeight(150)
+            self.list.setMinimumHeight(190)
             self.list.currentRowChanged.connect(self._show_selected)
             gl.addWidget(self.list)
-            lay.addWidget(g)
+            row.addWidget(g, 1)
+            lg = QW.QGroupBox("Legend"); lgl = QW.QVBoxLayout(lg)
+            self.legend = _RampBar(); lgl.addWidget(self.legend)
+            row.addWidget(lg)
+            lay.addLayout(row)
 
             g = QW.QGroupBox("Deformation scale (displacement contour)")
-            gl = QW.QHBoxLayout(g)
-            gl.addWidget(QW.QLabel("x auto"))
+            gl = QW.QVBoxLayout(g)
+            r = QW.QHBoxLayout()
+            r.addWidget(QW.QLabel("x auto"))
             self.scale = QW.QDoubleSpinBox()
             self.scale.setRange(0.0, 1.0e6); self.scale.setDecimals(2)
             self.scale.setValue(1.0); self.scale.setSingleStep(0.5)
-            gl.addWidget(self.scale, 1)
-            gl.addWidget(self._btn("Apply", self._apply_scale))
+            r.addWidget(self.scale, 1)
+            r.addWidget(self._btn("Apply", self._apply_scale))
             self.animbtn = self._btn("Animate", self._toggle_anim)
             self.animbtn.setCheckable(True)
-            gl.addWidget(self.animbtn)
+            r.addWidget(self.animbtn)
+            gl.addLayout(r)
+            self.showmodel = QW.QCheckBox("Show undeformed model")
+            self.showmodel.setChecked(True)
+            self.showmodel.stateChanged.connect(self._toggle_model)
+            gl.addWidget(self.showmodel)
             lay.addWidget(g)
 
             g = QW.QGroupBox("Summary (max values)"); gl = QW.QVBoxLayout(g)
@@ -4862,6 +5014,16 @@ def _results_panel_class():
             r.addWidget(self._btn("Fit view", self._fit))
             r.addWidget(self._btn("Refresh", self._refresh))
             lay.addLayout(r)
+
+        def _update_legend(self):
+            doc = self._doc()
+            if doc is None:
+                return
+            rng = _shown_range(doc)
+            if rng is not None:
+                self.legend.set_range(*rng)
+            else:
+                self.legend.set_range("Result", 0.0, 0.0)
 
         def _refresh(self, *a):
             doc = self._doc()
@@ -4876,14 +5038,17 @@ def _results_panel_class():
             self.list.blockSignals(False)
             if self._results:
                 self.list.setCurrentRow(cur if 0 <= cur < len(self._results) else 0)
-            self.hdr.setText("%d result(s) available. Select one to display it as a "
-                             "coloured contour with a value legend." % len(self._results))
+            self.hdr.setText("%d result(s) available. Click one to show it as a "
+                             "thick coloured contour; the legend and the max-value "
+                             "summary update to match." % len(self._results))
             self.summary.setText(_result_summary(doc))
+            self._update_legend()
 
         def _show_selected(self, row):
             doc = self._doc()
             if doc is None or not (0 <= row < len(self._results)):
                 return
+            self._stop_anim()
             label, key, knd = self._results[row]
             if knd == "diag":
                 ShowDiagram().Activated(kind=key)
@@ -4897,37 +5062,94 @@ def _results_panel_class():
                             pass
                 doc.recompute()
             self.summary.setText(_result_summary(doc))
+            self._update_legend()
+
+        def _toggle_model(self, *a):
+            doc = self._doc()
+            if doc is None:
+                return
+            vis = self.showmodel.isChecked()
+            for o in doc.Objects:
+                if is_analysis_elem(o):
+                    try:
+                        o.ViewObject.Visibility = vis
+                    except Exception:
+                        pass
 
         def _apply_scale(self):
             doc = self._doc()
             if doc is None:
                 return
+            self._stop_anim()
             if not _draw_deformed(doc, self.scale.value()):
                 info("No solved state found. Run Calculate first.")
                 return
-            self._fit()
+            self._update_legend(); self._fit()
 
+        # ---- animation: pre-built wire frames, toggled by visibility only, so
+        # a frame costs nothing and the Stop click always registers ----
         def _toggle_anim(self):
+            doc = self._doc()
             if self.animbtn.isChecked():
-                self._anim_t = 0.0
+                if doc is None or doc.getObject("AnalysisState") is None:
+                    self.animbtn.setChecked(False)
+                    info("No solved state found. Run Calculate first."); return
+                self._frames = _make_anim_frames(doc, max(self.scale.value(), 0.1), 12)
+                if not self._frames:
+                    self.animbtn.setChecked(False); return
+                sd = doc.getObject("Diagram_Disp")
+                if sd is not None:
+                    try:
+                        sd.ViewObject.Visibility = False
+                    except Exception:
+                        pass
+                self._fi = 0; self._loops = 0
+                self.animbtn.setText("Stop")
                 self._timer = QtCore.QTimer(self)
                 self._timer.timeout.connect(self._anim_step)
-                self._timer.start(60)
-            elif self._timer is not None:
-                self._timer.stop(); self._timer = None
-                self._apply_scale()
+                self._timer.start(90)
+            else:
+                self._stop_anim()
 
         def _anim_step(self):
-            import math
-            self._anim_t += 0.35
-            amp = self.scale.value()
-            mult = amp * abs(math.sin(self._anim_t))
+            frames = self._frames
+            if not frames:
+                self._stop_anim(); return
+            for j, ob in enumerate(frames):
+                try:
+                    ob.ViewObject.Visibility = (j == self._fi)
+                except Exception:
+                    pass
+            self._fi += 1
+            if self._fi >= len(frames):
+                self._fi = 0; self._loops += 1
+                if self._loops >= 8:          # auto-stop after a few loops
+                    self._stop_anim()
+
+        def _stop_anim(self):
+            if self._timer is not None:
+                try:
+                    self._timer.stop()
+                except Exception:
+                    pass
+                self._timer = None
             try:
-                _draw_deformed(self._doc(), mult)
+                self.animbtn.setChecked(False); self.animbtn.setText("Animate")
             except Exception:
-                if self._timer is not None:
-                    self._timer.stop(); self._timer = None
-                self.animbtn.setChecked(False)
+                pass
+            doc = self._doc()
+            if doc is not None and self._frames:
+                _clear_anim_frames(doc)
+                _draw_deformed(doc, self.scale.value())
+                self._update_legend()
+            self._frames = []
+
+        def closeEvent(self, ev):
+            self._stop_anim()
+            try:
+                super(ResultsViewerPanel, self).closeEvent(ev)
+            except Exception:
+                ev.accept()
 
         def _fit(self):
             try:
@@ -5331,8 +5553,8 @@ def _color_bar(doc, grp, vmin, vmax, title, objs, msize):
             bb = b if bb is None else bb.united(b)
         if bb is None:
             return
-        x0 = bb.XMax + msize * 0.06; y0 = bb.YMin; z0 = bb.ZMin
-        h = msize * 0.5; w = msize * 0.045; nseg = 10
+        x0 = bb.XMax + msize * 0.08; y0 = bb.YMin; z0 = bb.ZMin
+        h = msize * 0.6; w = msize * 0.075; nseg = 12
         faces = []; colors = []
         for s in range(nseg):
             z1 = z0 + h * s / nseg; z2 = z0 + h * (s + 1) / nseg
@@ -5352,16 +5574,16 @@ def _color_bar(doc, grp, vmin, vmax, title, objs, msize):
         except Exception:
             pass
         grp.addObject(lg)
-        fs = max(8.0, msize * 0.03)
-        nlab = 5
+        fs = max(12.0, msize * 0.045)
+        nlab = 6
         for i in range(nlab + 1):
             frac = i / float(nlab); val = vmin + (vmax - vmin) * frac
             _label_text(doc, grp, "%.4g" % val,
-                        FreeCAD.Vector(x0 + w + msize * 0.012, y0, z0 + h * frac - fs * 0.5),
+                        FreeCAD.Vector(x0 + w + msize * 0.02, y0, z0 + h * frac - fs * 0.5),
                         "_legend", fontsize=fs)
         _label_text(doc, grp, title,
-                    FreeCAD.Vector(x0, y0, z0 + h + msize * 0.035), "_legend",
-                    fontsize=max(9.0, msize * 0.035))
+                    FreeCAD.Vector(x0, y0, z0 + h + msize * 0.05), "_legend",
+                    fontsize=max(13.0, msize * 0.05))
     except Exception:
         pass
 

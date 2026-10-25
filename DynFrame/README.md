@@ -63,12 +63,16 @@ model is what you analyse. Commands are on the toolbars/menus
 > **Results Viewer** is a second, Inventor-style window for *analysing and
 > viewing* results: a list of every available result (displacement, each force
 > component, stress, and any mode / buckling / seismic shape) that you click to
-> show as a coloured contour with a value legend, a **summary** of the key
-> maxima (max displacement and where, max N / M / shear, max utilisation), and
-> a **deformation-scale** control to exaggerate the deflected shape — with an
-> **Animate** button that oscillates it, the way Inventor's Frame Analysis
-> shows results. The individual commands below still exist and use single-form
-> dialogs.
+> show as a **bold coloured contour** (thick tubes, so it reads clearly from
+> any angle), a **readable colour legend painted in the panel** (with numeric
+> value ticks that update to the shown result — no squinting at tiny 3D text),
+> a **summary** of the key maxima (max displacement and where, max N / M /
+> shear, max utilisation), a **deformation-scale** control to exaggerate the
+> deflected shape, a **show/hide undeformed model** toggle, and an **Animate**
+> button that oscillates the deflected shape (it plays a few smooth loops then
+> stops, or press **Stop** — it stops instantly because the frames are
+> pre-built and only toggled, not recomputed). The individual commands below
+> still exist and use single-form dialogs.
 
 *Build the line model (DynFrame · Structure) — any of four ways:*
 1. **Generate Grid Structure** — enter bay spacings and storey heights and

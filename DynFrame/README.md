@@ -220,6 +220,24 @@ To get the files onto your PC from this repo: on the GitHub page use
 **Code → Download ZIP**, unzip, and copy the inner `DynFrame` folder as
 above. (Or `git clone` and copy it.)
 
+### Install / update straight from the FreeCAD Python console
+
+If you'd rather not download by hand, open FreeCAD's **Python console**
+(View → Panels → Python console) and paste this **single line**, then press
+Enter. It downloads the whole `DynFrame` folder from this branch into the
+right place; restart FreeCAD afterwards:
+
+```python
+exec("import os,json,urllib.request,FreeCAD\nrepo='AEmmanueln/dyncad-studio'\nref='claude/sleepy-ramanujan-96b3y6'\ndst=os.path.join(FreeCAD.getUserAppDataDir(),'Mod','DynFrame')\ndef grab(p):\n u='https://api.github.com/repos/%s/contents/%s?ref=%s'%(repo,p,ref)\n for it in json.load(urllib.request.urlopen(u)):\n  lp=os.path.join(dst,os.path.relpath(it['path'],'DynFrame'))\n  if it['type']=='dir':\n   os.makedirs(lp,exist_ok=True); grab(it['path'])\n  else:\n   os.makedirs(os.path.dirname(lp),exist_ok=True); urllib.request.urlretrieve(it['download_url'],lp)\nos.makedirs(dst,exist_ok=True); grab('DynFrame'); print('DynFrame updated ->',dst)")
+```
+
+It is deliberately a **single line**. Paste it as one line — don't retype
+it as an indented block, because FreeCAD's interactive console rejects a
+pasted multi-line `def …:` block (it reports `SyntaxError` on the line after
+the block). If a multi-line version ever gives a `File "<input>"` syntax
+error, that error is the console refusing the paste, not a bug in DynFrame —
+use this one-line form (or the ZIP method above) instead.
+
 ---
 
 ## Quick start: make a frame

@@ -2031,6 +2031,24 @@ def _material(name):
     return MATERIALS.get(name, MATERIALS[DEFAULT_MAT])
 
 
+# EN 1998-1 (EC8) Type-1 elastic-spectrum soil parameters: (S, TB, TC, TD)
+EC8_SOILS = {"A": (1.0, 0.15, 0.4, 2.0), "B": (1.2, 0.15, 0.5, 2.0),
+             "C": (1.15, 0.20, 0.6, 2.0), "D": (1.35, 0.20, 0.8, 2.0),
+             "E": (1.4, 0.15, 0.5, 2.0)}
+
+
+def _ec8_sd(T, ag, S, TB, TC, TD, q, beta=0.2):
+    """EC8 design spectrum Sd(T) (horizontal), ag and Sd in mm/s^2."""
+    f = 2.5 / q
+    if T <= TB:
+        return ag * S * (2.0 / 3.0 + (T / TB) * (f - 2.0 / 3.0))
+    if T <= TC:
+        return ag * S * f
+    if T <= TD:
+        return max(ag * S * f * (TC / T), beta * ag)
+    return max(ag * S * f * (TC * TD / (T * T)), beta * ag)
+
+
 def _ramp(t):
     """Continuous blue->cyan->green->yellow->red colour ramp, t in [0, 1]."""
     t = 0.0 if t < 0.0 else (1.0 if t > 1.0 else t)
@@ -3291,14 +3309,14 @@ class ClearAnalysis:
         everything = kill.startswith("Everything")
         doc.openTransaction("DynFrame: clear")
         res_sheets = ("Reactions", "Displacements", "BarForces",
-                      "ModalFrequencies", "CodeCheck", "Envelope")
+                      "ModalFrequencies", "CodeCheck", "Envelope", "Seismic")
         all_sheets = res_sheets + ("LoadCases", "Combinations", "AnalysisResults")
         to_del = []
         for o in list(doc.Objects):
             nm = o.Name
             is_res = (getattr(o, "DiagKind", None) is not None
                       or nm.startswith(("Diagram_", "DeformedShape", "Legend",
-                                        "MomentDiagram", "Mode", "Buckling"))
+                                        "MomentDiagram", "Mode", "Buckling", "Seismic"))
                       or nm in res_sheets
                       or (o.TypeId == "App::DocumentObjectGroup"
                           and o.Label in (RES_GROUP, DIA_GROUP)))
@@ -3621,6 +3639,200 @@ class BucklingAnalysis:
              "into %d sub-elements.)" % (lam_cr, verdict, lam_cr, NSUB))
 
 
+class ResponseSpectrum:
+    def GetResources(self):
+        return {"Pixmap": _icon("seismic"), "MenuText": "Seismic (Response Spectrum)",
+                "ToolTip": "EC8 response-spectrum seismic analysis: modal masses, "
+                           "spectral base shear per mode and SRSS total, and the "
+                           "seismic displacement shape. Define supports first.",
+                "Accel": "A, Q"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        import numpy as np
+        doc = FreeCAD.ActiveDocument
+        objs, _k = _analysis_objs(doc)
+        if not objs:
+            info("No bars/members found. Build a line model first."); return
+        vals = form_dialog("Seismic - EC8 Response Spectrum", [
+            {"key": "_i", "kind": "info", "default":
+             "Elastic/design response spectrum (EN 1998-1, Type 1). Base shear by "
+             "SRSS over the modes."},
+            {"key": "dir", "label": "Direction", "kind": "combo",
+             "options": ["X", "Y", "Z"], "default": "X"},
+            {"key": "ag", "label": "Ground accel. ag (x g)", "kind": "float", "default": 0.25},
+            {"key": "soil", "label": "Ground type", "kind": "combo",
+             "options": list(EC8_SOILS.keys()), "default": "B"},
+            {"key": "q", "label": "Behaviour factor q", "kind": "float", "default": 1.5},
+            {"key": "n", "label": "Modes", "kind": "int", "default": 10},
+        ])
+        if not vals:
+            return
+        comp = {"X": 0, "Y": 1, "Z": 2}[vals["dir"]]
+        ag = vals["ag"] * 9810.0                     # mm/s^2
+        S, TB, TC, TD = EC8_SOILS[vals["soil"]]
+        q = max(vals["q"], 1e-3); nmodes = int(vals["n"])
+
+        nodes = []
+
+        def nid(p, make=True):
+            for i, qv in enumerate(nodes):
+                if qv.distanceToPoint(p) <= 1.0:
+                    return i
+            if not make:
+                return -1
+            nodes.append(FreeCAD.Vector(p)); return len(nodes) - 1
+
+        bardata = []
+        for o in objs:
+            sp = _section_props_from_name(_elem_section(o))
+            if sp is None:
+                continue
+            A, Iy, Iz, J, c = sp
+            s, e = _elem_ends(o)
+            n1, n2 = nid(s), nid(e)
+            if n1 == n2:
+                continue
+            E, Gm, Fy, rho = _material(_elem_material(o))
+            bardata.append({"n1": n1, "n2": n2, "A": A, "Iy": Iy, "Iz": Iz, "J": J,
+                            "E": E, "G": Gm, "rho": rho})
+        if not bardata:
+            info("Could not build a model (check section names)."); return
+        fixed = set()
+        for o in doc.Objects:
+            r = getattr(o, "Restrain", None); at = getattr(o, "AtNode", None)
+            if r and at is not None:
+                i = nid(FreeCAD.Vector(at), make=False)
+                if i >= 0:
+                    for k, ch in enumerate(r):
+                        if ch == "1":
+                            fixed.add(6 * i + k)
+        if not fixed:
+            err("No supports defined. Add supports first, then Seismic.")
+            return
+
+        NSUB = 4
+        fine = [FreeCAD.Vector(p) for p in nodes]
+
+        def fid(p):
+            for i, qv in enumerate(fine):
+                if qv.distanceToPoint(p) <= 0.5:
+                    return i
+            fine.append(FreeCAD.Vector(p)); return len(fine) - 1
+
+        subel = []
+        for b in bardata:
+            p1 = nodes[b["n1"]]; p2 = nodes[b["n2"]]; prev = b["n1"]
+            for s in range(1, NSUB + 1):
+                pt = p1 + vscale(p2 - p1, s / float(NSUB))
+                cur = b["n2"] if s == NSUB else fid(pt)
+                subel.append((prev, cur, b)); prev = cur
+        ndof = 6 * len(fine)
+        K = np.zeros((ndof, ndof)); M = np.zeros((ndof, ndof))
+        for (a, bidx, b) in subel:
+            T, L = _beam_T(fine[a], fine[bidx])
+            kl = _beam_k_local(b["E"], b["G"], b["A"], b["Iy"], b["Iz"], b["J"], L)
+            ml = _beam_mass_local(b["rho"] * 1e-3, b["A"], b["J"], L)
+            dofs = [6 * a + i for i in range(6)] + [6 * bidx + i for i in range(6)]
+            ix = np.ix_(dofs, dofs)
+            K[ix] += T.T @ kl @ T; M[ix] += T.T @ ml @ T
+        free = [d for d in range(ndof) if d not in fixed]
+        Kf = K[np.ix_(free, free)]; Mf = M[np.ix_(free, free)]
+        try:
+            Lc = np.linalg.cholesky(Mf); Lci = np.linalg.inv(Lc)
+            Astd = Lci @ Kf @ Lci.T; Astd = 0.5 * (Astd + Astd.T)
+            w2, Y = np.linalg.eigh(Astd)
+        except Exception:
+            err("Seismic solve failed - add supports so the model is fully held.")
+            return
+        order = [i for i in np.argsort(w2) if w2[i] > 1e-6][:nmodes]
+        r = np.zeros(ndof)
+        for i in range(len(fine)):
+            r[6 * i + comp] = 1.0
+        rf = r[free]
+        Mrf = Mf @ rf
+        total_mass = float(rf @ Mrf)
+        rows = []; u_srss = np.zeros(ndof); V2 = 0.0
+        for idx in order:
+            w = float(np.sqrt(w2[idx])); T = 2 * np.pi / w; f = w / (2 * np.pi)
+            phi = Lci.T @ Y[:, idx]            # mass-normalised (phi^T M phi = 1)
+            gamma = float(phi @ Mrf)
+            meff = gamma * gamma               # tonne
+            Sd = _ec8_sd(T, ag, S, TB, TC, TD, q)
+            Vi = meff * Sd                     # N
+            V2 += Vi * Vi
+            ui = np.zeros(ndof)
+            ui[free] = gamma * phi * Sd / (w * w)   # mm
+            u_srss += ui * ui
+            rows.append((T, f, 100.0 * meff / total_mass if total_mass > 1e-12 else 0.0,
+                         Sd / 9810.0, Vi))
+        u_srss = np.sqrt(u_srss)
+        base_shear = float(np.sqrt(V2))
+        sum_mass = sum(rw[2] for rw in rows)
+
+        # table
+        try:
+            sh = doc.getObject("Seismic") or doc.addObject("Spreadsheet::Sheet", "Seismic")
+            sh.Label = "Seismic"; sh.clearAll()
+            sh.set("A1", "SEISMIC - EC8 response spectrum, dir %s, ag=%.2fg, soil %s, q=%.2f"
+                   % (vals["dir"], vals["ag"], vals["soil"], q))
+            for c, h in zip("ABCDE", ["Mode/T (s)", "Freq (Hz)", "Modal mass %",
+                                      "Sd (x g)", "Base shear Vi (N)"]):
+                sh.set("%s2" % c, h)
+            r2 = 3
+            for (T, f, pm, sdg, Vi) in rows:
+                sh.set("A%d" % r2, "%.4f" % T); sh.set("B%d" % r2, "%.3f" % f)
+                sh.set("C%d" % r2, "%.1f" % pm); sh.set("D%d" % r2, "%.4f" % sdg)
+                sh.set("E%d" % r2, "%.0f" % Vi); r2 += 1
+            sh.set("A%d" % (r2 + 1), "SRSS base shear (N)")
+            sh.set("E%d" % (r2 + 1), "%.0f" % base_shear)
+            sh.set("A%d" % (r2 + 2), "Sum modal mass %%")
+            sh.set("C%d" % (r2 + 2), "%.1f" % sum_mass)
+            _grp(doc, RES_GROUP).addObject(sh)
+        except Exception as e:
+            FreeCAD.Console.PrintError("DynFrame: seismic table failed (%s)\n" % e)
+
+        # SRSS seismic displacement shape
+        doc.openTransaction("DynFrame: seismic")
+        for o in list(doc.Objects):
+            if o.Name.startswith("Seismic") and getattr(o, "DiagKind", None):
+                try:
+                    doc.removeObject(o.Name)
+                except Exception:
+                    pass
+        msize = _model_size(objs)
+        dmax = max((u_srss[6 * i] ** 2 + u_srss[6 * i + 1] ** 2 + u_srss[6 * i + 2] ** 2) ** 0.5
+                   for i in range(len(fine))) or 1.0
+        sc = 0.1 * msize / dmax
+        perbar = []
+        for (a, bidx, b) in subel:
+            pa = fine[a] + FreeCAD.Vector(u_srss[6 * a] * sc, u_srss[6 * a + 1] * sc, u_srss[6 * a + 2] * sc)
+            pb = fine[bidx] + FreeCAD.Vector(u_srss[6 * bidx] * sc, u_srss[6 * bidx + 1] * sc, u_srss[6 * bidx + 2] * sc)
+            da = (u_srss[6 * a] ** 2 + u_srss[6 * a + 1] ** 2 + u_srss[6 * a + 2] ** 2) ** 0.5
+            db = (u_srss[6 * bidx] ** 2 + u_srss[6 * bidx + 1] ** 2 + u_srss[6 * bidx + 2] ** 2) ** 0.5
+            perbar.append(([pa, pb], [da, db]))
+        ob = _result_tube(doc, _grp(doc, RES_GROUP), "SeismicShape", "_seismic", perbar,
+                          max(msize * 0.007, 2.0), dmax, True)
+        if ob is not None:
+            ob.Label = "Seismic displacement (SRSS)"
+        doc.commitTransaction(); doc.recompute()
+        try:
+            FreeCADGui.activeDocument().activeView().viewAxonometric()
+            FreeCADGui.SendMsgToActiveView("ViewFit")
+        except Exception:
+            pass
+        info("Seismic response-spectrum analysis complete (EC8, dir %s).\n\n"
+             "SRSS base shear:  %.0f N  (%.1f kN)\n"
+             "Modal mass captured:  %.1f%% (%d modes)\n\n"
+             "Per-mode period / modal-mass / Sd / base shear in the 'Seismic' "
+             "table; the SRSS seismic displacement shape is shown.\n\n%s" %
+             (vals["dir"], base_shear, base_shear / 1000.0, sum_mass, len(rows),
+              "" if sum_mass >= 90.0 else "Note: < 90%% modal mass - include more "
+              "modes for a code-compliant run."))
+
+
 class CodeCheck:
     def GetResources(self):
         return {"Pixmap": _icon("check"), "MenuText": "Steel Code Check (EC3)",
@@ -3909,6 +4121,7 @@ def _panel_class():
             r.addWidget(self._btn("Calculate", self._calc))
             r.addWidget(self._btn("Modal", self._modal))
             r.addWidget(self._btn("Buckling", self._buckling))
+            r.addWidget(self._btn("Seismic", self._seismic))
             gl.addLayout(r)
             r2 = QW.QHBoxLayout()
             r2.addWidget(self._btn("Envelope (all combos)", self._envelope))
@@ -4008,6 +4221,9 @@ def _panel_class():
 
         def _buckling(self):
             BucklingAnalysis().Activated(); self._refresh()
+
+        def _seismic(self):
+            ResponseSpectrum().Activated(); self._refresh()
 
         def _codecheck(self):
             CodeCheck().Activated(); self._refresh()
@@ -4416,6 +4632,7 @@ _add("DynFrame_MemberReleases", MemberReleases)
 _add("DynFrame_RunAnalysis", RunAnalysis)
 _add("DynFrame_ModalAnalysis", ModalAnalysis)
 _add("DynFrame_BucklingAnalysis", BucklingAnalysis)
+_add("DynFrame_ResponseSpectrum", ResponseSpectrum)
 _add("DynFrame_Envelope", Envelope)
 _add("DynFrame_CodeCheck", CodeCheck)
 _add("DynFrame_ShowDiagram", ShowDiagram)

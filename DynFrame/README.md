@@ -131,6 +131,12 @@ model is what you analyse. Commands are on the toolbars/menus
   include geometric nonlinearity: the solve iterates with the geometric
   stiffness until it converges, amplifying the displacements and moments
   from the axial forces (the stability effect in slender frames).
+- **Seismic (Response Spectrum)** — EN 1998-1 (EC8) response-spectrum
+  analysis built on the modal results: pick the direction, ground
+  acceleration aₘ, ground type (A–E) and behaviour factor q; it reports
+  per-mode period / modal mass % / spectral acceleration / base shear, the
+  **SRSS base shear**, and the SRSS seismic displacement shape (warns if
+  < 90 % modal mass is captured).
 
 **Materials:** Steel S235 / S275 / S355, Stainless 304, Aluminium 6061-T6
 (each with its own E, G, yield and density). Edit `MATERIALS` in
@@ -145,10 +151,11 @@ model is what you analyse. Commands are on the toolbars/menus
 > figures; **buckling** matches the Euler load Pcr = π²EI/(2L)² (ratio
 > 1.000); the **EC3** buckling reduction factors match the code tables and
 > a worked column check (χ = 0.441, Nb,Rd = 558 kN); **P-Δ** reproduces the
-> 1/(1−P/Pcr) amplification. It covers **static, P-Δ, modal, buckling and
-> design checks**; seismic/response-spectrum and a full (non-simplified)
-> code check are later phases. FreeCAD is not Robot — this reproduces
-> Robot's *workflow and core engineering* on its kernel.
+> 1/(1−P/Pcr) amplification; **seismic** effective modal masses sum to 100 %
+> of the total mass. It covers **static, P-Δ, modal, buckling, seismic
+> (response-spectrum) and design checks**; a full (non-simplified) code
+> check and plates/shells are later phases. FreeCAD is not Robot — this
+> reproduces Robot's *workflow and core engineering* on its kernel.
 
 **Modeling / export / setup**
 - **Quick Fillet** — fillet selected solid edges by a radius.

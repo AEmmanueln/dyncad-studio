@@ -56,12 +56,19 @@ solid Frame Generator above stays for fabrication and cut-lists; the line
 model is what you analyse. Commands are on the toolbars/menus
 **DynFrame · Analysis Panel**, **· Structure**, **· Loads**, **· Results**.
 
-> **One panel for everything.** **Frame Analysis Panel** (DynFrame ·
-> Analysis Panel) opens a single window where you build the model, apply
-> supports and loads to the current 3D selection, manage cases and
-> combinations, Calculate, and switch the shown result — all in one place,
-> instead of a chain of pop-ups. The individual commands below still exist
-> and now use single-form dialogs.
+> **Two panels.** **Frame Analysis Panel** (DynFrame · Analysis Panel) opens a
+> single window where you build the model, apply supports and loads to the
+> current 3D selection, manage cases and combinations, Calculate, and switch
+> the shown result — all in one place, instead of a chain of pop-ups.
+> **Results Viewer** is a second, Inventor-style window for *analysing and
+> viewing* results: a list of every available result (displacement, each force
+> component, stress, and any mode / buckling / seismic shape) that you click to
+> show as a coloured contour with a value legend, a **summary** of the key
+> maxima (max displacement and where, max N / M / shear, max utilisation), and
+> a **deformation-scale** control to exaggerate the deflected shape — with an
+> **Animate** button that oscillates it, the way Inventor's Frame Analysis
+> shows results. The individual commands below still exist and use single-form
+> dialogs.
 
 *Build the line model (DynFrame · Structure) — any of four ways:*
 1. **Generate Grid Structure** — enter bay spacings and storey heights and
@@ -83,7 +90,11 @@ model is what you analyse. Commands are on the toolbars/menus
    Snow / Other). Loads belong to a case.
 5. **Define Support** — select node vertices → Fixed / Pinned / Roller.
 6. **Add Nodal Load** (on selected node vertices) / **Add Bar Load** (on
-   selected bars/lines) — one dialog each, assigned to a load case.
+   selected bars/lines) — one dialog each, assigned to a load case. A bar load
+   can be **uniform (UDL)**, a **concentrated point load** at any position
+   along the bar, or a **trapezoidal** (linearly varying `w1`→`w2`) load — the
+   three Robot bar-load types. All are solved with exact consistent fixed-end
+   forces, so nodal results and the force diagrams are exact.
 7. **Load Combinations** — auto EN 1990 **ULS** (1.35G + 1.5Q) and **SLS**
    (G + Q), or a custom factored combination (`1.35*DL1 + 1.5*LL1`).
 
@@ -101,7 +112,9 @@ model is what you analyse. Commands are on the toolbars/menus
      Vz, Mx, My, Mz, stress, utilisation) spreadsheets, alongside your
      `Nodes` / `Bars` tables.
 9. **Show Result / Diagram** — switch the displayed result: Displacement
-   contour, or an N / Vy / Vz / Mx / My / Mz / Stress diagram.
+   contour, or an N / Vy / Vz / Mx / My / Mz / Stress diagram. The **Results
+   Viewer** (above) does the same from a persistent list, and adds the maxima
+   summary, deformation scaling and animation.
 10. **Clear Results** — remove results only, or everything (supports, loads,
     combinations).
 
@@ -155,7 +168,10 @@ model is what you analyse. Commands are on the toolbars/menus
 > solver is exact in both bending planes — cantilever (point and UDL),
 > simply-supported and fixed-fixed beams (tip = wL⁴/8EI, mid = 5wL⁴/384EI,
 > M = wL²/8, end = wL²/12), all six force components and load-case
-> superposition; **releases** reproduce the propped cantilever (wL²/8);
+> superposition; **bar loads** are exact — a tip point load gives PL³/3EI and
+> M = PL, a trapezoid with w1 = w2 reproduces the UDL result exactly, and a
+> triangular load balances qL/2; **releases** reproduce the propped
+> cantilever (wL²/8);
 > **modal** matches the cantilever f₁ = (1.875²/2π)·√(EI/ρAL⁴) to four
 > figures; **buckling** matches the Euler load Pcr = π²EI/(2L)² (ratio
 > 1.000); the **section-property engine** reproduces the published section

@@ -2513,6 +2513,52 @@ def _fef_udl(w_global, R, L):
     return f
 
 
+def _fef_point_local(px, py, pz, L, a):
+    """Consistent fixed-end force vector for a POINT load (local components
+    px/py/pz) at distance a from node I (b = L-a). Same sign convention as
+    _fef_udl: the local-z-bending moment terms (f[4], f[10]) are negated.
+    Validated against the fixed-fixed beam with a central point load (end
+    moment PL/8, reactions P/2)."""
+    import numpy as np
+    f = np.zeros(12); b = L - a
+    f[0] += px * b / L; f[6] += px * a / L
+    f[1] += py * b ** 2 * (L + 2 * a) / L ** 3
+    f[7] += py * a ** 2 * (L + 2 * b) / L ** 3
+    f[5] += py * a * b ** 2 / L ** 2; f[11] += -py * a ** 2 * b / L ** 2
+    f[2] += pz * b ** 2 * (L + 2 * a) / L ** 3
+    f[8] += pz * a ** 2 * (L + 2 * b) / L ** 3
+    f[4] += -pz * a * b ** 2 / L ** 2; f[10] += pz * a ** 2 * b / L ** 2
+    return f
+
+
+def _fef_tri_local(qx, qy, qz, L):
+    """Consistent fixed-end force vector for a TRIANGULAR load that rises from
+    0 at node I to intensity q (local per-length components) at node J. Fixed-
+    end moments q L^2/30 (light end) and q L^2/20 (heavy end); shear 3qL/20 and
+    7qL/20. Same sign convention as _fef_udl."""
+    import numpy as np
+    f = np.zeros(12)
+    f[0] += qx * L / 6.0; f[6] += qx * L / 3.0
+    f[1] += qy * 3.0 * L / 20.0; f[7] += qy * 7.0 * L / 20.0
+    f[5] += qy * L ** 2 / 30.0; f[11] += -qy * L ** 2 / 20.0
+    f[2] += qz * 3.0 * L / 20.0; f[8] += qz * 7.0 * L / 20.0
+    f[4] += -qz * L ** 2 / 30.0; f[10] += qz * L ** 2 / 20.0
+    return f
+
+
+def _fef_udl_local(wx, wy, wz, L):
+    """Consistent fixed-end force vector for a uniform load given in LOCAL
+    components (the local-coordinate form of _fef_udl)."""
+    import numpy as np
+    f = np.zeros(12)
+    f[0] += wx * L / 2.0; f[6] += wx * L / 2.0
+    f[1] += wy * L / 2.0; f[7] += wy * L / 2.0
+    f[5] += wy * L ** 2 / 12.0; f[11] += -wy * L ** 2 / 12.0
+    f[2] += wz * L / 2.0; f[8] += wz * L / 2.0
+    f[4] += -wz * L ** 2 / 12.0; f[10] += wz * L ** 2 / 12.0
+    return f
+
+
 def _grp(doc, label):
     for o in doc.Objects:
         if o.TypeId == "App::DocumentObjectGroup" and o.Label == label:
@@ -3029,6 +3075,73 @@ def _apply_line(doc, case, wvec, elems):
     return len(elems)
 
 
+def _apply_point(doc, case, Pvec, pos, elems):
+    """Concentrated (point) load Pvec (global N) at fraction `pos` (0..1 from
+    the start node) on each selected bar."""
+    grp = _grp(doc, LOAD_GROUP)
+    msize = _model_size(elems)
+    Pvec = FreeCAD.Vector(Pvec); dirn = unit(Pvec)
+    ln = msize * 0.12 + 70.0
+    pos = min(1.0, max(0.0, float(pos)))
+    for m in elems:
+        s, e = _elem_ends(m)
+        p = s + vscale(e - s, pos)
+        tail = p - vscale(dirn, ln)
+        arrows = [Part.makeLine(FreeCAD.Vector(tail), FreeCAD.Vector(p)),
+                  Part.makeCone(ln * 0.18, 0.0, ln * 0.35,
+                                p - vscale(dirn, ln * 0.35), dirn)]
+        o = doc.addObject("Part::Feature", "BarPointLoad")
+        o.Shape = Part.makeCompound(arrows)
+        o.Label = "%s: %.3g N point @%.0f%% on %s" % (case, Pvec.z, pos * 100, m.Label)
+        _set(o, "App::PropertyString", "LoadType", "MemberPoint")
+        _set(o, "App::PropertyString", "LoadCase", case)
+        _set(o, "App::PropertyString", "OnMember", m.Name)
+        _set(o, "App::PropertyVector", "LoadVec", Pvec)
+        _set(o, "App::PropertyFloat", "LoadPos", pos)
+        try:
+            o.ViewObject.ShapeColor = (1.0, 0.3, 0.0); o.ViewObject.LineWidth = 3
+        except Exception:
+            pass
+        grp.addObject(o)
+    return len(elems)
+
+
+def _apply_trap(doc, case, w1vec, w2vec, elems):
+    """Trapezoidal (linearly varying) distributed load from w1 at the start
+    node to w2 at the end node (global N/mm) on each selected bar."""
+    grp = _grp(doc, LOAD_GROUP)
+    msize = _model_size(elems)
+    w1vec = FreeCAD.Vector(w1vec); w2vec = FreeCAD.Vector(w2vec)
+    wmax = max(abs(w1vec.z), abs(w2vec.z), 1e-9)
+    dirn = unit(w2vec if w2vec.Length > w1vec.Length else w1vec)
+    lmax = msize * 0.10 + 60.0
+    for m in elems:
+        s, e = _elem_ends(m)
+        arrows = []
+        for t in (0.05, 0.225, 0.4, 0.575, 0.75, 0.95):
+            wt = abs(w1vec.z + (w2vec.z - w1vec.z) * t)
+            ln = lmax * (0.2 + 0.8 * wt / wmax)
+            p = s + vscale(e - s, t)
+            tail = p - vscale(dirn, ln)
+            arrows.append(Part.makeLine(FreeCAD.Vector(tail), FreeCAD.Vector(p)))
+            arrows.append(Part.makeCone(ln * 0.13, 0.0, ln * 0.28,
+                                        p - vscale(dirn, ln * 0.28), dirn))
+        o = doc.addObject("Part::Feature", "BarTrapLoad")
+        o.Shape = Part.makeCompound(arrows)
+        o.Label = "%s: %.3g..%.3g N/mm on %s" % (case, w1vec.z, w2vec.z, m.Label)
+        _set(o, "App::PropertyString", "LoadType", "MemberTrap")
+        _set(o, "App::PropertyString", "LoadCase", case)
+        _set(o, "App::PropertyString", "OnMember", m.Name)
+        _set(o, "App::PropertyVector", "LoadVec", w1vec)
+        _set(o, "App::PropertyVector", "LoadVec2", w2vec)
+        try:
+            o.ViewObject.ShapeColor = (1.0, 0.45, 0.0); o.ViewObject.LineWidth = 2
+        except Exception:
+            pass
+        grp.addObject(o)
+    return len(elems)
+
+
 class DefineSupport:
     def GetResources(self):
         return {"Pixmap": _icon("support"), "MenuText": "Define Support",
@@ -3101,9 +3214,10 @@ class AddNodalLoad:
 class AddMemberLoad:
     def GetResources(self):
         return {"Pixmap": _icon("barload"), "MenuText": "Add Bar Load",
-                "ToolTip": "Select bars (lines) or members, then enter case + uniform "
-                           "distributed load (N/mm along global Z) in one dialog.",
-                "Accel": "A, M"}
+                "ToolTip": "Select bars (lines) or members, then add a load along "
+                           "global Z: uniform (UDL), a concentrated point load at a "
+                           "position, or a trapezoidal (linearly varying) load - all "
+                           "in one dialog.", "Accel": "A, M"}
 
     def IsActive(self):
         return bool(selected_elems())
@@ -3111,25 +3225,53 @@ class AddMemberLoad:
     def Activated(self):
         elems = selected_elems()
         if not elems:
-            info("Select one or more bars (lines) or members, then add a "
-                 "distributed load.")
+            info("Select one or more bars (lines) or members, then add a load.")
             return
         doc = FreeCAD.ActiveDocument
         cs = [c[0] for c in _cases(doc)]
         vals = form_dialog("Add Bar Load (%d bar(s))" % len(elems), [
             {"key": "case", "label": "Load case", "kind": "combo",
              "options": cs, "default": cs[-1]},
-            {"key": "w", "label": "w (N/mm, global Z, + up / - down)",
-             "kind": "float", "default": -5.0},
+            {"key": "kind", "label": "Load type", "kind": "combo",
+             "options": ["Uniform (UDL)", "Point load", "Trapezoidal (varying)"],
+             "default": "Uniform (UDL)"},
+            {"key": "_i", "kind": "info", "default":
+             "All values are along global Z (+ up / - down). Fill the rows for the "
+             "chosen type: UDL -> w; Point -> P and position; Trapezoidal -> w1, w2."},
+            {"key": "w", "label": "UDL  w (N/mm)", "kind": "float", "default": -5.0},
+            {"key": "P", "label": "Point  P (N)", "kind": "float", "default": -1000.0},
+            {"key": "pos", "label": "Point position (0..1 from start)",
+             "kind": "float", "default": 0.5},
+            {"key": "w1", "label": "Trapezoid  w1 at start (N/mm)", "kind": "float", "default": 0.0},
+            {"key": "w2", "label": "Trapezoid  w2 at end (N/mm)", "kind": "float", "default": -5.0},
         ])
-        if not vals or abs(vals["w"]) < 1e-12:
+        if not vals:
             return
+        kind = vals["kind"]
         doc.openTransaction("DynFrame: bar load")
-        _apply_line(doc, vals["case"], FreeCAD.Vector(0, 0, vals["w"]), elems)
+        if kind.startswith("Point"):
+            if abs(vals["P"]) < 1e-9:
+                return
+            _apply_point(doc, vals["case"], FreeCAD.Vector(0, 0, vals["P"]),
+                         vals["pos"], elems)
+            msg = ("Point load %.3g N (Z) at %.0f%% added to case '%s' on %d bar(s)."
+                   % (vals["P"], min(1.0, max(0.0, vals["pos"])) * 100, vals["case"], len(elems)))
+        elif kind.startswith("Trapez"):
+            if abs(vals["w1"]) < 1e-12 and abs(vals["w2"]) < 1e-12:
+                return
+            _apply_trap(doc, vals["case"], FreeCAD.Vector(0, 0, vals["w1"]),
+                        FreeCAD.Vector(0, 0, vals["w2"]), elems)
+            msg = ("Trapezoidal load %.3g..%.3g N/mm (Z) added to case '%s' on "
+                   "%d bar(s)." % (vals["w1"], vals["w2"], vals["case"], len(elems)))
+        else:
+            if abs(vals["w"]) < 1e-12:
+                return
+            _apply_line(doc, vals["case"], FreeCAD.Vector(0, 0, vals["w"]), elems)
+            msg = ("Distributed load %.3g N/mm (Z) added to case '%s' on %d bar(s)."
+                   % (vals["w"], vals["case"], len(elems)))
         doc.commitTransaction()
         doc.recompute()
-        info("Distributed load %.3g N/mm (Z) added to case '%s' on %d bar(s)."
-             % (vals["w"], vals["case"], len(elems)))
+        info(msg)
 
 
 class Combinations:
@@ -3330,11 +3472,24 @@ class RunAnalysis:
             sw_factor = 0.0
 
         for o in doc.Objects:
-            if getattr(o, "LoadType", None) == "Member":
-                f = factors.get(getattr(o, "LoadCase", ""), 0.0)
-                el = by_obj.get(getattr(o, "OnMember", ""))
-                if f and el is not None:
-                    el["w"] = el["w"] + vscale(FreeCAD.Vector(getattr(o, "LoadVec")), f)
+            lt = getattr(o, "LoadType", None)
+            if lt not in ("Member", "MemberPoint", "MemberTrap"):
+                continue
+            f = factors.get(getattr(o, "LoadCase", ""), 0.0)
+            el = by_obj.get(getattr(o, "OnMember", ""))
+            if not f or el is None:
+                continue
+            if lt == "Member":
+                el["w"] = el["w"] + vscale(FreeCAD.Vector(getattr(o, "LoadVec")), f)
+            elif lt == "MemberPoint":
+                P = vscale(FreeCAD.Vector(getattr(o, "LoadVec")), f)
+                pos = min(1.0, max(0.0, float(getattr(o, "LoadPos", 0.5))))
+                el.setdefault("pts_g", []).append((P, pos))
+            else:   # MemberTrap
+                w1 = vscale(FreeCAD.Vector(getattr(o, "LoadVec")), f)
+                w2 = vscale(FreeCAD.Vector(getattr(o, "LoadVec2", getattr(o, "LoadVec"))), f)
+                el["trap_w1"] = el.get("trap_w1", FreeCAD.Vector(0, 0, 0)) + w1
+                el["trap_w2"] = el.get("trap_w2", FreeCAD.Vector(0, 0, 0)) + w2
         if sw_factor:
             for el in elems:
                 el["w"] = el["w"] + FreeCAD.Vector(
@@ -3350,10 +3505,25 @@ class RunAnalysis:
             dofs = ([6 * el["n1"] + i for i in range(6)]
                     + [6 * el["n2"] + i for i in range(6)])
             el["dofs"] = dofs
-            w = el["w"]
-            wl = T[0:3, 0:3] @ np.array([w.x, w.y, w.z])
+            w = el["w"]; R3 = T[0:3, 0:3]
+            wl = R3 @ np.array([w.x, w.y, w.z])
             el["wx"], el["wy"], el["wz"] = float(wl[0]), float(wl[1]), float(wl[2])
-            fl = _fef_udl(w, T[0:3, 0:3], L) if w.Length > 1e-12 else np.zeros(12)
+            fl = _fef_udl(w, R3, L) if w.Length > 1e-12 else np.zeros(12)
+            # point loads -> exact consistent fixed-end forces + recovery data
+            el["pts_local"] = []
+            for (P, pos) in el.get("pts_g", []):
+                Pl = R3 @ np.array([P.x, P.y, P.z]); a = pos * L
+                fl = fl + _fef_point_local(float(Pl[0]), float(Pl[1]), float(Pl[2]), L, a)
+                el["pts_local"].append((float(Pl[0]), float(Pl[1]), float(Pl[2]), a))
+            # trapezoidal (linearly varying) load -> UDL(w1) + triangle(w2-w1)
+            if "trap_w1" in el:
+                t1 = el["trap_w1"]; t2 = el["trap_w2"]
+                w1l = R3 @ np.array([t1.x, t1.y, t1.z])
+                w2l = R3 @ np.array([t2.x, t2.y, t2.z])
+                fl = fl + _fef_udl_local(float(w1l[0]), float(w1l[1]), float(w1l[2]), L)
+                q = w2l - w1l
+                fl = fl + _fef_tri_local(float(q[0]), float(q[1]), float(q[2]), L)
+                el["trap_local"] = (w1l, w2l)
             el["fef"] = fl
             # member end releases (condensation of released local DOFs)
             rel = _bar_releases(el["o"])
@@ -3438,25 +3608,56 @@ class RunAnalysis:
             fend = el["kl"] @ dloc - el["fef"]; el["fend"] = fend
             L = el["L"]; wy, wz, wx = el["wy"], el["wz"], el["wx"]
             A = el["A"]; c = el["c"]; Imin = min(el["Iy"], el["Iz"]); Fy = el["Fy"]
+            pts = el.get("pts_local", [])        # [(px,py,pz,a), ...]
+            trap = el.get("trap_local", None)    # (w1_local, w2_local)
 
             def val(kind, x, fend=fend, L=L, wx=wx, wy=wy, wz=wz, A=A, c=c,
-                    Imin=Imin):
+                    Imin=Imin, pts=pts, trap=trap):
+                # span loads marched from node I (free-body statics): the end
+                # forces `fend` already carry each load's exact nodal effect, so
+                # a point/trapezoid load only adds its crossed shear/axial and
+                # its simply-supported "free" sagging moment on top of the UDL.
+                def crossed(ci):          # axial/shear accumulated 0..x in one axis
+                    s = 0.0
+                    for (px, py, pz, a) in pts:
+                        s += (px, py, pz)[ci] * (1.0 if x >= a else 0.0)
+                    if trap is not None:
+                        w1, w2 = trap
+                        q = w2[ci] - w1[ci]
+                        s += w1[ci] * x + q * x * x / (2.0 * L)
+                    return s
+
+                def free_m(ci):           # simply-supported free sagging moment at x
+                    m = 0.0
+                    for (px, py, pz, a) in pts:
+                        P = (px, py, pz)[ci]
+                        m += P * ((L - a) * x / L if x <= a else a * (L - x) / L)
+                    if trap is not None:
+                        w1, w2 = trap
+                        q = w2[ci] - w1[ci]
+                        m += w1[ci] * x * (L - x) / 2.0 + q * x * (L * L - x * x) / (6.0 * L)
+                    return m
+
                 if kind == "N":
-                    return -(fend[0] + wx * x)
+                    return -(fend[0] + wx * x + crossed(0))
                 if kind == "Vy":
-                    return fend[1] + wy * x
+                    return fend[1] + wy * x + crossed(1)
                 if kind == "Vz":
-                    return fend[2] + wz * x
+                    return fend[2] + wz * x + crossed(2)
                 if kind == "Mx":
                     return -fend[3]
                 if kind == "My":
-                    return fend[4] * (1 - x / L) - fend[10] * (x / L) - wz * x * (L - x) / 2.0
+                    return fend[4] * (1 - x / L) - fend[10] * (x / L) \
+                        - wz * x * (L - x) / 2.0 - free_m(2)
                 if kind == "Mz":
-                    return -fend[5] * (1 - x / L) + fend[11] * (x / L) - wy * x * (L - x) / 2.0
+                    return -fend[5] * (1 - x / L) + fend[11] * (x / L) \
+                        - wy * x * (L - x) / 2.0 - free_m(1)
                 # Stress: axial + biaxial bending magnitude at x
-                myx = fend[4] * (1 - x / L) - fend[10] * (x / L) - wz * x * (L - x) / 2.0
-                mzx = -fend[5] * (1 - x / L) + fend[11] * (x / L) - wy * x * (L - x) / 2.0
-                nx = -(fend[0] + wx * x)
+                myx = fend[4] * (1 - x / L) - fend[10] * (x / L) \
+                    - wz * x * (L - x) / 2.0 - free_m(2)
+                mzx = -fend[5] * (1 - x / L) + fend[11] * (x / L) \
+                    - wy * x * (L - x) / 2.0 - free_m(1)
+                nx = -(fend[0] + wx * x + crossed(0))
                 mm = (myx * myx + mzx * mzx) ** 0.5
                 return abs(nx) / A + (mm * c / Imin if Imin > 1e-9 else 0.0)
 
@@ -3525,6 +3726,10 @@ class RunAnalysis:
                             for s in range(NS + 1)]
 
         radius = max(msize * 0.007, 2.0)
+        # persist the state the Results Viewer needs to re-draw the deformed
+        # shape at any exaggeration (and animate it) without re-solving
+        _store_analysis_state(doc, nodes, u, elems, dscale, msize, radius,
+                              run_name)
         default_kind = "Disp"
         for kind in ["Disp"] + DIAG_KINDS:
             cmax = comp_max[kind]
@@ -4454,6 +4659,283 @@ def _auto_combos(doc):
 
 
 _PANEL = None
+_RESPANEL = None
+
+
+# ── Results Viewer backend (second interface: analyse & view results) ──
+def _store_analysis_state(doc, nodes, u, elems, dscale, msize, radius, run_name):
+    """Persist the minimal solved state so the Results Viewer can re-draw the
+    deformed shape at any exaggeration and animate it, without re-solving."""
+    import json
+    st = doc.getObject("AnalysisState")
+    if st is None:
+        st = doc.addObject("App::DocumentObjectGroup", "AnalysisState")
+    st.Label = "AnalysisState"
+    _set(st, "App::PropertyString", "StNodes",
+         json.dumps([[n.x, n.y, n.z] for n in nodes]))
+    _set(st, "App::PropertyString", "StU", json.dumps([float(x) for x in u]))
+    _set(st, "App::PropertyString", "StElems",
+         json.dumps([[el["n1"], el["n2"]] for el in elems]))
+    _set(st, "App::PropertyFloat", "StScale", float(dscale))
+    _set(st, "App::PropertyFloat", "StMsize", float(msize))
+    _set(st, "App::PropertyFloat", "StRadius", float(radius))
+    _set(st, "App::PropertyString", "StRun", str(run_name))
+    try:
+        st.ViewObject.Visibility = False
+    except Exception:
+        pass
+
+
+def _draw_deformed(doc, scale_mult=1.0):
+    """Rebuild the displacement contour (deformed tube, coloured by |u|) at
+    `scale_mult` times the auto exaggeration, from the stored solved state."""
+    import json
+    import numpy as np
+    st = doc.getObject("AnalysisState")
+    if st is None:
+        return False
+    nodes = [FreeCAD.Vector(*p) for p in json.loads(st.StNodes)]
+    u = np.array(json.loads(st.StU))
+    elpairs = json.loads(st.StElems)
+    base = st.StScale; msize = st.StMsize; radius = st.StRadius
+    scale = base * max(float(scale_mult), 0.0)
+    NS = 10
+    perbar = []; maxd = 0.0
+    for (n1, n2) in elpairs:
+        T, L = _beam_T(nodes[n1], nodes[n2]); R3 = T[0:3, 0:3]
+        lx = FreeCAD.Vector(*[float(R3[0][j]) for j in range(3)])
+        ly = FreeCAD.Vector(*[float(R3[1][j]) for j in range(3)])
+        lz = FreeCAD.Vector(*[float(R3[2][j]) for j in range(3)])
+        dg = np.concatenate([u[6 * n1:6 * n1 + 6], u[6 * n2:6 * n2 + 6]])
+        dl = T @ dg
+        bpt = nodes[n1]; defpts = []; disp = []
+        for s in range(NS + 1):
+            xi = s / float(NS); x = L * xi
+            h1 = 1 - 3 * xi ** 2 + 2 * xi ** 3; h2 = L * (xi - 2 * xi ** 2 + xi ** 3)
+            h3 = 3 * xi ** 2 - 2 * xi ** 3; h4 = L * (-xi ** 2 + xi ** 3)
+            ux = dl[0] + (dl[6] - dl[0]) * xi
+            uy = h1 * dl[1] + h2 * dl[5] + h3 * dl[7] + h4 * dl[11]
+            uz = h1 * dl[2] - h2 * dl[4] + h3 * dl[8] - h4 * dl[10]
+            off = vscale(lx, ux) + vscale(ly, uy) + vscale(lz, uz)
+            defpts.append(bpt + vscale(lx, x) + vscale(off, scale))
+            disp.append(off.Length); maxd = max(maxd, off.Length)
+        perbar.append((defpts, disp))
+    old = doc.getObject("Diagram_Disp")
+    if old is not None:
+        try:
+            doc.removeObject(old.Name)
+        except Exception:
+            pass
+    rg = _grp(doc, RES_GROUP)
+    ob = _result_tube(doc, rg, "Diagram_Disp", "Disp", perbar, radius, maxd, True)
+    if ob is not None:
+        ob.Label = "Displacement (mm) x%.0f" % scale
+    for o in doc.Objects:
+        k = getattr(o, "DiagKind", None)
+        if k and not k.startswith("_") and k != "Disp":
+            try:
+                o.ViewObject.Visibility = False
+            except Exception:
+                pass
+    objs = [o for o in doc.Objects if is_analysis_elem(o)]
+    _color_bar(doc, _grp(doc, DIA_GROUP), 0.0, maxd, "Displacement (mm)", objs, msize)
+    doc.recompute()
+    return True
+
+
+def _result_list(doc):
+    """Available results as (label, key, kind) where kind is 'diag' (switch via
+    ShowDiagram) or 'obj' (a Mode/Buckling/Seismic shape toggled directly)."""
+    out = []
+    diobjs = {getattr(o, "DiagKind"): o for o in doc.Objects
+              if getattr(o, "DiagKind", None) and not getattr(o, "DiagKind").startswith("_")}
+    for k in RESULT_ORDER:
+        if k in diobjs:
+            out.append((RESULT_LABELS[k], k, "diag"))
+    for o in doc.Objects:
+        nm = o.Name
+        if getattr(o, "DiagKind", None) and (nm.startswith("Mode")
+                                             or nm.startswith("Buckling")
+                                             or nm.startswith("Seismic")):
+            out.append((o.Label or nm, nm, "obj"))
+    return out
+
+
+def _result_summary(doc):
+    """Human-readable summary of the key maxima from the current results, read
+    from the per-bar stored forces and the solved state (Inventor-style probe)."""
+    import json
+    bars = [o for o in doc.Objects if is_analysis_elem(o) and hasattr(o, "ResN")]
+    if not bars:
+        return "No results yet. Solve first (Calculate)."
+    def peak(attr):
+        best = 0.0; who = "-"
+        for o in bars:
+            v = abs(getattr(o, attr, 0.0))
+            if v >= best:
+                best = v; who = str(o.Label)
+        return best, who
+    lines = []
+    st = doc.getObject("AnalysisState")
+    if st is not None:
+        try:
+            u = json.loads(st.StU)
+            md = 0.0; mn = "-"
+            for i in range(len(u) // 6):
+                m = (u[6 * i] ** 2 + u[6 * i + 1] ** 2 + u[6 * i + 2] ** 2) ** 0.5
+                if m > md:
+                    md = m; mn = "N%d" % (i + 1)
+            lines.append("Run: %s" % getattr(st, "StRun", "-"))
+            lines.append("Max displacement:  %.3f mm  (%s)" % (md, mn))
+        except Exception:
+            pass
+    for attr, lab, unit in (("ResN", "Axial N", "N"), ("ResMy", "Moment My", "N.mm"),
+                            ("ResMz", "Moment Mz", "N.mm"), ("ResVy", "Shear Vy", "N"),
+                            ("ResVz", "Shear Vz", "N")):
+        v, who = peak(attr)
+        if v > 1e-9:
+            lines.append("Max |%s|:  %.4g %s  (%s)" % (lab, v, unit, who))
+    uv, uw = peak("ResUtil")
+    if uv > 1e-9:
+        lines.append("Max utilisation:  %.2f  (%s)  ->  %s"
+                     % (uv, uw, "OK" if uv <= 1.0 else "OVER-STRESSED"))
+    cc = doc.getObject("CodeCheck")
+    if cc is not None:
+        lines.append("Code check: see 'CodeCheck' table (class, chi_LT, U).")
+    return "\n".join(lines) if lines else "Results present."
+
+
+def _results_panel_class():
+    """Second interface: an Inventor-style results browser (result list +
+    contour + value legend + min/max probe + deformation scale + animation).
+    Built lazily so importing the module never needs Qt."""
+    from PySide import QtCore
+
+    class ResultsViewerPanel(QW.QDialog):
+        def __init__(self):
+            super(ResultsViewerPanel, self).__init__(_mw())
+            self.setWindowTitle("DynFrame - Results Viewer")
+            self.setModal(False)
+            self._timer = None
+            self._anim_t = 0.0
+            self._build()
+            self._refresh()
+
+        def _doc(self):
+            return FreeCAD.ActiveDocument
+
+        def _btn(self, text, slot):
+            b = QW.QPushButton(text); b.clicked.connect(slot); return b
+
+        def _build(self):
+            lay = QW.QVBoxLayout(self)
+            self.hdr = QW.QLabel("Results"); self.hdr.setWordWrap(True)
+            lay.addWidget(self.hdr)
+
+            g = QW.QGroupBox("Result"); gl = QW.QVBoxLayout(g)
+            self.list = QW.QListWidget()
+            self.list.setMinimumHeight(150)
+            self.list.currentRowChanged.connect(self._show_selected)
+            gl.addWidget(self.list)
+            lay.addWidget(g)
+
+            g = QW.QGroupBox("Deformation scale (displacement contour)")
+            gl = QW.QHBoxLayout(g)
+            gl.addWidget(QW.QLabel("x auto"))
+            self.scale = QW.QDoubleSpinBox()
+            self.scale.setRange(0.0, 1.0e6); self.scale.setDecimals(2)
+            self.scale.setValue(1.0); self.scale.setSingleStep(0.5)
+            gl.addWidget(self.scale, 1)
+            gl.addWidget(self._btn("Apply", self._apply_scale))
+            self.animbtn = self._btn("Animate", self._toggle_anim)
+            self.animbtn.setCheckable(True)
+            gl.addWidget(self.animbtn)
+            lay.addWidget(g)
+
+            g = QW.QGroupBox("Summary (max values)"); gl = QW.QVBoxLayout(g)
+            self.summary = QW.QLabel("-"); self.summary.setWordWrap(True)
+            self.summary.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+            gl.addWidget(self.summary)
+            lay.addWidget(g)
+
+            r = QW.QHBoxLayout()
+            r.addWidget(self._btn("Fit view", self._fit))
+            r.addWidget(self._btn("Refresh", self._refresh))
+            lay.addLayout(r)
+
+        def _refresh(self, *a):
+            doc = self._doc()
+            if doc is None:
+                self.hdr.setText("No active document."); return
+            self._results = _result_list(doc)
+            cur = self.list.currentRow()
+            self.list.blockSignals(True)
+            self.list.clear()
+            for (label, key, knd) in self._results:
+                self.list.addItem(label)
+            self.list.blockSignals(False)
+            if self._results:
+                self.list.setCurrentRow(cur if 0 <= cur < len(self._results) else 0)
+            self.hdr.setText("%d result(s) available. Select one to display it as a "
+                             "coloured contour with a value legend." % len(self._results))
+            self.summary.setText(_result_summary(doc))
+
+        def _show_selected(self, row):
+            doc = self._doc()
+            if doc is None or not (0 <= row < len(self._results)):
+                return
+            label, key, knd = self._results[row]
+            if knd == "diag":
+                ShowDiagram().Activated(kind=key)
+            else:
+                for o in doc.Objects:
+                    k = getattr(o, "DiagKind", None)
+                    if k and not k.startswith("_"):
+                        try:
+                            o.ViewObject.Visibility = (o.Name == key)
+                        except Exception:
+                            pass
+                doc.recompute()
+            self.summary.setText(_result_summary(doc))
+
+        def _apply_scale(self):
+            doc = self._doc()
+            if doc is None:
+                return
+            if not _draw_deformed(doc, self.scale.value()):
+                info("No solved state found. Run Calculate first.")
+                return
+            self._fit()
+
+        def _toggle_anim(self):
+            if self.animbtn.isChecked():
+                self._anim_t = 0.0
+                self._timer = QtCore.QTimer(self)
+                self._timer.timeout.connect(self._anim_step)
+                self._timer.start(60)
+            elif self._timer is not None:
+                self._timer.stop(); self._timer = None
+                self._apply_scale()
+
+        def _anim_step(self):
+            import math
+            self._anim_t += 0.35
+            amp = self.scale.value()
+            mult = amp * abs(math.sin(self._anim_t))
+            try:
+                _draw_deformed(self._doc(), mult)
+            except Exception:
+                if self._timer is not None:
+                    self._timer.stop(); self._timer = None
+                self.animbtn.setChecked(False)
+
+        def _fit(self):
+            try:
+                FreeCADGui.SendMsgToActiveView("ViewFit")
+            except Exception:
+                pass
+
+    return ResultsViewerPanel
 
 
 def _panel_class():
@@ -4551,6 +5033,8 @@ def _panel_class():
             self.res = QW.QComboBox(); self.res.addItems([RESULT_LABELS[k] for k in RESULT_ORDER])
             r.addWidget(self.res, 1); r.addWidget(self._btn("Show", self._show))
             gl.addLayout(r)
+            gl.addWidget(self._btn("Open Results Viewer (contours, scale, animate)…",
+                                   self._resviewer))
             lay.addWidget(g)
 
             lay.addWidget(self._btn("Refresh", self._refresh))
@@ -4653,6 +5137,9 @@ def _panel_class():
             kind = RESULT_ORDER[[RESULT_LABELS[k] for k in RESULT_ORDER].index(lab)]
             ShowDiagram().Activated(kind=kind)
 
+        def _resviewer(self):
+            ResultsViewer().Activated()
+
     return FrameAnalysisPanel
 
 
@@ -4677,6 +5164,33 @@ class Manager:
             FreeCAD.Console.PrintError("DynFrame: panel failed\n" + traceback.format_exc())
             err("Could not open the panel (%s).\n\nUse the individual DynFrame "
                 "toolbar commands instead." % e)
+
+
+class ResultsViewer:
+    def GetResources(self):
+        return {"Pixmap": _icon("results"), "MenuText": "Results Viewer",
+                "ToolTip": "Open the Results Viewer - a second, Inventor-style panel "
+                           "to analyse and view results: pick a result (displacement, "
+                           "forces, stress, mode / buckling / seismic shapes) to show "
+                           "it as a coloured contour with a value legend, read the "
+                           "max values, and scale or animate the deformed shape.",
+                "Accel": "A, V"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        global _RESPANEL
+        try:
+            cls = _results_panel_class()
+            _RESPANEL = cls()
+            _RESPANEL.show(); _RESPANEL.raise_()
+        except Exception as e:
+            import traceback
+            FreeCAD.Console.PrintError("DynFrame: results viewer failed\n"
+                                       + traceback.format_exc())
+            err("Could not open the Results Viewer (%s).\n\nUse 'Show Result / "
+                "Diagram' from the toolbar instead." % e)
 
 
 def _parse_spacings(s):
@@ -5053,6 +5567,7 @@ _add("DynFrame_ResponseSpectrum", ResponseSpectrum)
 _add("DynFrame_Envelope", Envelope)
 _add("DynFrame_CodeCheck", CodeCheck)
 _add("DynFrame_ShowDiagram", ShowDiagram)
+_add("DynFrame_ResultsViewer", ResultsViewer)
 _add("DynFrame_ClearAnalysis", ClearAnalysis)
 _add("DynFrame_TrimToFace", TrimToFace)
 _add("DynFrame_ExtendToFace", ExtendToFace)

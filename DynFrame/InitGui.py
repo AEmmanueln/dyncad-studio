@@ -50,7 +50,7 @@ class DynFrameWorkbench(FreeCADGui.Workbench):
         skel = ["DynFrame_Skeleton3D", "DynFrame_ConstrainedSketch"]
         model = ["DynFrame_Hole", "DynFrame_QuickFillet"]
         report = ["DynFrame_CutList", "DynFrame_BOM"]
-        panel = ["DynFrame_Manager"]
+        panel = ["DynFrame_Manager", "DynFrame_ResultsViewer"]
         structure = ["DynFrame_GridGen", "DynFrame_AddBars",
                      "DynFrame_BarsFromMembers", "DynFrame_EditTables",
                      "DynFrame_BuildFromTables"]

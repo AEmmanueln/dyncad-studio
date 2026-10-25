@@ -3691,91 +3691,33 @@ class RunAnalysis:
             except Exception:
                 pass
 
-        # ---- build visuals: colour the STRUCTURE by each result (thick tubes) ----
-        # Every result (Displacement, N, Vy, Vz, Mx, My, Mz, Stress) is drawn as
-        # the structure rendered in thick tube segments coloured blue->red by the
-        # value along each bar - the Inventor/Robot contour look, visible from any
-        # angle. Displacement uses the deformed shape; the rest use the real model.
+        # ---- results are rendered lazily, one at a time, on demand ----
+        # The solve stores the per-bar force samples + deformed state; a single
+        # result is then drawn by _render_result (coloured contour - tubes or
+        # the members' real swept profiles). This keeps the object count low,
+        # lets the deformation scale / tube-vs-solid choice re-render instantly,
+        # and guarantees the colour gradient along each bar.
         doc.openTransaction("DynFrame: results")
         for o in list(doc.Objects):
             if getattr(o, "DiagKind", None) is not None \
                     or o.Name.startswith(("Diagram_", "Result_", "DeformedShape",
-                                          "Legend", "MomentDiagram")):
+                                          "Legend", "MomentDiagram", "ResultPeak")):
                 try:
                     doc.removeObject(o.Name)
                 except Exception:
                     pass
         rg = _grp(doc, RES_GROUP); dg = _grp(doc, DIA_GROUP)
-
-        # deformed geometry + displacement magnitude per bar (cubic shape fns)
-        maxoff = 0.0
-        for el in elems:
-            T = el["T"]; L = el["L"]; d = el["dloc"]; R3 = T[0:3, 0:3]
-            lx = FreeCAD.Vector(*[float(R3[0][j]) for j in range(3)])
-            ly = FreeCAD.Vector(*[float(R3[1][j]) for j in range(3)])
-            lz = FreeCAD.Vector(*[float(R3[2][j]) for j in range(3)])
-            base = nodes[el["n1"]]; statpts = []; offs = []; disp = []
-            for s in range(NS + 1):
-                xi = s / float(NS); x = L * xi
-                n1 = 1 - 3 * xi ** 2 + 2 * xi ** 3; n2 = L * (xi - 2 * xi ** 2 + xi ** 3)
-                n3 = 3 * xi ** 2 - 2 * xi ** 3; n4 = L * (-xi ** 2 + xi ** 3)
-                ux = d[0] + (d[6] - d[0]) * xi
-                uy = n1 * d[1] + n2 * d[5] + n3 * d[7] + n4 * d[11]
-                uz = n1 * d[2] - n2 * d[4] + n3 * d[8] - n4 * d[10]
-                off = vscale(lx, ux) + vscale(ly, uy) + vscale(lz, uz)
-                statpts.append(base + vscale(lx, x)); offs.append(off); disp.append(off.Length)
-                maxoff = max(maxoff, off.Length)
-            el["statpts"] = statpts; el["offs"] = offs; el["disp"] = disp
-            comp_max["Disp"] = max(comp_max["Disp"], max(disp))
+        _, maxoff = _deformed_points(nodes, u,
+                                     [(el["n1"], el["n2"]) for el in elems], 0.0)
+        comp_max["Disp"] = maxoff
         dscale = (0.08 * msize / maxoff) if maxoff > 1e-9 else 1.0
-        for el in elems:
-            el["defpts"] = [el["statpts"][s] + vscale(el["offs"][s], dscale)
-                            for s in range(NS + 1)]
-
         radius = _tube_radius(msize)
-        # persist the state the Results Viewer needs to re-draw the deformed
-        # shape at any exaggeration (and animate it) without re-solving
         _store_analysis_state(doc, nodes, u, elems, dscale, msize, radius,
-                              run_name)
-        default_kind = "Disp"
-        for kind in ["Disp"] + DIAG_KINDS:
-            cmax = comp_max[kind]
-            if cmax < 1e-12:
-                continue
-            perbar = []
-            for el in elems:
-                if kind == "Disp":
-                    perbar.append((el["defpts"], el["disp"]))
-                else:
-                    perbar.append((el["statpts"], [abs(v) for v in el["samp"][kind]]))
-            grp = rg if kind == "Disp" else dg
-            ob = _result_tube(doc, grp, "Diagram_%s" % kind, kind, perbar,
-                              radius, cmax, kind == default_kind)
-            if ob is None:
-                continue
-            ob.Label = ("Displacement (mm) x%.0f" % dscale) if kind == "Disp" \
-                else "%s result" % kind
-            # label the global peak of this result
-            pk = 0.0; pkp = None
-            for el in elems:
-                vals = el["disp"] if kind == "Disp" else el["samp"][kind]
-                pts = el["defpts"] if kind == "Disp" else el["statpts"]
-                for s in range(NS + 1):
-                    if abs(vals[s]) >= abs(pk):
-                        pk = vals[s]; pkp = pts[s]
-            if pkp is not None and abs(pk) > 1e-9:
-                t = _label_text(doc, grp, "%s max %.4g" % (kind, pk),
-                                pkp + FreeCAD.Vector(0, 0, radius * 2.5), kind,
-                                fontsize=max(8.0, msize * 0.03))
-                if t is not None:
-                    try:
-                        t.ViewObject.Visibility = (kind == default_kind)
-                    except Exception:
-                        pass
-        _color_bar(doc, dg, 0.0, comp_max["Disp"], "Displacement (mm)", objs, msize)
+                              run_name, comp_max)
         doc.commitTransaction()
 
-        self._tables(doc, nodes, sup_nodes, Rreac, u, elems, run_name, rg, kind)
+        _render_result(doc, "Disp", scale_mult=1.0)     # default view
+        self._tables(doc, nodes, sup_nodes, Rreac, u, elems, run_name, rg, "Disp")
         doc.recompute()
         _apply_result_colors(doc)       # restore per-face gradient after recompute
 
@@ -3878,40 +3820,19 @@ class ShowDiagram:
 
     def Activated(self, kind=None):
         doc = FreeCAD.ActiveDocument
-        diobjs = {getattr(o, "DiagKind"): o for o in doc.Objects
-                  if getattr(o, "DiagKind", None) and not getattr(o, "DiagKind").startswith("_")}
-        if not diobjs:
+        avail = [k for (lab, k, knd) in _result_list(doc) if knd == "diag"]
+        if not avail:
             info("No results yet. Run Calculate first."); return
-        order = [k for k in RESULT_ORDER if k in diobjs]
-        if kind is not None:
-            sel = kind if kind in diobjs else None
-        else:
+        if kind is None:
             pick, ok = get_item("Show Result / Diagram", "Result:",
-                                [RESULT_LABELS[k] for k in order] + ["(hide all)"], 0)
+                                [RESULT_LABELS[k] for k in avail], 0)
             if not ok:
                 return
-            if pick.startswith("(hide"):
-                sel = None
-            else:
-                sel = order[[RESULT_LABELS[k] for k in order].index(pick)]
-        for o in doc.Objects:
-            k = getattr(o, "DiagKind", None)
-            if not k or k.startswith("_"):
-                continue
-            try:
-                o.ViewObject.Visibility = (k == sel)
-            except Exception:
-                pass
-        # update the colour bar to the selected result's range
-        if sel is not None:
-            ob = diobjs[sel]
-            vmax = float(getattr(ob, "CompMax", 1.0) or 1.0)
-            vmin = float(getattr(ob, "CompMin", 0.0) or 0.0)
-            objs, _k = _analysis_objs(doc)
-            _color_bar(doc, _grp(doc, DIA_GROUP), vmin, vmax,
-                       RESULT_LABELS[sel], objs, _model_size(objs))
-        doc.recompute()
-        _apply_result_colors(doc)
+            kind = avail[[RESULT_LABELS[k] for k in avail].index(pick)]
+        if kind not in avail:
+            return
+        # render the chosen result on demand (tubes, or solid beams if toggled)
+        _render_result(doc, kind, scale_mult=1.0)
 
 
 class ClearAnalysis:
@@ -4673,9 +4594,19 @@ _RESPANEL = None
 
 
 # ── Results Viewer backend (second interface: analyse & view results) ──
-def _store_analysis_state(doc, nodes, u, elems, dscale, msize, radius, run_name):
-    """Persist the minimal solved state so the Results Viewer can re-draw the
-    deformed shape at any exaggeration and animate it, without re-solving."""
+# Results are rendered lazily: the solve stores the per-bar force samples and
+# the deformed state, and ONE result is drawn at a time (on demand) by
+# _render_result. That keeps the object count down, lets the deformation scale
+# and the tube/solid-beam choice re-render instantly, and guarantees the
+# colour gradient along each bar.
+_SOLID_BEAMS = False        # Results Viewer "Solid beams" toggle
+
+
+def _store_analysis_state(doc, nodes, u, elems, dscale, msize, radius, run_name,
+                          comp_max):
+    """Persist the solved state the Results Viewer needs to render any result
+    on demand (per-bar force samples, sections, peaks) and to re-draw / animate
+    the deformed shape at any exaggeration, without re-solving."""
     import json
     st = doc.getObject("AnalysisState")
     if st is None:
@@ -4690,6 +4621,13 @@ def _store_analysis_state(doc, nodes, u, elems, dscale, msize, radius, run_name)
     _set(st, "App::PropertyFloat", "StMsize", float(msize))
     _set(st, "App::PropertyFloat", "StRadius", float(radius))
     _set(st, "App::PropertyString", "StRun", str(run_name))
+    _set(st, "App::PropertyString", "StSamp", json.dumps(
+        [{k: [float(v) for v in el["samp"][k]] for k in DIAG_KINDS}
+         for el in elems]))
+    _set(st, "App::PropertyString", "StSections",
+         json.dumps([str(el.get("sec", "")) for el in elems]))
+    _set(st, "App::PropertyString", "StCompMax",
+         json.dumps({k: float(comp_max.get(k, 0.0)) for k in ["Disp"] + DIAG_KINDS}))
     try:
         st.ViewObject.Visibility = False
     except Exception:
@@ -4737,37 +4675,81 @@ def _load_state(doc):
             st.StScale, st.StMsize, st.StRadius)
 
 
-def _draw_deformed(doc, scale_mult=1.0):
-    """Rebuild the displacement contour (deformed tube, coloured by |u|) at
-    `scale_mult` times the auto exaggeration, from the stored solved state."""
-    state = _load_state(doc)
+def _load_state_full(doc):
+    """The full solved state for on-demand result rendering: adds the per-bar
+    force samples, section names and per-result peaks to _load_state."""
+    import json
+    base = _load_state(doc)
+    if base is None:
+        return None
+    st = doc.getObject("AnalysisState")
+    try:
+        samp = json.loads(getattr(st, "StSamp", "[]"))
+        sections = json.loads(getattr(st, "StSections", "[]"))
+        compmax = json.loads(getattr(st, "StCompMax", "{}"))
+    except Exception:
+        samp, sections, compmax = [], [], {}
+    return base + (samp, sections, compmax)
+
+
+def _render_result(doc, kind, scale_mult=1.0, solid=None):
+    """Draw ONE result (kind = 'Disp' or a force component) on demand from the
+    stored state, as the coloured contour - tubes, or (solid=True) the members'
+    real swept profiles. Replaces whatever result was shown. Returns True/False."""
+    state = _load_state_full(doc)
     if state is None:
         return False
-    nodes, u, elpairs, base, msize, radius = state
-    scale = base * max(float(scale_mult), 0.0)
-    perbar, maxd = _deformed_points(nodes, u, elpairs, scale)
-    old = doc.getObject("Diagram_Disp")
-    if old is not None:
-        try:
-            doc.removeObject(old.Name)
-        except Exception:
-            pass
-    rg = _grp(doc, RES_GROUP)
-    ob = _result_tube(doc, rg, "Diagram_Disp", "Disp", perbar, radius, maxd, True)
-    if ob is not None:
-        ob.Label = "Displacement (mm) x%.0f" % scale
+    nodes, u, elpairs, base, msize, radius, samp, sections, compmax = state
+    if solid is None:
+        solid = _SOLID_BEAMS
+    kind = kind if kind in (["Disp"] + DIAG_KINDS) else "Disp"
+    if kind == "Disp":
+        scale = base * max(float(scale_mult), 0.0)
+        perbar0, _ = _deformed_points(nodes, u, elpairs, scale)
+        perbar = perbar0
+        vmax = float(compmax.get("Disp", 0.0))
+        title = "Displacement (mm)"; label = "Displacement (mm) x%.0f" % scale
+    else:
+        perbar0, _ = _deformed_points(nodes, u, elpairs, 0.0)      # undeformed stations
+        perbar = []
+        for bi, (pts, _d) in enumerate(perbar0):
+            vals = samp[bi].get(kind, []) if bi < len(samp) else []
+            perbar.append((pts, [abs(v) for v in vals]))
+        vmax = float(compmax.get(kind, 0.0))
+        title = RESULT_LABELS.get(kind, kind); label = "%s result" % kind
+    # clear the previously shown result (contour, legend, peak label) and hide
+    # any mode/buckling/seismic shape
+    for o in list(doc.Objects):
+        nm = o.Name; dk = getattr(o, "DiagKind", None)
+        if nm.startswith("Diagram_") or dk == "_legend" or nm.startswith("ResultPeak"):
+            try:
+                doc.removeObject(nm)
+            except Exception:
+                pass
     for o in doc.Objects:
-        k = getattr(o, "DiagKind", None)
-        if k and not k.startswith("_") and k != "Disp":
+        dk = getattr(o, "DiagKind", None)
+        if dk and dk.startswith("_") and dk not in ("_legend", "_anim"):
             try:
                 o.ViewObject.Visibility = False
             except Exception:
                 pass
+    rg = _grp(doc, RES_GROUP); dg = _grp(doc, DIA_GROUP)
+    grp = rg if kind == "Disp" else dg
+    dirs = [unit(nodes[b] - nodes[a]) for (a, b) in elpairs]
+    ob = _result_tube(doc, grp, "Diagram_%s" % kind, kind, perbar, radius, vmax,
+                      True, sections=sections, dirs=dirs, solid=solid)
+    if ob is not None:
+        ob.Label = label
     objs = [o for o in doc.Objects if is_analysis_elem(o)]
-    _color_bar(doc, _grp(doc, DIA_GROUP), 0.0, maxd, "Displacement (mm)", objs, msize)
+    _color_bar(doc, dg, 0.0, vmax, title, objs, msize)
     doc.recompute()
     _apply_result_colors(doc)
     return True
+
+
+def _draw_deformed(doc, scale_mult=1.0):
+    """Render the displacement contour at `scale_mult` x the auto exaggeration."""
+    return _render_result(doc, "Disp", scale_mult=scale_mult)
 
 
 def _make_anim_frames(doc, amp=1.0, nframes=12):
@@ -4837,13 +4819,23 @@ def _shown_range(doc):
 
 
 def _result_list(doc):
-    """Available results as (label, key, kind) where kind is 'diag' (switch via
-    ShowDiagram) or 'obj' (a Mode/Buckling/Seismic shape toggled directly)."""
+    """Available results as (label, key, kind) where kind is 'diag' (a static
+    result rendered on demand by _render_result) or 'obj' (a Mode/Buckling/
+    Seismic shape toggled directly). Static results come from the stored peaks
+    (StCompMax), since they are no longer pre-built as objects."""
+    import json
     out = []
-    diobjs = {getattr(o, "DiagKind"): o for o in doc.Objects
-              if getattr(o, "DiagKind", None) and not getattr(o, "DiagKind").startswith("_")}
+    st = doc.getObject("AnalysisState")
+    compmax = {}
+    if st is not None:
+        try:
+            compmax = json.loads(getattr(st, "StCompMax", "{}"))
+        except Exception:
+            compmax = {}
     for k in RESULT_ORDER:
-        if k in diobjs:
+        if k == "Disp" and st is not None:
+            out.append((RESULT_LABELS[k], k, "diag"))
+        elif float(compmax.get(k, 0.0)) > 1e-9:
             out.append((RESULT_LABELS[k], k, "diag"))
     for o in doc.Objects:
         nm = o.Name
@@ -5002,10 +4994,16 @@ def _results_panel_class():
             self.animbtn.setCheckable(True)
             r.addWidget(self.animbtn)
             gl.addLayout(r)
+            cr = QW.QHBoxLayout()
             self.showmodel = QW.QCheckBox("Show undeformed model")
             self.showmodel.setChecked(True)
             self.showmodel.stateChanged.connect(self._toggle_model)
-            gl.addWidget(self.showmodel)
+            cr.addWidget(self.showmodel)
+            self.solidbeams = QW.QCheckBox("Solid beams (real section)")
+            self.solidbeams.setChecked(bool(_SOLID_BEAMS))
+            self.solidbeams.stateChanged.connect(self._toggle_solid)
+            cr.addWidget(self.solidbeams)
+            gl.addLayout(cr)
             lay.addWidget(g)
 
             g = QW.QGroupBox("Summary (max values)"); gl = QW.QVBoxLayout(g)
@@ -5054,16 +5052,21 @@ def _results_panel_class():
                 return
             self._stop_anim()
             label, key, knd = self._results[row]
+            self._cur = (key, knd)
             if knd == "diag":
-                ShowDiagram().Activated(kind=key)
+                sc = self.scale.value() if key == "Disp" else 1.0
+                _render_result(doc, key, scale_mult=sc)
             else:
+                # a mode / buckling / seismic shape: show just this one and hide
+                # every other result (static contours and other shapes)
                 for o in doc.Objects:
                     k = getattr(o, "DiagKind", None)
-                    if k and not k.startswith("_"):
-                        try:
-                            o.ViewObject.Visibility = (o.Name == key)
-                        except Exception:
-                            pass
+                    if not k or k in ("_legend", "_anim"):
+                        continue
+                    try:
+                        o.ViewObject.Visibility = (o.Name == key)
+                    except Exception:
+                        pass
                 doc.recompute()
             self.summary.setText(_result_summary(doc))
             self._update_legend()
@@ -5079,6 +5082,12 @@ def _results_panel_class():
                         o.ViewObject.Visibility = vis
                     except Exception:
                         pass
+
+        def _toggle_solid(self, *a):
+            global _SOLID_BEAMS
+            _SOLID_BEAMS = self.solidbeams.isChecked()
+            # re-render the current result with the new style
+            self._show_selected(self.list.currentRow())
 
         def _apply_scale(self):
             doc = self._doc()
@@ -5691,29 +5700,68 @@ def _apply_result_colors(doc):
             pass
 
 
-def _result_tube(doc, grp, name, kind, perbar, radius, vmax, visible):
-    """Render a result as the structure drawn in thick tube segments coloured
-    blue->red by |value| along each bar. Each short segment gets its own colour
-    from the value there, so the colour varies ALONG every bar (bending, stress
-    and displacement all change along a member). `perbar` is a list of
-    (points, values) per bar. Thick, shaded tubes read clearly from any angle -
-    the Inventor/Robot contour look."""
+_PROFILE_FACE_CACHE = {}
+
+
+def _profile_face(sec):
+    """Cached cross-section face (centred, in the local XY plane) for a section
+    name, used to sweep solid beams for the result contour."""
+    if sec in _PROFILE_FACE_CACHE:
+        return _PROFILE_FACE_CACHE[sec]
+    f = None
+    try:
+        f = build_face(sec, "Center", 0.0, 0.0)
+    except Exception:
+        f = None
+    _PROFILE_FACE_CACHE[sec] = f
+    return f
+
+
+def _segment_solid(face, a, b):
+    """A short solid beam: the section `face` swept from point a to point b,
+    oriented along a->b (so results can be shown on the real beam shape, the
+    Inventor look). None on failure (caller falls back to a tube)."""
+    try:
+        d = b - a; L = d.Length
+        if L < 1e-6:
+            return None
+        seg = face.extrude(FreeCAD.Vector(0, 0, L))
+        seg.Placement = orient_placement(a, d, 0.0)
+        return seg
+    except Exception:
+        return None
+
+
+def _result_tube(doc, grp, name, kind, perbar, radius, vmax, visible,
+                 sections=None, dirs=None, solid=False):
+    """Render a result as the structure drawn in short coloured segments,
+    blue->red by |value|. Each segment gets its own colour from the value
+    there, so the colour varies ALONG every bar (bending, stress and
+    displacement all change along a member). `perbar` is a list of
+    (points, values) per bar. Segments are thick tubes by default, or - with
+    solid=True and a known section per bar - the member's real swept profile
+    (solid beams, the Inventor look). Shaded display, so no wireframe rings."""
     cyls = []
     colors = []
-    for (pts, vals) in perbar:
+    for bi, (pts, vals) in enumerate(perbar):
+        face = None
+        if solid and sections is not None and bi < len(sections):
+            face = _profile_face(sections[bi])
         for i in range(len(pts) - 1):
             a = pts[i]; b = pts[i + 1]; v = b - a; ln = v.Length
             if ln < 1e-6:
                 continue
+            seg = _segment_solid(face, a, b) if face is not None else None
+            if seg is None:
+                try:
+                    seg = Part.makeCylinder(radius, ln, a, unit(v))
+                except Exception:
+                    continue
             try:
-                cyl = Part.makeCylinder(radius, ln, a, unit(v))
-            except Exception:
-                continue
-            try:
-                nf = len(cyl.Faces)
+                nf = len(seg.Faces)
             except Exception:
                 nf = 3
-            cyls.append(cyl)
+            cyls.append(seg)
             t = (0.5 * (abs(vals[i]) + abs(vals[i + 1])) / vmax) if vmax > 1e-12 else 0.0
             colors += [_ramp(t) + (0.0,)] * nf
     if not cyls:

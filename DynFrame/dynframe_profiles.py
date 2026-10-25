@@ -86,11 +86,14 @@ def tee(h, b, t):
 # ── registry ─────────────────────────────────────────────────────
 FAMILIES = {}        # family name -> [(size name, builder), ...]
 _NAME2BUILDER = {}   # size name  -> builder
+SECTION_DIMS = {}    # size name  -> (kind, {dim: value})  [no Part needed]
 
 
-def _reg(family, name, builder):
+def _reg(family, name, builder, kind=None, dims=None):
     FAMILIES.setdefault(family, []).append((name, builder))
     _NAME2BUILDER[name] = builder
+    if kind is not None:
+        SECTION_DIMS[name] = (kind, dims)
 
 
 # dimension tables  -------------------------------------------------
@@ -155,29 +158,41 @@ def _build_all():
     if FAMILIES:
         return
     for n, h, b, tw, tf in _IPE:
-        _reg("I-beam (IPE)", "IPE %d" % n, (lambda h=h, b=b, tw=tw, tf=tf: ibeam(h, b, tw, tf)))
+        _reg("I-beam (IPE)", "IPE %d" % n, (lambda h=h, b=b, tw=tw, tf=tf: ibeam(h, b, tw, tf)),
+             "I", {"h": h, "b": b, "tw": tw, "tf": tf})
     for n, h, b, tw, tf in _HEA:
-        _reg("H-beam (HEA)", "HEA %d" % n, (lambda h=h, b=b, tw=tw, tf=tf: ibeam(h, b, tw, tf)))
+        _reg("H-beam (HEA)", "HEA %d" % n, (lambda h=h, b=b, tw=tw, tf=tf: ibeam(h, b, tw, tf)),
+             "I", {"h": h, "b": b, "tw": tw, "tf": tf})
     for n, h, b, tw, tf in _HEB:
-        _reg("H-beam (HEB)", "HEB %d" % n, (lambda h=h, b=b, tw=tw, tf=tf: ibeam(h, b, tw, tf)))
+        _reg("H-beam (HEB)", "HEB %d" % n, (lambda h=h, b=b, tw=tw, tf=tf: ibeam(h, b, tw, tf)),
+             "I", {"h": h, "b": b, "tw": tw, "tf": tf})
     for n, h, b, tw, tf in _UPN:
-        _reg("Channel (UPN)", "UPN %d" % n, (lambda h=h, b=b, tw=tw, tf=tf: channel(h, b, tw, tf)))
+        _reg("Channel (UPN)", "UPN %d" % n, (lambda h=h, b=b, tw=tw, tf=tf: channel(h, b, tw, tf)),
+             "U", {"h": h, "b": b, "tw": tw, "tf": tf})
     for a, t in _LEQ:
-        _reg("Angle (equal)", "L %dx%dx%d" % (a, a, t), (lambda a=a, t=t: angle(a, a, t)))
+        _reg("Angle (equal)", "L %dx%dx%d" % (a, a, t), (lambda a=a, t=t: angle(a, a, t)),
+             "L", {"a": a, "b": a, "t": t})
     for a, b, t in _LUN:
-        _reg("Angle (unequal)", "L %dx%dx%d" % (a, b, t), (lambda a=a, b=b, t=t: angle(a, b, t)))
+        _reg("Angle (unequal)", "L %dx%dx%d" % (a, b, t), (lambda a=a, b=b, t=t: angle(a, b, t)),
+             "L", {"a": a, "b": b, "t": t})
     for a, t in _SHS:
-        _reg("Square tube (SHS)", "SHS %dx%dx%d" % (a, a, t), (lambda a=a, t=t: hollow_rect(a, a, t)))
+        _reg("Square tube (SHS)", "SHS %dx%dx%d" % (a, a, t), (lambda a=a, t=t: hollow_rect(a, a, t)),
+             "box", {"b": a, "h": a, "t": t})
     for b, h, t in _RHS:
-        _reg("Rectangular tube (RHS)", "RHS %dx%dx%d" % (b, h, t), (lambda b=b, h=h, t=t: hollow_rect(b, h, t)))
+        _reg("Rectangular tube (RHS)", "RHS %dx%dx%d" % (b, h, t), (lambda b=b, h=h, t=t: hollow_rect(b, h, t)),
+             "box", {"b": b, "h": h, "t": t})
     for od, t in _CHS:
-        _reg("Round tube (CHS)", "CHS %.1fx%.1f" % (od, t), (lambda od=od, t=t: tube(od, t)))
+        _reg("Round tube (CHS)", "CHS %.1fx%.1f" % (od, t), (lambda od=od, t=t: tube(od, t)),
+             "CHS", {"d": od, "t": t})
     for h, b, t in _TEE:
-        _reg("T section", "T %dx%dx%d" % (h, b, t), (lambda h=h, b=b, t=t: tee(h, b, t)))
+        _reg("T section", "T %dx%dx%d" % (h, b, t), (lambda h=h, b=b, t=t: tee(h, b, t)),
+             "T", {"h": h, "b": b, "t": t})
     for b, t in _FLAT:
-        _reg("Flat bar", "Flat %dx%d" % (b, t), (lambda b=b, t=t: solid_rect(b, t)))
+        _reg("Flat bar", "Flat %dx%d" % (b, t), (lambda b=b, t=t: solid_rect(b, t)),
+             "flat", {"b": b, "t": t})
     for d in _ROUND:
-        _reg("Round bar", "Round D%d" % d, (lambda d=d: round_bar(d)))
+        _reg("Round bar", "Round D%d" % d, (lambda d=d: round_bar(d)),
+             "round", {"d": d})
 
 
 def families():
@@ -188,3 +203,11 @@ def families():
 def builder_for(name):
     _build_all()
     return _NAME2BUILDER.get(name)
+
+
+def dims_for(name):
+    """(kind, {dim: value}) for a profile size name, or None if unknown.
+    Pure data — no OpenCASCADE geometry is built, so this is safe to call
+    for section-property maths without a running FreeCAD kernel."""
+    _build_all()
+    return SECTION_DIMS.get(name)

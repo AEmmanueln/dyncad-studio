@@ -1959,7 +1959,14 @@ def _beam_T(n1, n2):
 def _section_props_from_name(name):
     """Section properties (A, Iy, Iz, J, c) from a profile name in the library.
     Works for both solid members and line bars (the analysis entity carries a
-    section name, never a swept solid)."""
+    section name, never a swept solid).
+
+    Prefers the analytic section database (pure Python, so it also supplies the
+    correct St-Venant torsion constant It for open sections, not the polar
+    moment Iy+Iz), falling back to the OpenCASCADE face for unknown names."""
+    db = _section_db(name)
+    if db is not None:
+        return db["A"], db["Iy"], db["Iz"], db["It"], max(db["hx"], db["hy"]) / 2.0
     face = build_face(name, "Center", 0.0, 0.0)
     if face is None:
         return None
@@ -1982,9 +1989,13 @@ def _section_props(obj):
 
 def _section_props_full(name):
     """Richer section properties for code checks:
-    (A, Iy, Iz, Wel_y, Wel_z, iy, iz, hy, hz) where hy/hz are the overall
-    depths used for the elastic section moduli and radii of gyration. Iy/Iz
-    match _section_props (Iz=about face-x, Iy=about face-y)."""
+    (A, Iy, Iz, Wel_y, Wel_z, iy, iz, hx, hy). Iy/Iz match _section_props
+    (Iz=about face-x, Iy=about face-y). Delegates to the analytic section
+    database, falling back to the OpenCASCADE face for unknown names."""
+    db = _section_db(name)
+    if db is not None:
+        return (db["A"], db["Iy"], db["Iz"], db["Wel_y"], db["Wel_z"],
+                db["iy"], db["iz"], db["hx"], db["hy"])
     face = build_face(name, "Center", 0.0, 0.0)
     if face is None:
         return None
@@ -2004,6 +2015,221 @@ def _section_props_full(name):
     return A, Iy, Iz, Wel_y, Wel_z, iy, iz, hx, hy
 
 
+# ── analytic section-property engine (pure Python) ───────────────────
+# Section geometry comes from the same polygons the profile builders draw,
+# so A and I match the OpenCASCADE faces exactly, while plastic moduli,
+# torsion/warping constants and classification data are obtained
+# analytically — everything a full EN 1993-1-1 code check needs, computable
+# without a running FreeCAD kernel.
+def _poly_AQI(pts):
+    """Signed area and moments of a simple polygon about the origin:
+    (A, Qx=int y dA, Qy=int x dA, Ix=int y^2 dA, Iy=int x^2 dA)."""
+    A = Qx = Qy = Ix = Iy = 0.0
+    n = len(pts)
+    for i in range(n):
+        x0, y0 = pts[i]
+        x1, y1 = pts[(i + 1) % n]
+        cr = x0 * y1 - x1 * y0
+        A += cr
+        Qy += (x0 + x1) * cr
+        Qx += (y0 + y1) * cr
+        Iy += (x0 * x0 + x0 * x1 + x1 * x1) * cr
+        Ix += (y0 * y0 + y0 * y1 + y1 * y1) * cr
+    return A * 0.5, Qx / 6.0, Qy / 6.0, Ix / 12.0, Iy / 12.0
+
+
+def _clip(pts, axis, c, ge):
+    """Clip polygon to the half-plane coord>=c (ge=True) or <=c, axis 0=x,1=y."""
+    out = []
+    n = len(pts)
+    for i in range(n):
+        a = pts[i]; b = pts[(i + 1) % n]
+        ia = (a[axis] >= c) if ge else (a[axis] <= c)
+        ib = (b[axis] >= c) if ge else (b[axis] <= c)
+        if ia:
+            out.append(a)
+        if ia != ib:
+            t = (c - a[axis]) / (b[axis] - a[axis])
+            out.append((a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])))
+    return out
+
+
+def _region_props(contours):
+    """Area, centroid and central second moments of a region = outer polygon
+    minus holes (first contour is the outer, the rest subtract)."""
+    A = Qx = Qy = Ix = Iy = 0.0
+    for k, cont in enumerate(contours):
+        a, qx, qy, ix, iy = _poly_AQI(cont)
+        if a < 0:
+            a, qx, qy, ix, iy = -a, -qx, -qy, -ix, -iy
+        s = 1.0 if k == 0 else -1.0
+        A += s * a; Qx += s * qx; Qy += s * qy; Ix += s * ix; Iy += s * iy
+    cx = Qy / A; cy = Qx / A
+    return A, cx, cy, Ix - A * cy * cy, Iy - A * cx * cx
+
+
+def _half_AQ(contours, axis, c, ge):
+    """Area and first moment about the cut line coord=c of the region on one
+    side of it (ge=True: coord>=c)."""
+    A = Q = 0.0
+    for k, cont in enumerate(contours):
+        cl = _clip(cont, axis, c, ge)
+        if len(cl) < 3:
+            continue
+        a, qx, qy, _, _ = _poly_AQI(cl)
+        if a < 0:
+            a, qx, qy = -a, -qx, -qy
+        s = 1.0 if k == 0 else -1.0
+        A += s * a
+        Q += s * ((qy if axis == 0 else qx) - c * a)
+    return A, Q
+
+
+def _plastic_modulus(contours, A, lo, hi, axis):
+    """Plastic modulus about the centroidal axis perpendicular to `axis`
+    (axis 1 -> bending stresses the y-extreme fibres; axis 0 -> x-extreme).
+    Finds the equal-area split (plastic neutral axis) by bisection."""
+    a, b = lo, hi
+    for _ in range(80):
+        m = 0.5 * (a + b)
+        Ak, _ = _half_AQ(contours, axis, m, True)
+        if Ak > A / 2.0:
+            a = m
+        else:
+            b = m
+    cp = 0.5 * (a + b)
+    _, Qp = _half_AQ(contours, axis, cp, True)
+    _, Qn = _half_AQ(contours, axis, cp, False)
+    return abs(Qp) + abs(Qn)
+
+
+def _poly_for(kind, d):
+    """Cross-section polygon(s) [outer, hole...] for a profile, mirroring the
+    dynframe_profiles builders (centred, in mm)."""
+    def rect(bx, hy, cx=0.0, cy=0.0):
+        hb, hh = bx / 2.0, hy / 2.0
+        return [(cx - hb, cy - hh), (cx + hb, cy - hh),
+                (cx + hb, cy + hh), (cx - hb, cy + hh)]
+
+    def recentre(pts):
+        xs = [p[0] for p in pts]; ys = [p[1] for p in pts]
+        ox = (min(xs) + max(xs)) / 2.0; oy = (min(ys) + max(ys)) / 2.0
+        return [(x - ox, y - oy) for (x, y) in pts]
+
+    if kind == "I":
+        h, b, tw, tf = d["h"], d["b"], d["tw"], d["tf"]
+        x1, xw = b / 2.0, tw / 2.0; y1, yf = h / 2.0, h / 2.0 - tf
+        return [[(-x1, -y1), (x1, -y1), (x1, -yf), (xw, -yf), (xw, yf), (x1, yf),
+                 (x1, y1), (-x1, y1), (-x1, yf), (-xw, yf), (-xw, -yf), (-x1, -yf)]]
+    if kind == "U":
+        h, b, tw, tf = d["h"], d["b"], d["tw"], d["tf"]
+        return [recentre([(0, 0), (b, 0), (b, tf), (tw, tf),
+                          (tw, h - tf), (b, h - tf), (b, h), (0, h)])]
+    if kind == "L":
+        a, b, t = d["a"], d["b"], d["t"]
+        return [recentre([(0, 0), (a, 0), (a, t), (t, t), (t, b), (0, b)])]
+    if kind == "T":
+        h, b, t = d["h"], d["b"], d["t"]; cx = b / 2.0
+        return [recentre([(cx - t / 2.0, 0), (cx + t / 2.0, 0), (cx + t / 2.0, h - t),
+                         (b, h - t), (b, h), (0, h), (0, h - t), (cx - t / 2.0, h - t)])]
+    if kind == "box":
+        b, h, t = d["b"], d["h"], d["t"]
+        return [rect(b, h), rect(b - 2 * t, h - 2 * t)]
+    if kind == "flat":
+        return [rect(d["b"], d["t"])]
+    return None
+
+
+def _torsion_warp(kind, d):
+    """St-Venant torsion constant It and warping constant Iw (mm^4, mm^6)."""
+    if kind in ("I", "U"):
+        h, b, tw, tf = d["h"], d["b"], d["tw"], d["tf"]
+        It = (2.0 * b * tf ** 3 + (h - 2.0 * tf) * tw ** 3) / 3.0
+        Iw = tf * b ** 3 * (h - tf) ** 2 / 24.0
+        return It, Iw
+    if kind == "box":
+        b, h, t = d["b"], d["h"], d["t"]
+        bm, hm = b - t, h - t
+        return 2.0 * t * bm ** 2 * hm ** 2 / (bm + hm), 0.0
+    if kind == "CHS":
+        D, t = d["d"], d["t"]; di = D - 2.0 * t
+        import math
+        return math.pi / 32.0 * (D ** 4 - di ** 4), 0.0
+    if kind == "round":
+        import math
+        return math.pi / 32.0 * d["d"] ** 4, 0.0
+    if kind == "L":
+        return (d["a"] + d["b"]) * d["t"] ** 3 / 3.0, 0.0
+    if kind == "T":
+        return (d["b"] + d["h"] - d["t"]) * d["t"] ** 3 / 3.0, 0.0
+    if kind == "flat":
+        return d["b"] * d["t"] ** 3 / 3.0, 0.0
+    return 0.0, 0.0
+
+
+_SECTION_DB_CACHE = {}
+
+
+def _section_db(name):
+    """Full analytic section database for a profile name:
+    A, Iy, Iz, Wel_y, Wel_z, Wpl_y, Wpl_z, iy, iz, It, Iw, hx, hy, plus the
+    raw dimensions (keys '_h', '_b', ...), 'kind', 'hb' and 'dt'. Returns
+    None for names not in the profile library (caller falls back to the face).
+    Iy/Iz follow the face convention (Iz = about face-X/depth, Iy = about
+    face-Y/width)."""
+    if name in _SECTION_DB_CACHE:
+        return _SECTION_DB_CACHE[name]
+    import math
+    info_ = None
+    try:
+        import dynframe_profiles as _P
+        info_ = _P.dims_for(name)
+    except Exception:
+        info_ = None
+    db = None
+    if info_ is not None:
+        kind, d = info_
+        db = {"kind": kind}
+        if kind in ("CHS", "round"):
+            if kind == "CHS":
+                D, t = d["d"], d["t"]; di = D - 2.0 * t
+                A = math.pi / 4.0 * (D * D - di * di)
+                I = math.pi / 64.0 * (D ** 4 - di ** 4)
+                Wpl = (D ** 3 - di ** 3) / 6.0
+                db["dt"] = D / t
+            else:
+                D = d["d"]
+                A = math.pi / 4.0 * D * D
+                I = math.pi / 64.0 * D ** 4
+                Wpl = D ** 3 / 6.0
+                db["dt"] = 1.0
+            Wel = I / (D / 2.0)
+            db.update(A=A, Iy=I, Iz=I, Wel_y=Wel, Wel_z=Wel,
+                      Wpl_y=Wpl, Wpl_z=Wpl, hx=D, hy=D)
+        else:
+            contours = _poly_for(kind, d)
+            A, cx, cy, Ixx, Iyy = _region_props(contours)
+            contours = [[(x - cx, y - cy) for (x, y) in c] for c in contours]
+            xs = [p[0] for c in contours for p in c]
+            ys = [p[1] for c in contours for p in c]
+            hx = max(xs) - min(xs); hy = max(ys) - min(ys)
+            db.update(A=A, Iz=Ixx, Iy=Iyy,
+                      Wel_z=Ixx / (hy / 2.0), Wel_y=Iyy / (hx / 2.0),
+                      Wpl_z=_plastic_modulus(contours, A, min(ys), max(ys), 1),
+                      Wpl_y=_plastic_modulus(contours, A, min(xs), max(xs), 0),
+                      hx=hx, hy=hy)
+            db["dt"] = 1.0
+        It, Iw = _torsion_warp(kind, d)
+        db["It"] = It; db["Iw"] = Iw
+        db["iy"] = (db["Iy"] / db["A"]) ** 0.5 if db["A"] > 1e-9 else 0.0
+        db["iz"] = (db["Iz"] / db["A"]) ** 0.5 if db["A"] > 1e-9 else 0.0
+        for k, v in d.items():
+            db["_" + k] = v
+        db["hb"] = (d.get("h", 1.0) / d.get("b", 1.0)) if kind in ("I", "U") else 1.0
+    _SECTION_DB_CACHE[name] = db
+    return db
+
+
 def _chi_buckling(lam, alpha):
     """EC3 flexural-buckling reduction factor chi for non-dimensional
     slenderness `lam` and imperfection factor `alpha` (curve a=0.21, b=0.34,
@@ -2013,6 +2239,191 @@ def _chi_buckling(lam, alpha):
     phi = 0.5 * (1.0 + alpha * (lam - 0.2) + lam * lam)
     chi = 1.0 / (phi + (phi * phi - lam * lam) ** 0.5)
     return min(chi, 1.0)
+
+
+# ── full EN 1993-1-1 steel checks: classification, LTB, interaction ──
+_ALPHA_CURVE = {"a": 0.21, "b": 0.34, "c": 0.49, "d": 0.76}
+
+
+def _buckling_curves(db):
+    """Flexural-buckling curves (major axis, minor axis) per EN 1993-1-1
+    Table 6.2, chosen automatically from the section type — the way Robot
+    assigns them. 'major'/'minor' are the strong/weak principal axes."""
+    kind = db["kind"]
+    if kind == "I":
+        hb = db.get("hb", 1.0); tf = db.get("_tf", 10.0)
+        if hb > 1.2:
+            return ("a", "b") if tf <= 40.0 else ("b", "c")
+        return ("b", "c") if tf <= 100.0 else ("d", "d")
+    if kind in ("box", "CHS"):
+        return ("a", "a")            # hot-finished hollow sections
+    return ("c", "c")                # channels, tees, angles, solids
+
+
+def _classify(db, fy, N, Mmaj):
+    """EN 1993-1-1 Table 5.2 cross-section class (1..4) under axial force N
+    (N<0 = compression) and major-axis moment Mmaj. Returns (class, detail)."""
+    eps = (235.0 / fy) ** 0.5
+    kind = db["kind"]; A = db["A"]; comp = max(0.0, -N)
+    if kind == "CHS":
+        dt = db["dt"]
+        for c, lim in ((1, 50 * eps * eps), (2, 70 * eps * eps), (3, 90 * eps * eps)):
+            if dt <= lim:
+                return c, "CHS d/t=%.0f cl%d" % (dt, c)
+        return 4, "CHS d/t=%.0f slender" % dt
+    if kind == "round":
+        return 1, "solid round"
+    if kind == "L":
+        a, b, t = db["_a"], db["_b"], db["_t"]
+        if max(a, b) / t <= 15 * eps and (a + b) / (2 * t) <= 11.5 * eps:
+            return 3, "angle cl3"
+        return 4, "angle slender"
+    if kind == "flat":
+        return 1, "flat bar"
+    # flange + web (I, channel, tee, box)
+    if kind == "I":
+        h, b, tw, tf = db["_h"], db["_b"], db["_tw"], db["_tf"]
+        cf = (b - tw) / 2.0; tfl = tf; cw = h - 2 * tf; twe = tw; internal = False
+    elif kind == "U":
+        h, b, tw, tf = db["_h"], db["_b"], db["_tw"], db["_tf"]
+        cf = b - tw; tfl = tf; cw = h - 2 * tf; twe = tw; internal = False
+    elif kind == "T":
+        h, b, t = db["_h"], db["_b"], db["_t"]
+        cf = (b - t) / 2.0; tfl = t; cw = h - t; twe = t; internal = False
+    else:                                   # box
+        b, h, t = db["_b"], db["_h"], db["_t"]
+        cf = b - 2 * t; tfl = t; cw = h - 2 * t; twe = t; internal = True
+    fl_lims = (33 * eps, 38 * eps, 42 * eps) if internal else (9 * eps, 10 * eps, 14 * eps)
+    rf = cf / tfl
+    cls_f = 4
+    for c, lim in enumerate(fl_lims, 1):
+        if rf <= lim:
+            cls_f = c; break
+    # web under N + bending: general alpha (plastic) / psi (elastic)
+    rw = cw / twe
+    a_shift = comp / (2.0 * fy * twe) if twe > 0 else 0.0
+    alpha = min(1.0, max(0.0, 0.5 + a_shift / cw)) if cw > 0 else 1.0
+    if alpha > 0.5:
+        l1 = 396 * eps / (13 * alpha - 1); l2 = 456 * eps / (13 * alpha - 1)
+    else:
+        l1 = 36 * eps / max(alpha, 1e-6); l2 = 41.5 * eps / max(alpha, 1e-6)
+    Wz = db["Wel_z"] if db["Iz"] >= db["Iy"] else db["Wel_y"]
+    sig_ax = N / A
+    sig_b = abs(Mmaj) / Wz if Wz > 0 else 0.0
+    s1 = sig_ax - sig_b
+    psi = max(-3.0, min(1.0, (sig_ax + sig_b) / s1)) if abs(s1) > 1e-9 else -1.0
+    if psi > -1:
+        l3 = 42 * eps / (0.67 + 0.33 * psi)
+    else:
+        l3 = 62 * eps * (1 - psi) * (-psi) ** 0.5
+    cls_w = 4
+    for c, lim in ((1, l1), (2, l2), (3, l3)):
+        if rw <= lim:
+            cls_w = c; break
+    cls = max(cls_f, cls_w)
+    return cls, "flange c/t=%.1f(cl%d) web c/t=%.1f(cl%d)" % (rf, cls_f, rw, cls_w)
+
+
+def _mcr(db, E, G, L, C1):
+    """Elastic critical moment for major-axis lateral-torsional buckling
+    (fork supports, no load eccentricity). None for sections not susceptible
+    to LTB (hollow/round)."""
+    import math
+    if db["kind"] in ("box", "CHS", "round"):
+        return None
+    Imin = min(db["Iz"], db["Iy"])
+    if Imin <= 0 or L <= 0:
+        return None
+    t1 = math.pi ** 2 * E * Imin / L ** 2
+    inside = db["Iw"] / Imin + L ** 2 * G * db["It"] / (math.pi ** 2 * E * Imin)
+    return C1 * t1 * inside ** 0.5
+
+
+def _chi_lt(lam_lt, hb):
+    """LTB reduction factor, EN 1993-1-1 6.3.2.3 (rolled/equivalent welded):
+    lam_LT,0=0.4, beta=0.75, curve b (h/b<=2) or c."""
+    if lam_lt <= 0.4:
+        return 1.0
+    alt = 0.34 if hb <= 2.0 else 0.49
+    phi = 0.5 * (1.0 + alt * (lam_lt - 0.4) + 0.75 * lam_lt ** 2)
+    v = phi * phi - 0.75 * lam_lt ** 2
+    chilt = 1.0 / (phi + v ** 0.5) if v > 0 else 1.0 / phi
+    return min(chilt, 1.0, 1.0 / lam_lt ** 2)
+
+
+def _ec3_member_check(db, fy, E, G, N, My, Mz, Lcr_maj, Lcr_min, Lltb,
+                      C1, Cmy, Cmz, CmLT, gM0, gM1):
+    """Full EN 1993-1-1 member verification. My/Mz are the stored moments
+    about the section's local y/z (Iy/Iz) axes; the major axis is the larger-I
+    one. Returns a dict of class, resistances, reduction factors and the
+    governing utilisation from the 6.2 section check and the 6.3.3 (Annex B)
+    interaction equations 6.61/6.62."""
+    import math
+    maj_is_z = db["Iz"] >= db["Iy"]
+    Imaj = max(db["Iz"], db["Iy"]); Imin = min(db["Iz"], db["Iy"])
+    Mmaj = Mz if maj_is_z else My
+    Mmin = My if maj_is_z else Mz
+    Wpl_maj = db["Wpl_z"] if maj_is_z else db["Wpl_y"]
+    Wel_maj = db["Wel_z"] if maj_is_z else db["Wel_y"]
+    Wpl_min = db["Wpl_y"] if maj_is_z else db["Wpl_z"]
+    Wel_min = db["Wel_y"] if maj_is_z else db["Wel_z"]
+    cls, cdetail = _classify(db, fy, N, Mmaj)
+    plastic = cls <= 2
+    Wy = Wpl_maj if plastic else Wel_maj
+    Wz = Wpl_min if plastic else Wel_min
+    A = db["A"]; comp = max(0.0, -N)
+
+    NRk = A * fy; MyRk = Wy * fy; MzRk = Wz * fy
+    NcRd = A * fy / gM0
+    McyRd0 = Wy * fy / gM0; MczRd0 = Wz * fy / gM0
+    # 6.2 cross-section resistance (linear interaction, conservative)
+    U_sec = abs(N) / NcRd + (abs(Mmaj) / McyRd0 if McyRd0 > 0 else 0.0) \
+        + (abs(Mmin) / MczRd0 if MczRd0 > 0 else 0.0)
+
+    cmaj, cmin = _buckling_curves(db)
+    chiy = chiz = chiLT = 1.0
+    lam_maj = lam_min = lam_lt = 0.0
+    if comp > 1e-9:
+        Ncr_maj = math.pi ** 2 * E * Imaj / Lcr_maj ** 2 if Lcr_maj > 0 else 1e30
+        Ncr_min = math.pi ** 2 * E * Imin / Lcr_min ** 2 if Lcr_min > 0 else 1e30
+        lam_maj = (NRk / Ncr_maj) ** 0.5
+        lam_min = (NRk / Ncr_min) ** 0.5
+        chiy = _chi_buckling(lam_maj, _ALPHA_CURVE[cmaj])
+        chiz = _chi_buckling(lam_min, _ALPHA_CURVE[cmin])
+    Mc = _mcr(db, E, G, Lltb, C1)
+    if Mc is not None and Mc > 0:
+        lam_lt = (Wy * fy / Mc) ** 0.5
+        chiLT = _chi_lt(lam_lt, db.get("hb", 2.0))
+    NbyRd = chiy * NRk / gM1; NbzRd = chiz * NRk / gM1
+    MbRd = chiLT * Wy * fy / gM1
+    MczRd1 = Wz * fy / gM1
+
+    # Annex B interaction factors
+    susceptible = db["kind"] in ("I", "U", "T")
+    nY = comp / NbyRd if NbyRd > 0 else 0.0
+    nZ = comp / NbzRd if NbzRd > 0 else 0.0
+    kyy = min(Cmy * (1 + (lam_maj - 0.2) * nY), Cmy * (1 + 0.8 * nY))
+    kzz = min(Cmz * (1 + (2 * lam_min - 0.6) * nZ), Cmz * (1 + 1.4 * nZ))
+    kyz = 0.6 * kzz
+    if susceptible:
+        denom = max(CmLT - 0.25, 1e-3)
+        kzy = max(1 - (0.1 * lam_min * nZ) / denom, 1 - (0.1 * nZ) / denom)
+        if lam_min < 0.4:
+            kzy = min(0.6 + lam_min, 1 - (0.1 * lam_min * nZ) / denom)
+    else:
+        kzy = 0.6 * kyy
+
+    tMy = abs(Mmaj) / MbRd if MbRd > 0 else 0.0
+    tMz = abs(Mmin) / MczRd1 if MczRd1 > 0 else 0.0
+    U61 = (comp / NbyRd if NbyRd > 0 else 0.0) + kyy * tMy + kyz * tMz
+    U62 = (comp / NbzRd if NbzRd > 0 else 0.0) + kzy * tMy + kzz * tMz
+    U = max(U_sec, U61, U62)
+    gov = "Section" if U == U_sec else ("Eq.6.61" if U == U61 else "Eq.6.62")
+    return {"cls": cls, "cdetail": cdetail, "plastic": plastic, "Mmaj": Mmaj,
+            "Mmin": Mmin, "U_sec": U_sec, "U61": U61, "U62": U62, "U": U,
+            "gov": gov, "chiy": chiy, "chiz": chiz, "chiLT": chiLT,
+            "lam_lt": lam_lt, "Mcr": Mc, "NcRd": NcRd, "McyRd": McyRd0,
+            "MbRd": MbRd, "curves": (cmaj, cmin)}
 
 
 # ── materials (name -> E, G, Fy, density) in N/mm^2 and kg/mm^3 ──────
@@ -3836,74 +4247,68 @@ class ResponseSpectrum:
 class CodeCheck:
     def GetResources(self):
         return {"Pixmap": _icon("check"), "MenuText": "Steel Code Check (EC3)",
-                "ToolTip": "Verify steel members to EN 1993-1-1 (simplified): "
-                           "cross-section resistance, flexural buckling and lateral-"
-                           "torsional buckling -> utilisation and pass/fail. Run "
-                           "Calculate first.", "Accel": "A, K"}
+                "ToolTip": "Verify steel members to EN 1993-1-1: automatic cross-"
+                           "section classification (Class 1-4), plastic or elastic "
+                           "resistance, flexural buckling (auto curve), lateral-"
+                           "torsional buckling via Mcr, and the Annex-B beam-column "
+                           "interaction -> utilisation and pass/fail. Run Calculate "
+                           "(or Envelope) first.", "Accel": "A, K"}
 
     def IsActive(self):
         return FreeCAD.ActiveDocument is not None
 
+    # moment-distribution presets -> (C1 for LTB, Cm for interaction)
+    _SHAPES = {"Uniform (conservative)": (1.0, 1.0),
+               "Parabolic / UDL": (1.13, 0.95),
+               "Triangular / linear": (1.77, 0.60)}
+
     def Activated(self):
-        import math
         doc = FreeCAD.ActiveDocument
         bars = [o for o in doc.Objects if is_analysis_elem(o) and hasattr(o, "ResN")]
         if not bars:
             info("Run Calculate first - the code check uses the latest member "
                  "forces (N, My, Mz) from the analysis.")
             return
-        vals = form_dialog("Steel Code Check (EC3, simplified)", [
+        vals = form_dialog("Steel Code Check (EN 1993-1-1)", [
             {"key": "_i", "kind": "info", "default":
-             "Verifies the members against EN 1993-1-1 using the latest analysis "
-             "forces. Conservative simplified method."},
-            {"key": "gm", "label": "gamma_M1", "kind": "float", "default": 1.0},
-            {"key": "kcr", "label": "Buckling length factor K", "kind": "float", "default": 1.0},
-            {"key": "curve", "label": "Buckling curve", "kind": "combo",
-             "options": ["a", "b", "c", "d"], "default": "b"},
-            {"key": "ltb", "label": "Compression flange restrained?", "kind": "combo",
-             "options": ["Yes", "No"], "default": "Yes"},
+             "Full EC3 member check on the latest analysis forces: automatic "
+             "section classification, plastic/elastic resistance, flexural + "
+             "lateral-torsional buckling and the Annex-B interaction. Buckling "
+             "curves are assigned automatically from the section type."},
+            {"key": "gm0", "label": "gamma_M0", "kind": "float", "default": 1.0},
+            {"key": "gm1", "label": "gamma_M1", "kind": "float", "default": 1.0},
+            {"key": "ky", "label": "Buckling length factor, major axis", "kind": "float", "default": 1.0},
+            {"key": "kz", "label": "Buckling length factor, minor axis", "kind": "float", "default": 1.0},
+            {"key": "klt", "label": "LTB length factor (restraint spacing / L)", "kind": "float", "default": 1.0},
+            {"key": "shape", "label": "Moment distribution", "kind": "combo",
+             "options": list(self._SHAPES.keys()), "default": "Uniform (conservative)"},
         ])
         if not vals:
             return
-        acurve = {"a": 0.21, "b": 0.34, "c": 0.49, "d": 0.76}
-        alpha = acurve[vals["curve"]]
-        K = max(vals["kcr"], 1e-6); gM = max(vals["gm"], 1e-6)
-        restrained = (vals["ltb"] == "Yes")
-        rows = []; worst = 0.0; worstbar = "-"
+        gM0 = max(vals["gm0"], 1e-6); gM1 = max(vals["gm1"], 1e-6)
+        ky = max(vals["ky"], 1e-6); kz = max(vals["kz"], 1e-6)
+        klt = max(vals["klt"], 1e-6)
+        C1, Cm = self._SHAPES.get(vals["shape"], (1.0, 1.0))
+        rows = []; worst = 0.0; worstbar = "-"; skipped = 0; cls4 = 0
         doc.openTransaction("DynFrame: code check")
         for o in bars:
-            sp = _section_props_full(_elem_section(o))
-            if sp is None:
-                continue
-            A, Iy, Iz, Wel_y, Wel_z, iy, iz, hx, hy = sp
+            db = _section_db(_elem_section(o))
             E, Gm, Fy, rho = _material(_elem_material(o))
+            if db is None:
+                skipped += 1
+                continue
             N = getattr(o, "ResN", 0.0)
-            My = abs(getattr(o, "ResMy", 0.0)); Mz = abs(getattr(o, "ResMz", 0.0))
-            L = getattr(o, "ResL", 1000.0); Lcr = K * L
-            NRd = A * Fy / gM
-            McyRd = Wel_y * Fy / gM; MczRd = Wel_z * Fy / gM
-            # cross-section (conservative linear interaction)
-            U = abs(N) / NRd + (My / McyRd if McyRd > 1e-9 else 0.0) \
-                + (Mz / MczRd if MczRd > 1e-9 else 0.0)
-            gov = "Section"
-            if N < -1e-6:                       # compression -> stability
-                Ncry = math.pi ** 2 * E * Iy / Lcr ** 2
-                Ncrz = math.pi ** 2 * E * Iz / Lcr ** 2
-                lamy = (A * Fy / Ncry) ** 0.5 if Ncry > 1e-9 else 99.0
-                lamz = (A * Fy / Ncrz) ** 0.5 if Ncrz > 1e-9 else 99.0
-                chi = min(_chi_buckling(lamy, alpha), _chi_buckling(lamz, alpha))
-                NbRd = chi * A * Fy / gM
-                chiLT = 1.0 if restrained else _chi_buckling(lamz, alpha)
-                MbRd = chiLT * McyRd
-                nc = abs(N)
-                kyy = 1.0 / max(1e-3, 1.0 - nc / Ncry) if Ncry > nc else 1e3
-                kzz = 1.0 / max(1e-3, 1.0 - nc / Ncrz) if Ncrz > nc else 1e3
-                Ub = nc / NbRd + (kyy * My / MbRd if MbRd > 1e-9 else 0.0) \
-                    + (kzz * Mz / MczRd if MczRd > 1e-9 else 0.0)
-                if Ub > U:
-                    U = Ub; gov = "Buckling"
+            My = getattr(o, "ResMy", 0.0); Mz = getattr(o, "ResMz", 0.0)
+            L = getattr(o, "ResL", 1000.0)
+            r = _ec3_member_check(db, Fy, E, Gm, N, My, Mz, ky * L, kz * L,
+                                  klt * L, C1, Cm, Cm, Cm, gM0, gM1)
+            U = r["U"]
+            if r["cls"] >= 4:
+                cls4 += 1
             verdict = "OK" if U <= 1.0 else "FAIL"
-            rows.append((str(o.Label), _elem_section(o), N, My, Mz, U, gov, verdict))
+            rows.append((str(o.Label), _elem_section(o), r["cls"], N / 1e3,
+                         r["Mmaj"] / 1e6, r["Mmin"] / 1e6, r["chiLT"],
+                         r["U61"], r["U62"], U, r["gov"], verdict))
             if U > worst:
                 worst = U; worstbar = str(o.Label)
             try:
@@ -3915,30 +4320,42 @@ class CodeCheck:
         try:
             sh = doc.getObject("CodeCheck") or doc.addObject("Spreadsheet::Sheet", "CodeCheck")
             sh.Label = "CodeCheck"; sh.clearAll()
-            sh.set("A1", "STEEL CODE CHECK (EN 1993-1-1, simplified) - gammaM1=%.2f, curve %s"
-                   % (gM, vals["curve"]))
-            for c, h in zip("ABCDEFGH", ["Member", "Section", "N (N)", "My (N.mm)",
-                                         "Mz (N.mm)", "Utilisation", "Governs", "Verdict"]):
+            sh.set("A1", "STEEL CODE CHECK (EN 1993-1-1) - gammaM0=%.2f gammaM1=%.2f, "
+                   "moment shape: %s (C1=%.2f, Cm=%.2f)" % (gM0, gM1, vals["shape"], C1, Cm))
+            heads = ["Member", "Section", "Class", "N (kN)", "My,maj (kNm)",
+                     "Mz,min (kNm)", "chi_LT", "U (6.61)", "U (6.62)",
+                     "U (gov)", "Governs", "Verdict"]
+            for c, h in zip("ABCDEFGHIJKL", heads):
                 sh.set("%s2" % c, h)
-            r = 3
+            rr = 3
             for row in rows:
-                for c, v in zip("ABCDEFGH", row):
-                    sh.set("%s%d" % (c, r), ("%.4g" % v if isinstance(v, float) else str(v)))
-                r += 1
+                for c, v in zip("ABCDEFGHIJKL", row):
+                    sh.set("%s%d" % (c, rr), ("%.4g" % v if isinstance(v, float) else str(v)))
+                rr += 1
             _grp(doc, RES_GROUP).addObject(sh)
         except Exception as e:
             FreeCAD.Console.PrintError("DynFrame: code-check table failed (%s)\n" % e)
         doc.commitTransaction(); doc.recompute()
-        info("Steel code check complete (EC3, simplified).\n\n"
-             "Members checked: %d\nMax utilisation: %.2f  (on %s)\n"
-             "Overall: %s\n\nMembers are coloured green->red by utilisation; full "
-             "results in the 'CodeCheck' table.\n\nChecks: cross-section (N+My+Mz), "
-             "flexural buckling (both axes), and%s lateral-torsional buckling. "
-             "Conservative simplified EN 1993-1-1; not a substitute for a full "
-             "code check." %
-             (len(rows), worst, worstbar, "PASS" if worst <= 1.0 else
-              "FAIL - over-stressed members",
-              "" if not restrained else " (restrained, no)"))
+        notes = ""
+        if skipped:
+            notes += ("\n%d member(s) skipped (non-steel material or section not "
+                      "in the library)." % skipped)
+        if cls4:
+            notes += ("\n%d Class-4 member(s): checked on gross elastic properties "
+                      "(effective-section reduction not applied - treat as "
+                      "indicative and verify separately)." % cls4)
+        info("Steel code check complete (EN 1993-1-1).\n\n"
+             "Members checked: %d\nMax utilisation: %.2f  (on %s)\nOverall: %s\n\n"
+             "Each member is classified (Class 1-4) and checked for cross-section "
+             "resistance, flexural buckling (curve chosen automatically from the "
+             "section), lateral-torsional buckling via the elastic critical moment "
+             "Mcr, and the Annex-B interaction equations 6.61/6.62. Members are "
+             "coloured green->red by utilisation; the 'CodeCheck' table lists class, "
+             "chi_LT and both interaction utilisations.%s\n\nSection properties use "
+             "the idealised (sharp-corner) profile, so the torsion constant is "
+             "marginally conservative versus a rolled section with root fillets." %
+             (len(rows), worst, worstbar,
+              "PASS" if worst <= 1.0 else "FAIL - over-stressed members", notes))
 
 
 class Envelope:

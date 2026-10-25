@@ -114,11 +114,20 @@ model is what you analyse. Commands are on the toolbars/menus
   worst axial / My / Mz / utilisation per member (the design envelope),
   colours members by it, and stores the governing forces so the code check
   runs against the envelope.
-- **Steel Code Check (EC3)** — verifies steel members to EN 1993-1-1
-  (simplified, user γ-factors): cross-section resistance, flexural buckling
-  (both axes, curve a–d), the N+M interaction, and lateral-torsional
-  buckling → utilisation, governing check and OK/FAIL per member, coloured
-  green→red, in a `CodeCheck` table.
+- **Steel Code Check (EC3)** — a full EN 1993-1-1 member verification, the
+  way Robot does it: each member is **classified** (Class 1–4) from its own
+  flange/web slenderness under the actual axial force and moment; the bending
+  resistance then uses the **plastic** modulus Wpl (Class 1/2) or **elastic**
+  Wel (Class 3). It checks cross-section resistance, **flexural buckling** with
+  the buckling curve chosen **automatically** from the section type (EC3
+  Table 6.2), **lateral-torsional buckling** through the elastic critical
+  moment **Mcr** (from the section's torsion It and warping Iw constants), and
+  the **Annex-B beam-column interaction** (equations 6.61 and 6.62). You set
+  γ_M0 / γ_M1, the buckling-length factors for each axis and the LTB restraint
+  spacing, and pick the moment distribution (which sets the C1 / Cm factors).
+  The `CodeCheck` table lists the class, χ_LT and both interaction
+  utilisations per member, with the governing check and OK/FAIL, and members
+  are coloured green→red by utilisation.
 - **Modal Analysis** — natural frequencies and mode shapes (consistent-mass
   eigenvalue analysis, each bar meshed into sub-elements); first *N*
   frequencies in a `ModalFrequencies` table, Mode 1 drawn as a mode-shape
@@ -149,13 +158,18 @@ model is what you analyse. Commands are on the toolbars/menus
 > superposition; **releases** reproduce the propped cantilever (wL²/8);
 > **modal** matches the cantilever f₁ = (1.875²/2π)·√(EI/ρAL⁴) to four
 > figures; **buckling** matches the Euler load Pcr = π²EI/(2L)² (ratio
-> 1.000); the **EC3** buckling reduction factors match the code tables and
-> a worked column check (χ = 0.441, Nb,Rd = 558 kN); **P-Δ** reproduces the
-> 1/(1−P/Pcr) amplification; **seismic** effective modal masses sum to 100 %
-> of the total mass. It covers **static, P-Δ, modal, buckling, seismic
-> (response-spectrum) and design checks**; a full (non-simplified) code
-> check and plates/shells are later phases. FreeCAD is not Robot — this
-> reproduces Robot's *workflow and core engineering* on its kernel.
+> 1.000); the **section-property engine** reproduces the published section
+> tables (IPE 300: A, I, Wel, Wpl, It, Iw; a solid rectangle gives the exact
+> Wpl/Wel = 1.5 shape factor); the **full EC3 check** classifies IPE 300 as
+> Class 1 in bending, uses the plastic modulus accordingly, matches the code
+> buckling curves and a worked column check (χ_z = 0.452, Nb,z = 551 kN,
+> U = 0.73) and reproduces the LTB reduction (χ_LT ≈ 0.52 for a long
+> unrestrained span); **P-Δ** reproduces the 1/(1−P/Pcr) amplification;
+> **seismic** effective modal masses sum to 100 % of the total mass. It
+> covers **static, P-Δ, modal, buckling, seismic (response-spectrum) and a
+> full EN 1993-1-1 design check**; plate/shell (2D) elements are a later
+> phase. FreeCAD is not Robot — this reproduces Robot's *workflow and core
+> engineering* on its kernel.
 
 **Modeling / export / setup**
 - **Quick Fillet** — fillet selected solid edges by a radius.

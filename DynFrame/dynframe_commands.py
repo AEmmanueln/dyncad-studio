@@ -2679,6 +2679,26 @@ def _material(name):
     return MATERIALS.get(name, MATERIALS[DEFAULT_MAT])
 
 
+# coefficient of thermal expansion (per deg C)
+MAT_ALPHA = {"Steel S235": 1.2e-5, "Steel S275": 1.2e-5, "Steel S355": 1.2e-5,
+             "Stainless 304": 1.6e-5, "Aluminium 6061-T6": 2.3e-5}
+
+
+def _mat_alpha(name):
+    return MAT_ALPHA.get(name, 1.2e-5)
+
+
+def _fef_thermal_local(EA, alpha, dT, L):
+    """Fixed-end force vector for a uniform temperature change dT on a bar
+    (axial only). A fully-restrained heated bar develops N = -E A alpha dT
+    (compression); validated against that closed form."""
+    import numpy as np
+    f = np.zeros(12)
+    N0 = EA * alpha * dT
+    f[0] = -N0; f[6] = N0
+    return f
+
+
 # EN 1998-1 (EC8) Type-1 elastic-spectrum soil parameters: (S, TB, TC, TD)
 EC8_SOILS = {"A": (1.0, 0.15, 0.4, 2.0), "B": (1.2, 0.15, 0.5, 2.0),
              "C": (1.15, 0.20, 0.6, 2.0), "D": (1.35, 0.20, 0.8, 2.0),
@@ -3251,6 +3271,35 @@ def _apply_support(doc, type_label, pts):
     return len(pts)
 
 
+def _apply_spring_support(doc, springs, pts):
+    """Elastic (spring) support: adds stiffness springs to the node DOFs
+    instead of rigidly fixing them (foundation / soil modelling). `springs` is
+    a list of 6 stiffnesses [Kx,Ky,Kz (N/mm), Krx,Kry,Krz (N.mm/rad)]."""
+    import json
+    grp = _grp(doc, SUP_GROUP)
+    objs, _k = _analysis_objs(doc)
+    sz = _model_size(objs) * 0.02 + 20.0
+    for p in pts:
+        p = FreeCAD.Vector(p)
+        # little coil-like glyph: a cone plus a few rings would be heavy; use a
+        # cone in a distinct colour to mark an elastic support
+        cone = Part.makeCone(sz, sz * 0.4, sz * 2.0,
+                             FreeCAD.Vector(p.x, p.y, p.z - sz * 2.0),
+                             FreeCAD.Vector(0, 0, 1))
+        o = doc.addObject("Part::Feature", "SpringSupport")
+        o.Shape = cone
+        o.Label = "Elastic support (spring)"
+        _set(o, "App::PropertyString", "Restrain", "000000")
+        _set(o, "App::PropertyString", "Springs", json.dumps([float(s) for s in springs]))
+        _set(o, "App::PropertyVector", "AtNode", p)
+        try:
+            o.ViewObject.ShapeColor = (0.1, 0.8, 0.9)
+        except Exception:
+            pass
+        grp.addObject(o)
+    return len(pts)
+
+
 def _apply_nodal(doc, case, fvec, pts, mvec=None):
     grp = _grp(doc, LOAD_GROUP)
     objs, _k = _analysis_objs(doc)
@@ -3386,6 +3435,29 @@ def _apply_trap(doc, case, w1vec, w2vec, elems):
     return len(elems)
 
 
+def _apply_thermal(doc, case, dT, elems):
+    """Uniform temperature change dT (deg C) on each selected bar."""
+    grp = _grp(doc, LOAD_GROUP)
+    for m in elems:
+        s, e = _elem_ends(m)
+        o = doc.addObject("Part::Feature", "ThermalLoad")
+        try:
+            o.Shape = Part.makeLine(FreeCAD.Vector(s), FreeCAD.Vector(e))
+        except Exception:
+            pass
+        o.Label = "%s: dT=%.3g C on %s" % (case, dT, m.Label)
+        _set(o, "App::PropertyString", "LoadType", "Thermal")
+        _set(o, "App::PropertyString", "LoadCase", case)
+        _set(o, "App::PropertyString", "OnMember", m.Name)
+        _set(o, "App::PropertyFloat", "DeltaT", float(dT))
+        try:
+            o.ViewObject.LineColor = (1.0, 0.25, 0.0); o.ViewObject.LineWidth = 5
+        except Exception:
+            pass
+        grp.addObject(o)
+    return len(elems)
+
+
 class DefineSupport:
     def GetResources(self):
         return {"Pixmap": _icon("support"), "MenuText": "Define Support",
@@ -3402,11 +3474,34 @@ class DefineSupport:
             info("Select one or more joint vertices (a bar end point), then run "
                  "Define Support.")
             return
-        t, ok = get_item("Define Support", "Support type:",
-                         list(SUPPORT_TYPES.keys()), 0)
+        opts = list(SUPPORT_TYPES.keys()) + ["Elastic (spring)…"]
+        t, ok = get_item("Define Support", "Support type:", opts, 0)
         if not ok:
             return
         doc = FreeCAD.ActiveDocument
+        if t.startswith("Elastic"):
+            vals = form_dialog("Elastic (spring) support", [
+                {"key": "_i", "kind": "info", "default":
+                 "Spring stiffnesses per node DOF (0 = free). Translational in "
+                 "N/mm, rotational in N.mm/rad. E.g. a soil modulus x tributary "
+                 "area for Kz."},
+                {"key": "kx", "label": "Kx (N/mm)", "kind": "float", "default": 0.0},
+                {"key": "ky", "label": "Ky (N/mm)", "kind": "float", "default": 0.0},
+                {"key": "kz", "label": "Kz (N/mm)", "kind": "float", "default": 1000.0},
+                {"key": "krx", "label": "Krx (N.mm/rad)", "kind": "float", "default": 0.0},
+                {"key": "kry", "label": "Kry (N.mm/rad)", "kind": "float", "default": 0.0},
+                {"key": "krz", "label": "Krz (N.mm/rad)", "kind": "float", "default": 0.0}])
+            if not vals:
+                return
+            springs = [vals["kx"], vals["ky"], vals["kz"],
+                       vals["krx"], vals["kry"], vals["krz"]]
+            if max(abs(s) for s in springs) < 1e-12:
+                info("All spring stiffnesses are zero - nothing applied."); return
+            doc.openTransaction("DynFrame: elastic support")
+            _apply_spring_support(doc, springs, pts)
+            doc.commitTransaction(); doc.recompute()
+            info("Elastic (spring) support applied to %d node(s)." % len(pts))
+            return
         doc.openTransaction("DynFrame: support")
         _apply_support(doc, t, pts)
         doc.commitTransaction()
@@ -3477,23 +3572,32 @@ class AddMemberLoad:
             {"key": "case", "label": "Load case", "kind": "combo",
              "options": cs, "default": cs[-1]},
             {"key": "kind", "label": "Load type", "kind": "combo",
-             "options": ["Uniform (UDL)", "Point load", "Trapezoidal (varying)"],
+             "options": ["Uniform (UDL)", "Point load", "Trapezoidal (varying)",
+                         "Thermal (temperature)"],
              "default": "Uniform (UDL)"},
             {"key": "_i", "kind": "info", "default":
-             "All values are along global Z (+ up / - down). Fill the rows for the "
-             "chosen type: UDL -> w; Point -> P and position; Trapezoidal -> w1, w2."},
+             "Force values are along global Z (+ up / - down). Fill the rows for the "
+             "chosen type: UDL -> w; Point -> P and position; Trapezoidal -> w1, w2; "
+             "Thermal -> dT (uniform temperature change, deg C)."},
             {"key": "w", "label": "UDL  w (N/mm)", "kind": "float", "default": -5.0},
             {"key": "P", "label": "Point  P (N)", "kind": "float", "default": -1000.0},
             {"key": "pos", "label": "Point position (0..1 from start)",
              "kind": "float", "default": 0.5},
             {"key": "w1", "label": "Trapezoid  w1 at start (N/mm)", "kind": "float", "default": 0.0},
             {"key": "w2", "label": "Trapezoid  w2 at end (N/mm)", "kind": "float", "default": -5.0},
+            {"key": "dT", "label": "Thermal  dT (deg C)", "kind": "float", "default": 30.0},
         ])
         if not vals:
             return
         kind = vals["kind"]
         doc.openTransaction("DynFrame: bar load")
-        if kind.startswith("Point"):
+        if kind.startswith("Thermal"):
+            if abs(vals["dT"]) < 1e-9:
+                return
+            _apply_thermal(doc, vals["case"], vals["dT"], elems)
+            msg = ("Temperature change dT=%.3g C added to case '%s' on %d bar(s)."
+                   % (vals["dT"], vals["case"], len(elems)))
+        elif kind.startswith("Point"):
             if abs(vals["P"]) < 1e-9:
                 return
             _apply_point(doc, vals["case"], FreeCAD.Vector(0, 0, vals["P"]),
@@ -3778,6 +3882,7 @@ class RunAnalysis:
             E, G, Fy, rho = _material(_elem_material(o))
             elems.append({"o": o, "n1": n1, "n2": n2, "A": A, "Iy": Iy, "Iz": Iz,
                           "J": J, "c": c, "E": E, "G": G, "Fy": Fy, "rho": rho,
+                          "alpha": _mat_alpha(_elem_material(o)),
                           "sec": sec, "w": FreeCAD.Vector(0, 0, 0)})
         # plates/shells: mesh triangles, share nodes with the bars, store for
         # assembly + stress recovery (validated CST+DKT flat shell)
@@ -3799,7 +3904,7 @@ class RunAnalysis:
             return
         by_obj = {el["o"].Name: el for el in elems}
 
-        fixed = set(); sup_nodes = []
+        fixed = set(); sup_nodes = []; springs = []
         for o in doc.Objects:
             r = getattr(o, "Restrain", None); at = getattr(o, "AtNode", None)
             if r and at is not None:
@@ -3809,9 +3914,17 @@ class RunAnalysis:
                     for k, ch in enumerate(r):
                         if ch == "1":
                             fixed.add(6 * i + k)
-        if not fixed:
+                    spj = getattr(o, "Springs", None)
+                    if spj:
+                        try:
+                            import json as _json
+                            springs.append((i, _json.loads(spj)))
+                        except Exception:
+                            pass
+        if not fixed and not springs:
             err("No supports defined.\n\nSelect base node vertices and run "
-                "'Define Support' (e.g. Fixed or Pinned), then Calculate.")
+                "'Define Support' (Fixed / Pinned / Roller / Elastic spring), "
+                "then Calculate.")
             return
 
         cases = _cases(doc); combos = _combos(doc)
@@ -3850,13 +3963,15 @@ class RunAnalysis:
 
         for o in doc.Objects:
             lt = getattr(o, "LoadType", None)
-            if lt not in ("Member", "MemberPoint", "MemberTrap"):
+            if lt not in ("Member", "MemberPoint", "MemberTrap", "Thermal"):
                 continue
             f = factors.get(getattr(o, "LoadCase", ""), 0.0)
             el = by_obj.get(getattr(o, "OnMember", ""))
             if not f or el is None:
                 continue
-            if lt == "Member":
+            if lt == "Thermal":
+                el["dT"] = el.get("dT", 0.0) + f * float(getattr(o, "DeltaT", 0.0))
+            elif lt == "Member":
                 el["w"] = el["w"] + vscale(FreeCAD.Vector(getattr(o, "LoadVec")), f)
             elif lt == "MemberPoint":
                 P = vscale(FreeCAD.Vector(getattr(o, "LoadVec")), f)
@@ -3901,6 +4016,9 @@ class RunAnalysis:
                 q = w2l - w1l
                 fl = fl + _fef_tri_local(float(q[0]), float(q[1]), float(q[2]), L)
                 el["trap_local"] = (w1l, w2l)
+            if el.get("dT"):          # temperature change -> axial fixed-end force
+                fl = fl + _fef_thermal_local(el["E"] * el["A"], el["alpha"],
+                                             el["dT"], L)
             el["fef"] = fl
             # member end releases (condensation of released local DOFs)
             rel = _bar_releases(el["o"])
@@ -3915,6 +4033,10 @@ class RunAnalysis:
                 for n in ni:
                     dofs += [6 * n + i for i in range(6)]
                 K[np.ix_(dofs, dofs)] += Ke
+        # elastic (spring) supports: add stiffness to the node DOFs
+        for (i, sp) in springs:
+            for k in range(min(6, len(sp))):
+                K[6 * i + k, 6 * i + k] += float(sp[k])
         for o in doc.Objects:
             if getattr(o, "LoadType", None) == "Nodal":
                 f = factors.get(getattr(o, "LoadCase", ""), 0.0)

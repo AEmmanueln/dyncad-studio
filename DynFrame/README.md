@@ -167,6 +167,15 @@ model is what you analyse. Commands are on the toolbars/menus
   per-mode period / modal mass % / spectral acceleration / base shear, the
   **SRSS base shear**, and the SRSS seismic displacement shape (warns if
   < 90 % modal mass is captured).
+- **Elastic (spring) supports** — model foundations / soil: in **Define
+  Support** choose *Elastic (spring)* and enter the spring stiffnesses per DOF
+  (Kx, Ky, Kz in N/mm; Krx, Kry, Krz in N·mm/rad). The springs add stiffness
+  to the node instead of fixing it rigidly (validated: a tip spring equal to
+  the beam's tip stiffness halves the cantilever deflection).
+- **Thermal loads** — in **Add Bar Load** choose *Thermal (temperature)* and
+  enter a uniform temperature change ΔT (°C); each material carries its own
+  expansion coefficient α. A restrained member then develops N = −E·A·α·ΔT
+  (validated exactly against the fixed-fixed bar).
 - **Plates / Shells (2D elements)** — model walls, slabs and floor
   diaphragms. **Add Plate** turns 3 or 4 selected node vertices into a
   meshed plate (pick thickness, material and mesh divisions); it shares

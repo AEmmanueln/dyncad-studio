@@ -5201,41 +5201,51 @@ def _draw_deformed(doc, scale_mult=1.0):
 
 
 def _make_anim_frames(doc, amp=1.0, nframes=12):
-    """Pre-build the deformed-shape animation as `nframes` lightweight wire
-    objects (one smooth 0->amp->0 oscillation), hidden, so the animation can
-    play by just toggling visibility - no geometry rebuild or recompute per
-    frame (which is what made it unstoppable before). Returns the frame list."""
+    """Pre-build the deformed-shape animation as `nframes` hidden frames, each a
+    set of colour-band WIRE objects (coloured by |u|, so the animation shows the
+    same gradient as the static contour). Playing just toggles visibility - no
+    per-frame rebuild. Returns a list of frames, each a list of band objects."""
     import math
-    state = _load_state(doc)
-    if state is None:
+    full = _load_state_full(doc)
+    if full is None:
         return []
-    nodes, u, elpairs, base, msize, radius = state
+    nodes, u, elpairs, base, msize, radius, samp, sections, compmax = full
+    vmax = float(compmax.get("Disp", 0.0))
     _clear_anim_frames(doc)
     grp = _grp(doc, RES_GROUP)
     frames = []
     for i in range(nframes):
         m = amp * 0.5 * (1.0 - math.cos(2.0 * math.pi * i / nframes))
         perbar, _ = _deformed_points(nodes, u, elpairs, base * m)
-        wires = []
-        for (pts, _d) in perbar:
-            if len(pts) > 1:
+        bands = [[] for _ in range(_NBAND)]
+        for (pts, disp) in perbar:
+            for j in range(len(pts) - 1):
+                a = pts[j]; b = pts[j + 1]
+                if (b - a).Length < 1e-6:
+                    continue
+                t = (0.5 * (disp[j] + disp[j + 1]) / vmax) if vmax > 1e-12 else 0.0
                 try:
-                    wires.append(Part.makePolygon([FreeCAD.Vector(p) for p in pts]))
+                    seg = Part.makePolygon([FreeCAD.Vector(a), FreeCAD.Vector(b)])
                 except Exception:
-                    pass
-        if not wires:
-            continue
-        ob = doc.addObject("Part::Feature", "AnimFrame%d" % i)
-        ob.Shape = Part.makeCompound(wires)
-        _set(ob, "App::PropertyString", "DiagKind", "_anim")
-        try:
-            ob.ViewObject.Visibility = False
-            ob.ViewObject.LineWidth = 5
-            ob.ViewObject.LineColor = (0.1, 0.9, 0.25)
-        except Exception:
-            pass
-        grp.addObject(ob)
-        frames.append(ob)
+                    continue
+                bands[min(_NBAND - 1, max(0, int(t * _NBAND)))].append(seg)
+        fobs = []
+        for k, segs in enumerate(bands):
+            if not segs:
+                continue
+            ob = doc.addObject("Part::Feature", "AnimF%d_b%d" % (i, k))
+            ob.Shape = Part.makeCompound(segs)
+            _set(ob, "App::PropertyString", "DiagKind", "_anim")
+            try:
+                ob.ViewObject.Visibility = False
+                ob.ViewObject.LineWidth = 6
+                ob.ViewObject.LineColor = _ramp((k + 0.5) / _NBAND)
+            except Exception:
+                pass
+            grp.addObject(ob)
+            fobs.append(ob)
+        if fobs:
+            frames.append(fobs)
     doc.recompute()          # one-time; animation then only toggles visibility
     return frames
 
@@ -5320,8 +5330,17 @@ def _result_summary(doc):
                 m = (u[6 * i] ** 2 + u[6 * i + 1] ** 2 + u[6 * i + 2] ** 2) ** 0.5
                 if m > md:
                     md = m; mn = "N%d" % (i + 1)
+            # true peak includes bending between nodes (a beam bows mid-span),
+            # which the nodal max understates - report it from the stored peak
+            cm = {}
+            try:
+                cm = json.loads(getattr(st, "StCompMax", "{}"))
+            except Exception:
+                cm = {}
+            dmax = max(md, float(cm.get("Disp", 0.0)))
             lines.append("Run: %s" % getattr(st, "StRun", "-"))
-            lines.append("Max displacement:  %.3f mm  (%s)" % (md, mn))
+            lines.append("Max displacement:  %.4g mm  (peak along members)" % dmax)
+            lines.append("Max nodal displacement:  %.4g mm  (%s)" % (md, mn))
         except Exception:
             pass
     for attr, lab, unit in (("ResN", "Axial N", "N"), ("ResMy", "Moment My", "N.mm"),
@@ -5586,11 +5605,13 @@ def _results_panel_class():
             frames = self._frames
             if not frames:
                 self._stop_anim(); return
-            for j, ob in enumerate(frames):
-                try:
-                    ob.ViewObject.Visibility = (j == self._fi)
-                except Exception:
-                    pass
+            for j, fobs in enumerate(frames):       # each frame is a list of bands
+                vis = (j == self._fi)
+                for ob in fobs:
+                    try:
+                        ob.ViewObject.Visibility = vis
+                    except Exception:
+                        pass
             self._fi += 1
             if self._fi >= len(frames):
                 self._fi = 0; self._loops += 1
@@ -6185,39 +6206,14 @@ def _segment_solid(face, a, b):
         return None
 
 
-def _result_tube(doc, grp, name, kind, perbar, radius, vmax, visible,
-                 sections=None, dirs=None, solid=False):
-    """Render a result as the structure drawn in short coloured segments,
-    blue->red by |value|. Each segment gets its own colour from the value
-    there, so the colour varies ALONG every bar (bending, stress and
-    displacement all change along a member). `perbar` is a list of
-    (points, values) per bar. Segments are thick tubes by default, or - with
-    solid=True and a known section per bar - the member's real swept profile
-    (solid beams, the Inventor look). Shaded display, so no wireframe rings."""
-    # Bin the coloured segments into a fixed set of value bands and make ONE
-    # object per band, coloured with a plain ShapeColor. ShapeColor (unlike
-    # per-face DiffuseColor) always renders and never resets on recompute, so
-    # the colour reliably varies along each bar - this is what makes the
-    # gradient actually show.
-    NBAND = 16
-    bands = [[] for _ in range(NBAND)]
-    for bi, (pts, vals) in enumerate(perbar):
-        face = None
-        if solid and sections is not None and bi < len(sections):
-            face = _profile_face(sections[bi])
-        for i in range(len(pts) - 1):
-            a = pts[i]; b = pts[i + 1]; v = b - a; ln = v.Length
-            if ln < 1e-6:
-                continue
-            seg = _segment_solid(face, a, b) if face is not None else None
-            if seg is None:
-                try:
-                    seg = Part.makeCylinder(radius, ln, a, unit(v))
-                except Exception:
-                    continue
-            t = (0.5 * (abs(vals[i]) + abs(vals[i + 1])) / vmax) if vmax > 1e-12 else 0.0
-            k = min(NBAND - 1, max(0, int(t * NBAND)))
-            bands[k].append(seg)
+_NBAND = 16
+
+
+def _emit_bands(doc, grp, name, kind, vmax, bands, visible, line, lw=6):
+    """Create one object per non-empty colour band. `line=True` makes thick
+    coloured WIRE objects (LineColor); these render reliably everywhere (the
+    way the animation wires do), which is what makes the gradient actually
+    show. `line=False` makes solid objects coloured with ShapeColor."""
     first = None
     for k, segs in enumerate(bands):
         if not segs:
@@ -6228,9 +6224,19 @@ def _result_tube(doc, grp, name, kind, perbar, radius, vmax, visible,
         _set(ob, "App::PropertyString", "DiagKind", kind)
         _set(ob, "App::PropertyFloat", "CompMax", float(vmax))
         _set(ob, "App::PropertyFloat", "CompMin", 0.0)
+        col = _ramp((k + 0.5) / _NBAND)
         try:
             ob.ViewObject.Visibility = bool(visible)
-            ob.ViewObject.ShapeColor = _ramp((k + 0.5) / NBAND)
+            if line:
+                ob.ViewObject.LineColor = col
+                ob.ViewObject.LineWidth = lw
+                try:
+                    ob.ViewObject.PointColor = col
+                except Exception:
+                    pass
+            else:
+                ob.ViewObject.ShapeColor = col
+                ob.ViewObject.LineColor = col
         except Exception:
             pass
         if grp is not None:
@@ -6238,6 +6244,43 @@ def _result_tube(doc, grp, name, kind, perbar, radius, vmax, visible,
         if first is None:
             first = ob
     return first
+
+
+def _result_tube(doc, grp, name, kind, perbar, radius, vmax, visible,
+                 sections=None, dirs=None, solid=False):
+    """Render a result as the structure coloured blue->red by |value|, binned
+    into colour bands (one object per band) so the colour varies ALONG every
+    bar. Default: thick coloured WIRES (LineColor) - these render reliably on
+    every machine, which is what makes the gradient show. With solid=True it
+    draws solid tubes / the members' real swept profiles (the Inventor look),
+    for users whose display shows shaded solids. `perbar` is a list of
+    (points, values) per bar."""
+    bands = [[] for _ in range(_NBAND)]
+    for bi, (pts, vals) in enumerate(perbar):
+        face = None
+        if solid and sections is not None and bi < len(sections):
+            face = _profile_face(sections[bi])
+        for i in range(len(pts) - 1):
+            a = pts[i]; b = pts[i + 1]; v = b - a; ln = v.Length
+            if ln < 1e-6:
+                continue
+            t = (0.5 * (abs(vals[i]) + abs(vals[i + 1])) / vmax) if vmax > 1e-12 else 0.0
+            k = min(_NBAND - 1, max(0, int(t * _NBAND)))
+            if solid:
+                seg = _segment_solid(face, a, b) if face is not None else None
+                if seg is None:
+                    try:
+                        seg = Part.makeCylinder(radius, ln, a, unit(v))
+                    except Exception:
+                        continue
+            else:
+                try:
+                    seg = Part.makePolygon([FreeCAD.Vector(a), FreeCAD.Vector(b)])
+                except Exception:
+                    continue
+            bands[k].append(seg)
+    return _emit_bands(doc, grp, name, kind, vmax, bands, visible,
+                       line=(not solid), lw=max(5, int(radius > 0) * 6))
 
 
 def _build_plate_stress(doc, grp, shells, vmmax, visible=False):
@@ -6274,9 +6317,12 @@ def _build_plate_stress(doc, grp, shells, vmmax, visible=False):
         _set(ob, "App::PropertyString", "DiagKind", "_plate")
         _set(ob, "App::PropertyFloat", "CompMax", float(vmmax))
         _set(ob, "App::PropertyFloat", "CompMin", 0.0)
+        col = _ramp((k + 0.5) / NBAND)
         try:
             ob.ViewObject.Visibility = bool(visible)
-            ob.ViewObject.ShapeColor = _ramp((k + 0.5) / NBAND)
+            ob.ViewObject.ShapeColor = col
+            ob.ViewObject.LineColor = col           # coloured edges as a fallback
+            ob.ViewObject.LineWidth = 2
         except Exception:
             pass
         if grp is not None:

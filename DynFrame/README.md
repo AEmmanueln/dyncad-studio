@@ -211,8 +211,14 @@ model is what you analyse. Commands are on the toolbars/menus
   = CST membrane + DKT thin-plate bending** (6 DOF/node), so plates and
   frames solve in one combined model. Results: the plate **von Mises stress
   contour** (each triangle coloured by its stress — a "Plate stress" result
-  in the Results Viewer), a `PlateForces` table (max stress + utilisation per
-  plate), and the plate nodes' deflections in the `Displacements` table.
+  in the Results Viewer), **bending-moment contours Mₓ, M_y and M_xy** (the
+  moments per unit width recovered from the DKT element and reported in one
+  consistent plate coordinate frame, so the contour is smooth across the mesh;
+  drawn with a signed blue→red map, hogging→sagging, with a −peak … +peak
+  colour bar — the Robot/Inventor way of reading a slab), a `PlateForces`
+  table (max von Mises, utilisation and max |Mₓ| / |M_y| / |M_xy| per plate),
+  and the plate nodes' deflections in the `Displacements` table. Pick **Plate
+  Mx / My / Mxy** in the Results Viewer to switch between them.
 
 **Materials:** Steel S235 / S275 / S355, Stainless 304, Aluminium 6061-T6
 (each with its own E, G, yield and density). Edit `MATERIALS` in
@@ -237,9 +243,14 @@ model is what you analyse. Commands are on the toolbars/menus
 > unrestrained span); **P-Δ** reproduces the 1/(1−P/Pcr) amplification;
 > **seismic** effective modal masses sum to 100 % of the total mass; the
 > **plate/shell** element converges to the exact simply-supported-plate
-> deflection (w_c = 0.00406 q a⁴/D, ratio ≈ 0.996) and is frame-invariant on
-> a tilted plane. It covers **static, P-Δ, modal, buckling, seismic
-> (response-spectrum), plates/shells and a full EN 1993-1-1 design check**.
+> deflection (w_c = 0.00406 q a⁴/D, ratio ≈ 0.996), its recovered
+> **bending moment** matches the Timoshenko centre value (Mₓ = M_y =
+> 0.0479 q a², ratio ≈ 0.99), and it is frame-invariant on a tilted plane;
+> **support settlement** matches 3EIδ/L² and 3EIδ/L³ for a settling prop, and
+> **tension-only / compression-only** members drop out under the wrong-sign
+> axial force (active-set), matching the spring-parallel closed form. It
+> covers **static, P-Δ, modal, buckling, seismic (response-spectrum),
+> plates/shells and a full EN 1993-1-1 design check**.
 > FreeCAD is not Robot — this reproduces Robot's *workflow and core
 > engineering* on its kernel.
 

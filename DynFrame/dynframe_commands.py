@@ -2115,6 +2115,52 @@ def _shell_vm_stress(pts, E, nu, t, u_glob18):
     return max(vm(top), vm(bot))
 
 
+def _plate_frame(tris):
+    """A single in-plane coordinate frame (En normal, Ex, Ey) shared by all the
+    triangles of one flat plate, so the per-triangle bending moments can be
+    reported in one consistent system (Mx, My, Mxy) for a smooth contour. En is
+    the area-weighted mean normal; Ex is global X projected onto the plate
+    (global Y if the plate faces X)."""
+    import numpy as np
+    n = np.zeros(3)
+    for pts in tris:
+        nrm, Ae = _tri_normal_area(pts)
+        n = n + np.array([nrm.x, nrm.y, nrm.z]) * Ae
+    L = float(np.linalg.norm(n))
+    En = n / L if L > 1e-12 else np.array([0.0, 0.0, 1.0])
+    gx = np.array([1.0, 0.0, 0.0]) - En * float(En[0])
+    if np.linalg.norm(gx) < 1e-6:
+        gx = np.array([0.0, 1.0, 0.0]) - En * float(En[1])
+    Ex = gx / np.linalg.norm(gx)
+    Ey = np.cross(En, Ex)
+    return En, Ex, Ey
+
+
+def _shell_moments(pts, E, nu, t, u_glob18, En, Ex, Ey):
+    """Bending moments per unit width of a flat shell triangle, expressed in the
+    shared plate frame (Ex, Ey): returns (Mx, My, Mxy, M1, M2) where M1>=M2 are
+    the principal moments. Units N.mm/mm (= N). Sagging about an axis is positive
+    relative to En; the element's own normal sign is reconciled with En so every
+    triangle of the plate reports a consistent sign."""
+    import numpy as np
+    R, xy, T = _shell_frame(pts)
+    ul = T @ np.asarray(u_glob18, float)
+    bi = [2, 3, 4, 8, 9, 10, 14, 15, 16]
+    Bb = _dkt_B(xy, 1 / 3.0, 1 / 3.0)
+    M = _bending_D(E, nu, t) @ (Bb @ ul[bi])        # [Mxx,Myy,Mxy] element-local
+    ex_t, ey_t, ez_t = R[0], R[1], R[2]
+    sgn = 1.0 if float(ez_t @ En) >= 0.0 else -1.0  # align element normal with En
+    Mxx, Myy, Mxy = sgn * M[0], sgn * M[1], sgn * M[2]
+    # build the moment as a 3x3 tensor in global coords, then read its
+    # components along the shared plate axes (handles any in-plane rotation)
+    M3 = (Mxx * np.outer(ex_t, ex_t) + Myy * np.outer(ey_t, ey_t)
+          + Mxy * (np.outer(ex_t, ey_t) + np.outer(ey_t, ex_t)))
+    mxx = float(Ex @ M3 @ Ex); myy = float(Ey @ M3 @ Ey); mxy = float(Ex @ M3 @ Ey)
+    avg = 0.5 * (mxx + myy)
+    rad = ((0.5 * (mxx - myy)) ** 2 + mxy ** 2) ** 0.5
+    return mxx, myy, mxy, avg + rad, avg - rad
+
+
 def _tri_normal_area(pts):
     """Unit normal (FreeCAD.Vector) and area of a 3D triangle."""
     import numpy as np
@@ -4435,23 +4481,37 @@ class RunAnalysis:
             except Exception:
                 pass
 
-        # plate/shell stress recovery (peak von Mises per triangle)
+        # plate/shell stress + bending-moment recovery (per triangle). Moments
+        # (Mx, My, Mxy) are expressed in one shared plate frame so the contour
+        # is smooth; von Mises is the surface stress.
         shell_vm_max = 0.0
+        mom_peak = {"Mx": 0.0, "My": 0.0, "Mxy": 0.0, "M1": 0.0, "M2": 0.0}
         for sh in shells:
-            pervm = []
+            En, Ex, Ey = _plate_frame([pts for (ni, pts) in sh["tris"]])
+            pervm = []; per = {c: [] for c in ("Mx", "My", "Mxy", "M1", "M2")}
             for (ni, pts) in sh["tris"]:
                 ug = []
                 for n in ni:
                     ug += list(u[6 * n:6 * n + 6])
-                vm = _shell_vm_stress(pts, sh["E"], sh["nu"], sh["t"], ug)
-                pervm.append(vm)
+                pervm.append(_shell_vm_stress(pts, sh["E"], sh["nu"], sh["t"], ug))
+                mxx, myy, mxy, m1, m2 = _shell_moments(
+                    pts, sh["E"], sh["nu"], sh["t"], ug, En, Ex, Ey)
+                per["Mx"].append(mxx); per["My"].append(myy); per["Mxy"].append(mxy)
+                per["M1"].append(m1); per["M2"].append(m2)
             sh["pervm"] = pervm
+            for c in per:
+                sh["per" + c] = per[c]
+                if per[c]:
+                    mom_peak[c] = max(mom_peak[c], max(abs(v) for v in per[c]))
             sh["vmmax"] = max(pervm) if pervm else 0.0
             shell_vm_max = max(shell_vm_max, sh["vmmax"])
             try:
                 _set(sh["o"], "App::PropertyFloat", "ShellVM", float(sh["vmmax"]))
                 _set(sh["o"], "App::PropertyFloat", "ShellUtil",
                      float(sh["vmmax"] / sh["Fy"]) if sh["Fy"] > 0 else 0.0)
+                for c in ("Mx", "My", "Mxy"):
+                    pk = max((abs(v) for v in sh.get("per" + c, [])), default=0.0)
+                    _set(sh["o"], "App::PropertyFloat", "Shell" + c, float(pk))
             except Exception:
                 pass
 
@@ -4484,6 +4544,8 @@ class RunAnalysis:
         if shells:
             _build_plate_stress(doc, dg, shells, shell_vm_max,
                                 visible=(not elems))
+            for c in ("Mx", "My", "Mxy"):      # signed bending-moment contours
+                _build_plate_moment(doc, dg, shells, c, mom_peak[c], visible=False)
             self._plate_table(doc, shells, rg)
         self._tables(doc, nodes, sup_nodes, Rreac, u, elems, run_name, rg, "Disp")
         doc.recompute()
@@ -4497,9 +4559,12 @@ class RunAnalysis:
         pnote = ""
         if shells:
             ntri = sum(len(s["tris"]) for s in shells)
-            pnote = ("\n\n%d plate(s) / %d shell elements: max von Mises %.1f MPa. "
-                     "See the 'Plate stress' result in the Results Viewer and the "
-                     "'PlateForces' table." % (len(shells), ntri, shell_vm_max))
+            pnote = ("\n\n%d plate(s) / %d shell elements: max von Mises %.1f MPa; "
+                     "max |Mx| %.0f, |My| %.0f, |Mxy| %.0f N.mm/mm. See the 'Plate "
+                     "stress' and 'Plate Mx / My / Mxy' results in the Results Viewer "
+                     "and the 'PlateForces' table."
+                     % (len(shells), ntri, shell_vm_max,
+                        mom_peak["Mx"], mom_peak["My"], mom_peak["Mxy"]))
         info("Analysis complete - %s  (%d bars, %d plates).\n\n"
              "Nodes %d | Restrained DOFs %d\n"
              "Max displacement:  %.3f mm\n"
@@ -4516,15 +4581,21 @@ class RunAnalysis:
         try:
             sh = doc.getObject("PlateForces") or doc.addObject("Spreadsheet::Sheet", "PlateForces")
             sh.Label = "PlateForces"; sh.clearAll()
-            sh.set("A1", "PLATE / SHELL RESULTS (von Mises)")
-            for c, h in zip("ABCDE", ["Plate", "Thk (mm)", "Elements",
-                                      "Max von Mises (MPa)", "Utilisation"]):
+            sh.set("A1", "PLATE / SHELL RESULTS (von Mises + bending moments)")
+            for c, h in zip("ABCDEFGH", ["Plate", "Thk (mm)", "Elements",
+                                         "Max von Mises (MPa)", "Utilisation",
+                                         "Max |Mx| (N.mm/mm)", "Max |My| (N.mm/mm)",
+                                         "Max |Mxy| (N.mm/mm)"]):
                 sh.set("%s2" % c, h)
             r = 3
+
+            def _pk(s, c):
+                return max((abs(v) for v in s.get("per" + c, [])), default=0.0)
             for s in shells:
                 row = [str(s["o"].Label), s["t"], len(s["tris"]), s.get("vmmax", 0.0),
-                       (s.get("vmmax", 0.0) / s["Fy"]) if s["Fy"] > 0 else 0.0]
-                for c, v in zip("ABCDE", row):
+                       (s.get("vmmax", 0.0) / s["Fy"]) if s["Fy"] > 0 else 0.0,
+                       _pk(s, "Mx"), _pk(s, "My"), _pk(s, "Mxy")]
+                for c, v in zip("ABCDEFGH", row):
                     sh.set("%s%d" % (c, r), ("%.4g" % v if isinstance(v, float) else str(v)))
                 r += 1
             if rg is not None and sh not in rg.Group:
@@ -4595,7 +4666,11 @@ class RunAnalysis:
 RESULT_LABELS = {"Disp": "Displacement (mm)", "N": "N - axial force (N)",
                  "Vy": "Vy - shear local y (N)", "Vz": "Vz - shear local z (N)",
                  "Mx": "Mx - torsion (N.mm)", "My": "My - bending major (N.mm)",
-                 "Mz": "Mz - bending minor (N.mm)", "Stress": "Stress - combined (MPa)"}
+                 "Mz": "Mz - bending minor (N.mm)", "Stress": "Stress - combined (MPa)",
+                 "_plate": "Plate stress - von Mises (MPa)",
+                 "_plateMx": "Plate Mx - bending (N.mm/mm)",
+                 "_plateMy": "Plate My - bending (N.mm/mm)",
+                 "_plateMxy": "Plate Mxy - twisting (N.mm/mm)"}
 RESULT_ORDER = ["Disp", "N", "Vy", "Vz", "Mx", "My", "Mz", "Stress"]
 
 
@@ -5644,7 +5719,8 @@ def _result_list(doc):
     seen = set()
     for o in doc.Objects:
         dk = getattr(o, "DiagKind", None)
-        if dk in ("_mode", "_buckling", "_seismic", "_plate") and dk not in seen:
+        if dk and (dk in ("_mode", "_buckling", "_seismic", "_plate")
+                   or dk.startswith("_plateM")) and dk not in seen:
             seen.add(dk)
             out.append((o.Label or dk.strip("_").title(), dk, "obj"))
     return out
@@ -5655,7 +5731,8 @@ def _result_summary(doc):
     from the per-bar stored forces and the solved state (Inventor-style probe)."""
     import json
     bars = [o for o in doc.Objects if is_analysis_elem(o) and hasattr(o, "ResN")]
-    if not bars:
+    has_plate = any(hasattr(o, "ShellVM") for o in doc.Objects)
+    if not bars and not has_plate and doc.getObject("AnalysisState") is None:
         return "No results yet. Solve first (Calculate)."
     def peak(attr):
         best = 0.0; who = "-"
@@ -5697,6 +5774,18 @@ def _result_summary(doc):
     if uv > 1e-9:
         lines.append("Max utilisation:  %.2f  (%s)  ->  %s"
                      % (uv, uw, "OK" if uv <= 1.0 else "OVER-STRESSED"))
+    # plate/shell peaks (von Mises + bending moments), if any plates were solved
+    plates = [o for o in doc.Objects if hasattr(o, "ShellVM")]
+    if plates:
+        def ppk(attr):
+            return max((abs(float(getattr(o, attr, 0.0))) for o in plates), default=0.0)
+        vmx = ppk("ShellVM")
+        if vmx > 1e-9:
+            lines.append("Plate max von Mises:  %.4g MPa" % vmx)
+        mx, my, mxy = ppk("ShellMx"), ppk("ShellMy"), ppk("ShellMxy")
+        if max(mx, my, mxy) > 1e-9:
+            lines.append("Plate max |Mx| %.4g | |My| %.4g | |Mxy| %.4g  N.mm/mm"
+                         % (mx, my, mxy))
     cc = doc.getObject("CodeCheck")
     if cc is not None:
         lines.append("Code check: see 'CodeCheck' table (class, chi_LT, U).")
@@ -5882,11 +5971,12 @@ def _results_panel_class():
                     except Exception:
                         pass
                 objs = [o for o in doc.Objects if is_analysis_elem(o)]
-                vm = 0.0
+                vm = 0.0; vmn = 0.0
                 for o in doc.Objects:
                     if getattr(o, "DiagKind", None) == key:
-                        vm = float(getattr(o, "CompMax", 0.0)); break
-                _color_bar(doc, _grp(doc, DIA_GROUP), 0.0, vm,
+                        vm = float(getattr(o, "CompMax", 0.0))
+                        vmn = float(getattr(o, "CompMin", 0.0)); break
+                _color_bar(doc, _grp(doc, DIA_GROUP), vmn, vm,
                            label, objs, _model_size(objs))
                 doc.recompute()
             self.summary.setText(_result_summary(doc))
@@ -6666,6 +6756,58 @@ def _build_plate_stress(doc, grp, shells, vmmax, visible=False):
             ob.ViewObject.Visibility = bool(visible)
             ob.ViewObject.ShapeColor = col
             ob.ViewObject.LineColor = col           # coloured edges as a fallback
+            ob.ViewObject.LineWidth = 2
+        except Exception:
+            pass
+        if grp is not None:
+            grp.addObject(ob)
+        if first is None:
+            first = ob
+    return first
+
+
+def _build_plate_moment(doc, grp, shells, comp, peak, visible=False):
+    """Signed bending-moment contour of the plates for one component (Mx, My,
+    Mxy or the principal M1 / M2): each triangle binned into a colour band over
+    a symmetric range -peak..+peak (blue = hogging, red = sagging) and drawn
+    with a plain ShapeColor, one object per band, like the von Mises contour."""
+    dk = "_plate" + comp; key = "per" + comp
+    for o in list(doc.Objects):
+        if o.Name.startswith("Plate" + comp + "_b"):
+            try:
+                doc.removeObject(o.Name)
+            except Exception:
+                pass
+    NBAND = 16
+    bands = [[] for _ in range(NBAND)]
+    vmin = -peak; span = (2.0 * peak) or 1.0
+    for sh in shells:
+        vals = sh.get(key, [])
+        for k, (ni, pts) in enumerate(sh["tris"]):
+            try:
+                f = Part.Face(Part.makePolygon(
+                    [FreeCAD.Vector(pts[0]), FreeCAD.Vector(pts[1]),
+                     FreeCAD.Vector(pts[2]), FreeCAD.Vector(pts[0])]))
+            except Exception:
+                continue
+            v = vals[k] if k < len(vals) else 0.0
+            t = (v - vmin) / span
+            bands[min(NBAND - 1, max(0, int(t * NBAND)))].append(f)
+    first = None
+    for k, fs in enumerate(bands):
+        if not fs:
+            continue
+        ob = doc.addObject("Part::Feature", "Plate%s_b%d" % (comp, k))
+        ob.Shape = Part.makeCompound(fs)
+        ob.Label = "Plate %s (N.mm/mm)" % comp
+        _set(ob, "App::PropertyString", "DiagKind", dk)
+        _set(ob, "App::PropertyFloat", "CompMax", float(peak))
+        _set(ob, "App::PropertyFloat", "CompMin", float(-peak))
+        col = _ramp((k + 0.5) / NBAND)
+        try:
+            ob.ViewObject.Visibility = bool(visible)
+            ob.ViewObject.ShapeColor = col
+            ob.ViewObject.LineColor = col
             ob.ViewObject.LineWidth = 2
         except Exception:
             pass

@@ -3458,6 +3458,35 @@ def _apply_thermal(doc, case, dT, elems):
     return len(elems)
 
 
+def _apply_settlement(doc, case, dvec, mvec, pts):
+    """Imposed support displacement (settlement): prescribes a known movement
+    at the selected support node(s) for a load case."""
+    grp = _grp(doc, LOAD_GROUP)
+    objs, _k = _analysis_objs(doc)
+    sz = _model_size(objs) * 0.04 + 40.0
+    dvec = FreeCAD.Vector(dvec); mvec = FreeCAD.Vector(mvec)
+    for p in pts:
+        p = FreeCAD.Vector(p)
+        o = doc.addObject("Part::Feature", "Settlement")
+        try:
+            o.Shape = Part.makeLine(FreeCAD.Vector(p),
+                                    FreeCAD.Vector(p.x, p.y, p.z - sz))
+        except Exception:
+            pass
+        o.Label = "%s: settlement (%.3g,%.3g,%.3g) mm" % (case, dvec.x, dvec.y, dvec.z)
+        _set(o, "App::PropertyString", "LoadType", "Settlement")
+        _set(o, "App::PropertyString", "LoadCase", case)
+        _set(o, "App::PropertyVector", "LoadVec", dvec)
+        _set(o, "App::PropertyVector", "LoadMom", mvec)
+        _set(o, "App::PropertyVector", "AtNode", p)
+        try:
+            o.ViewObject.LineColor = (0.6, 0.2, 0.9); o.ViewObject.LineWidth = 4
+        except Exception:
+            pass
+        grp.addObject(o)
+    return len(pts)
+
+
 class DefineSupport:
     def GetResources(self):
         return {"Pixmap": _icon("support"), "MenuText": "Define Support",
@@ -3548,6 +3577,53 @@ class AddNodalLoad:
         doc.commitTransaction()
         doc.recompute()
         info("Nodal load added to case '%s' on %d node(s)." % (vals["case"], len(pts)))
+
+
+class AddSettlement:
+    def GetResources(self):
+        return {"Pixmap": _icon("settle"), "MenuText": "Support Settlement",
+                "ToolTip": "Select supported node vertices, then prescribe an imposed "
+                           "support movement (settlement) for a load case - e.g. a "
+                           "foundation that sinks. The analysis solves for the forces "
+                           "the settlement induces.", "Accel": "A, G"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        pts = _sel_vertices()
+        if not pts:
+            info("Select one or more supported node vertices, then add a settlement.")
+            return
+        doc = FreeCAD.ActiveDocument
+        cs = [c[0] for c in _cases(doc)]
+        vals = form_dialog("Support Settlement (%d node(s))" % len(pts), [
+            {"key": "case", "label": "Load case", "kind": "combo",
+             "options": cs, "default": cs[-1]},
+            {"key": "_i", "kind": "info", "default":
+             "Imposed support movement. Translations in mm (-Z = sinks down), "
+             "rotations in rad. Each prescribed DOF is held at this value and the "
+             "analysis finds the forces it induces."},
+            {"key": "dx", "label": "dx (mm)", "kind": "float", "default": 0.0},
+            {"key": "dy", "label": "dy (mm)", "kind": "float", "default": 0.0},
+            {"key": "dz", "label": "dz (mm)", "kind": "float", "default": -10.0},
+            {"key": "rx", "label": "rx (rad)", "kind": "float", "default": 0.0},
+            {"key": "ry", "label": "ry (rad)", "kind": "float", "default": 0.0},
+            {"key": "rz", "label": "rz (rad)", "kind": "float", "default": 0.0},
+        ])
+        if not vals:
+            return
+        dvec = FreeCAD.Vector(vals["dx"], vals["dy"], vals["dz"])
+        mvec = FreeCAD.Vector(vals["rx"], vals["ry"], vals["rz"])
+        if dvec.Length < 1e-12 and mvec.Length < 1e-12:
+            info("Settlement is zero - nothing added."); return
+        doc.openTransaction("DynFrame: settlement")
+        _apply_settlement(doc, vals["case"], dvec, mvec, pts)
+        doc.commitTransaction(); doc.recompute()
+        info("Support settlement added to case '%s' on %d node(s).\n\nNote: the "
+             "settled node must also have a support restraining those directions "
+             "(the settlement prescribes the movement of that support)."
+             % (vals["case"], len(pts)))
 
 
 class AddMemberLoad:
@@ -4074,10 +4150,40 @@ class RunAnalysis:
                     for n in ni:
                         F[6 * n + 2] += fz
 
+        # prescribed displacements (support settlement) - zero for normal
+        # supports, so this reduces to the usual solve when none are present
+        u_pre = np.zeros(ndof)
+        for o in doc.Objects:
+            if getattr(o, "LoadType", None) == "Settlement":
+                f = factors.get(getattr(o, "LoadCase", ""), 0.0)
+                at = getattr(o, "AtNode", None)
+                if f and at is not None:
+                    i = nid(FreeCAD.Vector(at), make=False)
+                    if i >= 0:
+                        dv = FreeCAD.Vector(getattr(o, "LoadVec", FreeCAD.Vector()))
+                        mv = FreeCAD.Vector(getattr(o, "LoadMom", FreeCAD.Vector()))
+                        comps = [dv.x, dv.y, dv.z, mv.x, mv.y, mv.z]
+                        for k in range(6):
+                            if abs(comps[k]) > 1e-15:
+                                u_pre[6 * i + k] += f * comps[k]
+                                fixed.add(6 * i + k)
+
         free = [d for d in range(ndof) if d not in fixed]
-        u = np.zeros(ndof)
+        fx = sorted(fixed)
+        upf = u_pre[fx] if fx else np.zeros(0)
+
+        def _solve(Kmat):
+            uu = np.zeros(ndof)
+            if fx:
+                uu[fx] = upf
+            rhs = F[free].copy()
+            if fx and np.any(upf):      # settlement: move the RHS by K_fp u_p
+                rhs = rhs - Kmat[np.ix_(free, fx)] @ upf
+            uu[free] = np.linalg.solve(Kmat[np.ix_(free, free)], rhs)
+            return uu
+
         try:
-            u[free] = np.linalg.solve(K[np.ix_(free, free)], F[free])
+            u = _solve(K)
         except Exception:
             err("The structure is a mechanism (unstable) with the supports given. "
                 "Add more supports (or restrain more directions), then Calculate.")
@@ -4098,9 +4204,8 @@ class RunAnalysis:
                     Kg[np.ix_(el["dofs"], el["dofs"])] += \
                         el["T"].T @ _beam_kg_local(N, el["L"]) @ el["T"]
                 Ktot = K + Kg
-                un = np.zeros(ndof)
                 try:
-                    un[free] = np.linalg.solve(Ktot[np.ix_(free, free)], F[free])
+                    un = _solve(Ktot)
                 except Exception:
                     err("Second-order solve diverged - the loads are at or above "
                         "the buckling load (run Buckling Analysis). Reduce the load "
@@ -6533,6 +6638,7 @@ _add("DynFrame_NewLoadCase", NewLoadCase)
 _add("DynFrame_DefineSupport", DefineSupport)
 _add("DynFrame_AddNodalLoad", AddNodalLoad)
 _add("DynFrame_AddMemberLoad", AddMemberLoad)
+_add("DynFrame_AddSettlement", AddSettlement)
 _add("DynFrame_AddPlate", AddPlate)
 _add("DynFrame_AddPlateLoad", AddPlateLoad)
 _add("DynFrame_Combinations", Combinations)

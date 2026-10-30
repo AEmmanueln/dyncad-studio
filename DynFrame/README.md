@@ -103,11 +103,14 @@ model is what you analyse. Commands are on the toolbars/menus
    along the bar, or a **trapezoidal** (linearly varying `w1`→`w2`) load — the
    three Robot bar-load types. All are solved with exact consistent fixed-end
    forces, so nodal results and the force diagrams are exact.
-7. **Load Combinations** — auto EN 1990 **ULS** (1.35G + 1.5Q) and **SLS**
+7. **Support Settlement** — select supported node(s) → prescribe an imposed
+   support movement (settlement) for a load case; the solve finds the forces
+   it induces (see *Advanced analysis* below).
+8. **Load Combinations** — auto EN 1990 **ULS** (1.35G + 1.5Q) and **SLS**
    (G + Q), or a custom factored combination (`1.35*DL1 + 1.5*LL1`).
 
 *Solve & results (DynFrame · Results):*
-8. **Calculate** — choose a case, a combination, or *All loads* (+ optional
+9. **Calculate** — choose a case, a combination, or *All loads* (+ optional
    self-weight). Solves a 3D Euler–Bernoulli direct-stiffness model
    (6 DOF/node) **per material**. Produces:
    - a **Displacement contour** — the deformed structure drawn as thick
@@ -119,11 +122,11 @@ model is what you analyse. Commands are on the toolbars/menus
    - **Reactions**, **Displacements** and **BarForces** (start/end N, Vy,
      Vz, Mx, My, Mz, stress, utilisation) spreadsheets, alongside your
      `Nodes` / `Bars` tables.
-9. **Show Result / Diagram** — switch the displayed result: Displacement
-   contour, or an N / Vy / Vz / Mx / My / Mz / Stress diagram. The **Results
-   Viewer** (above) does the same from a persistent list, and adds the maxima
-   summary, deformation scaling and animation.
-10. **Clear Results** — remove results only, or everything (supports, loads,
+10. **Show Result / Diagram** — switch the displayed result: Displacement
+    contour, or an N / Vy / Vz / Mx / My / Mz / Stress diagram. The **Results
+    Viewer** (above) does the same from a persistent list, and adds the maxima
+    summary, deformation scaling and animation.
+11. **Clear Results** — remove results only, or everything (supports, loads,
     combinations).
 
 *Design & dynamics (DynFrame · Loads / Results):*
@@ -176,6 +179,14 @@ model is what you analyse. Commands are on the toolbars/menus
   enter a uniform temperature change ΔT (°C); each material carries its own
   expansion coefficient α. A restrained member then develops N = −E·A·α·ΔT
   (validated exactly against the fixed-fixed bar).
+- **Support settlement** — in **Support Settlement** select the supported
+  node(s) and prescribe an imposed support movement (translations in mm,
+  −Z = sinks down; rotations in rad) for a load case, e.g. a foundation that
+  settles. The analysis holds those DOFs at the given values and solves for
+  the forces the movement induces (a partitioned solve, K_ff·u_f =
+  F_f − K_fp·u_p). Validated against the closed form: a moment-free support
+  that settles δ on a span of length L induces an end moment 3EIδ/L² and a
+  shear 3EIδ/L³; a zero settlement reduces to the ordinary solve.
 - **Plates / Shells (2D elements)** — model walls, slabs and floor
   diaphragms. **Add Plate** turns 3 or 4 selected node vertices into a
   meshed plate (pick thickness, material and mesh divisions); it shares

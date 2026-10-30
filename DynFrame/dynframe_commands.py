@@ -1941,6 +1941,21 @@ def _bar_releases(o):
     return rel
 
 
+def _member_cond(o):
+    """Nonlinear axial behaviour of a bar from its MemberBehavior property:
+    'tension'  -> tension-only (a cable / slack brace carries no compression),
+    'compression' -> compression-only (a strut carries no tension),
+    or None for an ordinary member. These members are resolved with an
+    active-set iteration in the solver (dropped out when the axial force takes
+    the wrong sign)."""
+    b = str(getattr(o, "MemberBehavior", "") or "").lower()
+    if b.startswith("tension"):
+        return "tension"
+    if b.startswith("compression"):
+        return "compression"
+    return None
+
+
 def _beam_T(n1, n2):
     import numpy as np
     x = np.array([n2.x - n1.x, n2.y - n1.y, n2.z - n1.z])
@@ -3913,6 +3928,53 @@ class MemberReleases:
              % (vals["p"], len(elems)))
 
 
+class MemberType:
+    _OPTS = ["Normal (tension + compression)", "Tension-only (cable / brace)",
+             "Compression-only (strut)"]
+    _MAP = {_OPTS[0]: "Normal", _OPTS[1]: "Tension-only",
+            _OPTS[2]: "Compression-only"}
+
+    def GetResources(self):
+        return {"Pixmap": _icon("tension"), "MenuText": "Tension / Compression Member",
+                "ToolTip": "Make the selected bars tension-only (a cable or slack "
+                           "cross-brace that drops out in compression) or "
+                           "compression-only (a strut). Solved with a nonlinear "
+                           "active-set iteration.", "Accel": "A, T"}
+
+    def IsActive(self):
+        return bool(selected_elems())
+
+    def Activated(self):
+        elems = [m for m in selected_elems() if is_bar(m)]
+        if not elems:
+            info("Select one or more bars, then set their tension/compression type.")
+            return
+        doc = FreeCAD.ActiveDocument
+        vals = form_dialog("Tension / Compression Member (%d bar(s))" % len(elems), [
+            {"key": "_i", "kind": "info", "default":
+             "A tension-only member (cable, slack cross-brace) carries no "
+             "compression; a compression-only member (strut) carries no tension. "
+             "The solver drops such members out when their axial force takes the "
+             "wrong sign and re-solves until the active set is stable."},
+            {"key": "b", "label": "Behaviour", "kind": "combo",
+             "options": self._OPTS, "default": self._OPTS[1]},
+            {"key": "ends", "label": "Ends", "kind": "combo",
+             "options": ["Keep current", "Pin both ends (truss member)"],
+             "default": "Pin both ends (truss member)"},
+        ])
+        if not vals:
+            return
+        beh = self._MAP[vals["b"]]
+        doc.openTransaction("DynFrame: member type")
+        for m in elems:
+            _set(m, "App::PropertyString", "MemberBehavior", beh)
+            if vals["ends"].startswith("Pin"):
+                _set(m, "App::PropertyString", "RelI", "000011")
+                _set(m, "App::PropertyString", "RelJ", "000011")
+        doc.commitTransaction(); doc.recompute()
+        info("Set '%s' on %d bar(s). Re-run Calculate to apply." % (beh, len(elems)))
+
+
 class RunAnalysis:
     def GetResources(self):
         return {"Pixmap": _icon("calculate"), "MenuText": "Calculate",
@@ -3959,6 +4021,7 @@ class RunAnalysis:
             elems.append({"o": o, "n1": n1, "n2": n2, "A": A, "Iy": Iy, "Iz": Iz,
                           "J": J, "c": c, "E": E, "G": G, "Fy": Fy, "rho": rho,
                           "alpha": _mat_alpha(_elem_material(o)),
+                          "cond": _member_cond(o), "active": True,
                           "sec": sec, "w": FreeCAD.Vector(0, 0, 0)})
         # plates/shells: mesh triangles, share nodes with the bars, store for
         # assembly + stress recovery (validated CST+DKT flat shell)
@@ -4099,8 +4162,10 @@ class RunAnalysis:
             # member end releases (condensation of released local DOFs)
             rel = _bar_releases(el["o"])
             kc, fc, el["rel_info"] = _condense(kl, fl, rel)
-            K[np.ix_(dofs, dofs)] += T.T @ kc @ T
-            F[dofs] += T.T @ fc
+            Kctr = T.T @ kc @ T; Fctr = T.T @ fc
+            el["Kctr"] = Kctr; el["Fctr"] = Fctr   # for the tension-only active set
+            K[np.ix_(dofs, dofs)] += Kctr
+            F[dofs] += Fctr
         # plate/shell stiffness (flat CST + DKT shell, 6 dof/node)
         for sh in shells:
             for (ni, pts) in sh["tris"]:
@@ -4172,11 +4237,13 @@ class RunAnalysis:
         fx = sorted(fixed)
         upf = u_pre[fx] if fx else np.zeros(0)
 
-        def _solve(Kmat):
+        def _solve(Kmat, Fvec=None):
+            if Fvec is None:
+                Fvec = F
             uu = np.zeros(ndof)
             if fx:
                 uu[fx] = upf
-            rhs = F[free].copy()
+            rhs = Fvec[free].copy()
             if fx and np.any(upf):      # settlement: move the RHS by K_fp u_p
                 rhs = rhs - Kmat[np.ix_(free, fx)] @ upf
             uu[free] = np.linalg.solve(Kmat[np.ix_(free, free)], rhs)
@@ -4188,6 +4255,51 @@ class RunAnalysis:
             err("The structure is a mechanism (unstable) with the supports given. "
                 "Add more supports (or restrain more directions), then Calculate.")
             return
+        # tension-only / compression-only members: an active-set iteration that
+        # drops out any such member whose axial force takes the wrong sign (a
+        # slack cable or a buckled brace carries nothing), then re-solves, until
+        # the active set is stable. Members with no special behaviour, and models
+        # with none at all, are untouched - this reduces to the linear solve.
+        nl_note = ""
+        cond = [el for el in elems if el.get("cond")]
+        if cond:
+            def _axial(el, uu):
+                dl = el["T"] @ uu[el["dofs"]]
+                return float(-(el["kl"] @ dl - el["fef"])[0])   # + tension
+            for _it in range(25):
+                tol = 1e-6 * max(1.0, max(abs(_axial(el, u)) for el in cond))
+                changed = False
+                for el in cond:
+                    N = _axial(el, u); cur = el["active"]
+                    if abs(N) <= tol:
+                        want = cur                     # hysteresis near zero
+                    elif el["cond"] == "tension":
+                        want = (N > 0.0)               # keep only if in tension
+                    else:
+                        want = (N < 0.0)               # keep only if in compression
+                    if want != cur:
+                        el["active"] = want; changed = True
+                        sgn = -1.0 if want else 1.0    # re-add (+) or remove (-)
+                        dofs = el["dofs"]
+                        K[np.ix_(dofs, dofs)] -= sgn * el["Kctr"]
+                        F[dofs] -= sgn * el["Fctr"]
+                if not changed:
+                    break
+                try:
+                    u = _solve(K)
+                except Exception:
+                    # dropping a member made the model a mechanism; undo this
+                    # pass's changes and keep the last stable solution
+                    for el in cond:
+                        if not el["active"]:
+                            dofs = el["dofs"]
+                            K[np.ix_(dofs, dofs)] += el["Kctr"]
+                            F[dofs] += el["Fctr"]; el["active"] = True
+                    u = _solve(K)
+                    break
+            ndrop = sum(1 for el in cond if not el["active"])
+            if ndrop:
+                nl_note = "  [%d tension/compression-only member(s) inactive]" % ndrop
         Ktot = K
         po_note = ""
         if second_order:
@@ -4198,6 +4310,8 @@ class RunAnalysis:
             for _it in range(12):
                 Kg = np.zeros((ndof, ndof))
                 for el in elems:
+                    if not el.get("active", True):   # dropped tension/compr member
+                        continue
                     dl = el["T"] @ u[el["dofs"]]
                     fe = el["kl"] @ dl - el["fef"]
                     N = -fe[0]
@@ -4219,7 +4333,7 @@ class RunAnalysis:
                     break
             po_note = ("  [2nd order, %s]"
                        % ("converged" if conv else "max iterations"))
-        run_name = run_name + po_note
+        run_name = run_name + po_note + nl_note
         Rreac = Ktot @ u - F
         msize = _model_size(list(objs) + shell_objs)
         maxd = max((u[6 * i] ** 2 + u[6 * i + 1] ** 2 + u[6 * i + 2] ** 2) ** 0.5
@@ -4239,7 +4353,10 @@ class RunAnalysis:
                 for idx, ci in enumerate(c):
                     dloc[ci] = uc[idx]
             el["dloc"] = dloc
-            fend = el["kl"] @ dloc - el["fef"]; el["fend"] = fend
+            fend = el["kl"] @ dloc - el["fef"]
+            if not el.get("active", True):     # dropped-out member carries nothing
+                fend = np.zeros(12)
+            el["fend"] = fend
             L = el["L"]; wy, wz, wx = el["wy"], el["wz"], el["wx"]
             A = el["A"]; c = el["c"]; Imin = min(el["Iy"], el["Iz"]); Fy = el["Fy"]
             pts = el.get("pts_local", [])        # [(px,py,pz,a), ...]
@@ -6643,6 +6760,7 @@ _add("DynFrame_AddPlate", AddPlate)
 _add("DynFrame_AddPlateLoad", AddPlateLoad)
 _add("DynFrame_Combinations", Combinations)
 _add("DynFrame_MemberReleases", MemberReleases)
+_add("DynFrame_MemberType", MemberType)
 _add("DynFrame_RunAnalysis", RunAnalysis)
 _add("DynFrame_ModalAnalysis", ModalAnalysis)
 _add("DynFrame_BucklingAnalysis", BucklingAnalysis)

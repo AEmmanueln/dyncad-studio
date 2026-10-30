@@ -133,6 +133,9 @@ model is what you analyse. Commands are on the toolbars/menus
 - **Member Releases** — free member end DOFs: moment releases for a pinned
   connection, or pin both ends for a truss member (presets). Handled by
   static condensation; non-released members are unaffected.
+- **Tension / Compression-only members** — mark selected bars as
+  **tension-only** (a cable or slack cross-brace) or **compression-only** (a
+  strut). See *Advanced analysis* below.
 - **Nodal Load** also takes **moments** Mx / My / Mz, not just forces.
 - **Envelope (all combinations)** — solves every combination and keeps the
   worst axial / My / Mz / utilisation per member (the design envelope),
@@ -187,6 +190,18 @@ model is what you analyse. Commands are on the toolbars/menus
   F_f − K_fp·u_p). Validated against the closed form: a moment-free support
   that settles δ on a span of length L induces an end moment 3EIδ/L² and a
   shear 3EIδ/L³; a zero settlement reduces to the ordinary solve.
+- **Tension-only / compression-only members** — cross-bracing and cables
+  carry tension only; a strut carries compression only. In **Tension /
+  Compression Member** mark the selected bars (optionally pinning their ends
+  to make them true truss members). The solver runs a **nonlinear active-set
+  iteration**: it drops out any such member whose axial force takes the wrong
+  sign (a slack cable, a buckled brace), re-solves, and repeats until the
+  active set is stable — so an X-braced panel sheds its compression diagonal
+  and the tension diagonal carries the shear. Dropped members report zero
+  force. Validated: a tension-only bar in parallel with a support spring is
+  active (and carries P·kb/(kb+ks)) when pulled, and drops out — doubling the
+  deflection — when pushed; a compression-only bar behaves oppositely. Models
+  with no such members solve exactly as before.
 - **Plates / Shells (2D elements)** — model walls, slabs and floor
   diaphragms. **Add Plate** turns 3 or 4 selected node vertices into a
   meshed plate (pick thickness, material and mesh divisions); it shares

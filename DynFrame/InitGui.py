@@ -57,7 +57,8 @@ class DynFrameWorkbench(FreeCADGui.Workbench):
         loads = ["DynFrame_NewLoadCase", "DynFrame_DefineSupport",
                  "DynFrame_AddNodalLoad", "DynFrame_AddMemberLoad",
                  "DynFrame_AddPlateLoad", "DynFrame_AddSettlement",
-                 "DynFrame_MemberReleases", "DynFrame_Combinations"]
+                 "DynFrame_MemberReleases", "DynFrame_MemberType",
+                 "DynFrame_Combinations"]
         results = ["DynFrame_RunAnalysis", "DynFrame_ModalAnalysis",
                    "DynFrame_BucklingAnalysis", "DynFrame_ResponseSpectrum",
                    "DynFrame_Envelope", "DynFrame_CodeCheck",

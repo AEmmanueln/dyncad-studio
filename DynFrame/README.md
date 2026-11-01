@@ -141,6 +141,15 @@ model is what you analyse. Commands are on the toolbars/menus
   worst axial / My / Mz / utilisation per member (the design envelope),
   colours members by it, and stores the governing forces so the code check
   runs against the envelope.
+- **Plate Reinforcement (EC2)** — required slab steel to EN 1992-1-1 from the
+  Wood–Armer design moments: the **area of reinforcement A_s (mm²/m)** for the
+  bottom (sagging) and top (hogging) face in X and Y, for each plate, as a
+  singly-reinforced section (K = M/bd²f_cd, lever arm z, A_s = M/0.87f_yk z).
+  Pick the concrete grade, f_yk, cover and bar diameter; the slab thickness is
+  taken from each plate. Minimum steel (9.2.1.1) is applied and a section that
+  would need compression steel is flagged. Results go to the `PlateSteel`
+  table. (Validated: a 200 mm slab at 50 kN·m/m → ≈757 mm²/m, matching the
+  hand calc; minimum-steel and over-moment cases flagged correctly.)
 - **Steel Code Check (EC3)** — a full EN 1993-1-1 member verification, the
   way Robot does it: each member is **classified** (Class 1–4) from its own
   flange/web slenderness under the actual axial force and moment; the bending
@@ -226,9 +235,10 @@ model is what you analyse. Commands are on the toolbars/menus
   Wood–Armer (bottom & top, X & Y)** in the Results Viewer to switch the
   contour; the colour bar re-ranges to match.
 
-**Materials:** Steel S235 / S275 / S355, Stainless 304, Aluminium 6061-T6
-(each with its own E, G, yield and density). Edit `MATERIALS` in
-`dynframe_commands.py` to add more.
+**Materials:** Steel S235 / S275 / S355, Stainless 304, Aluminium 6061-T6,
+and Concrete C25/30 / C30/37 / C35/45 (E_cm and ν = 0.2 per EN 1992-1-1, for
+RC slabs) — each with its own E, G, yield/fck and density. Edit `MATERIALS`
+in `dynframe_commands.py` to add more.
 
 > **Validation** (all numeric, against closed-form solutions): the static
 > solver is exact in both bending planes — cantilever (point and UDL),

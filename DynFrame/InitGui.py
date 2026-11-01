@@ -62,6 +62,7 @@ class DynFrameWorkbench(FreeCADGui.Workbench):
         results = ["DynFrame_RunAnalysis", "DynFrame_ModalAnalysis",
                    "DynFrame_BucklingAnalysis", "DynFrame_ResponseSpectrum",
                    "DynFrame_Envelope", "DynFrame_CodeCheck",
+                   "DynFrame_PlateReinfEC2",
                    "DynFrame_ShowDiagram", "DynFrame_ClearAnalysis"]
         analysis = panel + structure + loads + results
         io = ["DynFrame_ExportStep", "DynFrame_ExportStl"]

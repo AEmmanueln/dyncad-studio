@@ -2197,6 +2197,49 @@ def _wood_armer(mx, my, mxy):
     return mxb, myb, mxt, myt
 
 
+# characteristic cylinder strength (MPa) for the common EN 1992 grades
+CONCRETE_GRADES = {"C20/25": 20.0, "C25/30": 25.0, "C30/37": 30.0,
+                   "C35/45": 35.0, "C40/50": 40.0, "C45/55": 45.0,
+                   "C50/60": 50.0}
+
+
+def _fctm(fck):
+    """Mean concrete tensile strength (MPa), EN 1992-1-1 Table 3.1."""
+    import math
+    if fck <= 50.0:
+        return 0.30 * fck ** (2.0 / 3.0)
+    return 2.12 * math.log(1.0 + (fck + 8.0) / 10.0)
+
+
+def _ec2_slab_as(med, h, cover, dia, layer, fck, fyk,
+                 gc=1.5, gs=1.15, acc=0.85):
+    """Required tension-steel area (mm^2 per metre width) for a 1 m slab strip
+    under the design moment `med` (N.mm per mm width, magnitude), by
+    EN 1992-1-1 for a singly-reinforced rectangular section.
+
+    layer: 0 = outer bars (effective depth d = h - cover - dia/2),
+           1 = inner/second direction (d = h - cover - 1.5*dia).
+    Returns (As_mm2_per_m, d_mm, note). `note` flags minimum steel or a
+    section that needs compression steel / thickening (K > K')."""
+    m = abs(float(med))                          # N.mm per mm width
+    d = h - cover - dia / 2.0 - (dia if layer else 0.0)
+    if d <= 0.0:
+        return 0.0, max(d, 0.0), "section too thin for the cover/bar given"
+    fcd = acc * fck / gc; fyd = fyk / gs
+    K = m / (1.0 * d * d * fcd) if fcd > 0 else 1.0      # b = 1 mm
+    Klim = 0.168                                 # no redistribution
+    z = d * min(0.95, 0.5 + (max(0.0, 0.25 - min(K, Klim) / 1.134)) ** 0.5)
+    As = (m / (fyd * z)) if (fyd > 0 and z > 0) else 0.0  # mm^2 per mm
+    as_m = As * 1000.0                           # mm^2 per m
+    as_min = max(0.26 * _fctm(fck) / fyk, 0.0013) * d * 1000.0   # EC2 9.2.1.1
+    note = ""
+    if K > Klim:
+        note = "K=%.3f > 0.168: add compression steel or thicken" % K
+    elif as_m < as_min:
+        as_m = as_min; note = "governed by minimum steel"
+    return as_m, d, note
+
+
 def _tri_normal_area(pts):
     """Unit normal (FreeCAD.Vector) and area of a 3D triangle."""
     import numpy as np
@@ -2767,6 +2810,12 @@ MATERIALS = {
     "Steel S355": (210000.0, 80769.0, 355.0, 7.85e-6),
     "Stainless 304": (193000.0, 74000.0, 215.0, 7.90e-6),
     "Aluminium 6061-T6": (70000.0, 26000.0, 240.0, 2.70e-6),
+    # concrete: E_cm per EN 1992-1-1, nu = 0.2 (G = E/2.4), rho ~ 2500 kg/m^3.
+    # the "Fy" slot carries fck (for a rough elastic stress check); proper RC
+    # design is the EC2 plate-reinforcement command.
+    "Concrete C25/30": (31476.0, 13115.0, 25.0, 2.5e-9),
+    "Concrete C30/37": (32837.0, 13682.0, 30.0, 2.5e-9),
+    "Concrete C35/45": (34077.0, 14199.0, 35.0, 2.5e-9),
 }
 DEFAULT_MAT = "Steel S235"
 
@@ -2778,7 +2827,9 @@ def _material(name):
 
 # coefficient of thermal expansion (per deg C)
 MAT_ALPHA = {"Steel S235": 1.2e-5, "Steel S275": 1.2e-5, "Steel S355": 1.2e-5,
-             "Stainless 304": 1.6e-5, "Aluminium 6061-T6": 2.3e-5}
+             "Stainless 304": 1.6e-5, "Aluminium 6061-T6": 2.3e-5,
+             "Concrete C25/30": 1.0e-5, "Concrete C30/37": 1.0e-5,
+             "Concrete C35/45": 1.0e-5}
 
 
 def _mat_alpha(name):
@@ -4800,7 +4851,7 @@ class ClearAnalysis:
         doc.openTransaction("DynFrame: clear")
         res_sheets = ("Reactions", "Displacements", "BarForces",
                       "ModalFrequencies", "CodeCheck", "Envelope", "Seismic",
-                      "PlateForces", "PlateReinforcement")
+                      "PlateForces", "PlateReinforcement", "PlateSteel")
         all_sheets = res_sheets + ("LoadCases", "Combinations", "AnalysisResults")
         to_del = []
         for o in list(doc.Objects):
@@ -5436,6 +5487,99 @@ class CodeCheck:
              "marginally conservative versus a rolled section with root fillets." %
              (len(rows), worst, worstbar,
               "PASS" if worst <= 1.0 else "FAIL - over-stressed members", notes))
+
+
+class PlateReinfEC2:
+    def GetResources(self):
+        return {"Pixmap": _icon("rebar"), "MenuText": "Plate Reinforcement (EC2)",
+                "ToolTip": "Required slab reinforcement to EN 1992-1-1 from the "
+                           "Wood-Armer design moments of the latest analysis: area "
+                           "of steel (mm2/m) top and bottom in X and Y for each "
+                           "plate, with minimum-steel and section-adequacy checks. "
+                           "Run Calculate first.", "Accel": "A, R"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        doc = FreeCAD.ActiveDocument
+        plates = [o for o in doc.Objects if hasattr(o, "ShellWAxb")]
+        if not plates:
+            info("Run Calculate on a model with plates first - the reinforcement "
+                 "design uses the Wood-Armer plate moments from the analysis.")
+            return
+        grades = list(CONCRETE_GRADES.keys())
+        vals = form_dialog("Plate Reinforcement (EN 1992-1-1)", [
+            {"key": "_i", "kind": "info", "default":
+             "Required orthogonal reinforcement from the Wood-Armer design "
+             "moments: area of steel (mm2/m) for the bottom (sagging) and top "
+             "(hogging) face in X and Y, per plate, singly reinforced. Minimum "
+             "steel (9.2.1.1) is applied; a section needing compression steel is "
+             "flagged. The slab thickness is taken from each plate."},
+            {"key": "grade", "label": "Concrete grade", "kind": "combo",
+             "options": grades, "default": "C30/37"},
+            {"key": "fyk", "label": "Steel fyk (MPa)", "kind": "float", "default": 500.0},
+            {"key": "cover", "label": "Cover to bar (mm)", "kind": "float", "default": 25.0},
+            {"key": "dia", "label": "Bar diameter (mm)", "kind": "float", "default": 12.0},
+            {"key": "gc", "label": "gamma_c (concrete)", "kind": "float", "default": 1.5},
+            {"key": "gs", "label": "gamma_s (steel)", "kind": "float", "default": 1.15},
+            {"key": "acc", "label": "alpha_cc", "kind": "float", "default": 0.85},
+        ])
+        if not vals:
+            return
+        fck = CONCRETE_GRADES.get(vals["grade"], 30.0)
+        fyk = float(vals["fyk"]); cover = float(vals["cover"]); dia = float(vals["dia"])
+        gc = float(vals["gc"]); gs = float(vals["gs"]); acc = float(vals["acc"])
+        doc.openTransaction("DynFrame: plate reinforcement (EC2)")
+        try:
+            sh = (doc.getObject("PlateSteel")
+                  or doc.addObject("Spreadsheet::Sheet", "PlateSteel"))
+            sh.Label = "PlateSteel"; sh.clearAll()
+            sh.set("A1", "SLAB REINFORCEMENT (EN 1992-1-1) - %s, fyk=%g, cover=%g, "
+                   "dia=%g mm" % (vals["grade"], fyk, cover, dia))
+            for c, h in zip("ABCDEFGHI",
+                            ["Plate", "h (mm)", "As x bot (mm2/m)", "As y bot (mm2/m)",
+                             "As x top (mm2/m)", "As y top (mm2/m)", "d bot (mm)",
+                             "d top (mm)", "Notes"]):
+                sh.set("%s2" % c, h)
+            r = 3; worst_note = ""
+            peaks = {}
+            for o in plates:
+                h = float(getattr(o, "ShellThk", 0.0))
+                mxb = float(getattr(o, "ShellWAxb", 0.0))
+                myb = float(getattr(o, "ShellWAyb", 0.0))
+                mxt = float(getattr(o, "ShellWAxt", 0.0))
+                myt = float(getattr(o, "ShellWAyt", 0.0))
+                asxb, dxb, nxb = _ec2_slab_as(mxb, h, cover, dia, 0, fck, fyk, gc, gs, acc)
+                asyb, dyb, nyb = _ec2_slab_as(myb, h, cover, dia, 1, fck, fyk, gc, gs, acc)
+                asxt, dxt, nxt = _ec2_slab_as(mxt, h, cover, dia, 0, fck, fyk, gc, gs, acc)
+                asyt, dyt, nyt = _ec2_slab_as(myt, h, cover, dia, 1, fck, fyk, gc, gs, acc)
+                notes = "; ".join(sorted(set(n for n in (nxb, nyb, nxt, nyt) if n)))
+                if "compression" in notes:
+                    worst_note = notes
+                row = [str(o.Label), h, asxb, asyb, asxt, asyt, dxb, dyb, notes or "-"]
+                for c, v in zip("ABCDEFGHI", row):
+                    sh.set("%s%d" % (c, r),
+                           ("%.4g" % v if isinstance(v, float) else str(v)))
+                r += 1
+                peaks[str(o.Label)] = max(asxb, asyb, asxt, asyt)
+            rg = _grp(doc, RES_GROUP)
+            if rg is not None and sh not in rg.Group:
+                rg.addObject(sh)
+            doc.commitTransaction(); doc.recompute()
+            govp = max(peaks.values()) if peaks else 0.0
+            govn = max(peaks, key=peaks.get) if peaks else "-"
+            info("Slab reinforcement (EN 1992-1-1) computed for %d plate(s).\n\n"
+                 "Grade %s (fck=%g), fyk=%g, cover=%g, bar dia=%g mm.\n"
+                 "Governing area of steel: %.0f mm2/m  (plate '%s').\n\n"
+                 "See the 'PlateSteel' table for As top/bottom in X and Y per "
+                 "plate. As is the Wood-Armer demand divided by fyd and the lever "
+                 "arm; minimum steel per 9.2.1.1 is applied.%s"
+                 % (len(plates), vals["grade"], fck, fyk, cover, dia, govp, govn,
+                    ("\n\nWARNING: " + worst_note) if worst_note else ""))
+        except Exception as e:
+            doc.abortTransaction()
+            err("Reinforcement design failed: %s" % e)
 
 
 class Envelope:
@@ -7015,6 +7159,7 @@ _add("DynFrame_AddPlateLoad", AddPlateLoad)
 _add("DynFrame_Combinations", Combinations)
 _add("DynFrame_MemberReleases", MemberReleases)
 _add("DynFrame_MemberType", MemberType)
+_add("DynFrame_PlateReinfEC2", PlateReinfEC2)
 _add("DynFrame_RunAnalysis", RunAnalysis)
 _add("DynFrame_ModalAnalysis", ModalAnalysis)
 _add("DynFrame_BucklingAnalysis", BucklingAnalysis)

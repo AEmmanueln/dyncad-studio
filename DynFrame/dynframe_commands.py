@@ -3583,6 +3583,81 @@ def _apply_trap(doc, case, w1vec, w2vec, elems):
     return len(elems)
 
 
+# EN 1991-1-4 terrain categories: name -> (roughness length z0 [m], zmin [m])
+WIND_TERRAIN = {
+    "0 - Sea / coastal": (0.003, 1.0),
+    "I - Lakes / flat open": (0.01, 1.0),
+    "II - Open, low vegetation": (0.05, 2.0),
+    "III - Suburban / forest": (0.3, 5.0),
+    "IV - Urban (>=15 m)": (1.0, 10.0),
+}
+
+
+def _wind_qp(z_m, vb0, z0, zmin, c0=1.0, rho=1.25, cdir=1.0, cseason=1.0):
+    """Peak velocity pressure q_p(z) [Pa] at height z [m] per EN 1991-1-4:
+    basic velocity v_b = cdir*cseason*vb0, roughness c_r(z) = k_r ln(z/z0) with
+    k_r = 0.19 (z0/0.05)^0.07, mean wind v_m = c_r c_o v_b, turbulence
+    I_v = k_I/(c_o ln(z/z0)) (k_I=1), and q_p = (1 + 7 I_v) * 0.5 rho v_m^2.
+    Returns (q_p [Pa], v_m [m/s], c_e = q_p/q_b)."""
+    import math
+    z0II = 0.05
+    vb = cdir * cseason * vb0
+    qb = 0.5 * rho * vb * vb
+    kr = 0.19 * (z0 / z0II) ** 0.07
+    ze = max(float(z_m), zmin)
+    cr = kr * math.log(ze / z0)
+    vm = cr * c0 * vb
+    iv = 1.0 / (c0 * math.log(ze / z0))
+    qp = (1.0 + 7.0 * iv) * 0.5 * rho * vm * vm
+    ce = (qp / qb) if qb > 1e-12 else 0.0
+    return qp, vm, ce
+
+
+def _apply_wind(doc, case, items, dirlabel):
+    """Create the wind member loads: `items` is a list of (member, w1vec, w2vec)
+    where w1/w2 are the horizontal line loads (N/mm) at the member start/end
+    node heights. Stored as MemberTrap loads (the solver's trapezoidal path),
+    with magnitude-scaled arrows so a horizontal wind reads correctly."""
+    grp = _grp(doc, LOAD_GROUP)
+    msize = _model_size([m for (m, _a, _b) in items]) if items else 1000.0
+    lmax = msize * 0.10 + 60.0
+    n = 0
+    for (m, w1vec, w2vec) in items:
+        w1vec = FreeCAD.Vector(w1vec); w2vec = FreeCAD.Vector(w2vec)
+        wmax = max(w1vec.Length, w2vec.Length, 1e-9)
+        dirn = unit(w2vec if w2vec.Length >= w1vec.Length else w1vec)
+        s, e = _elem_ends(m)
+        arrows = []
+        try:
+            for t in (0.05, 0.225, 0.4, 0.575, 0.75, 0.95):
+                wt = (w1vec + vscale(w2vec - w1vec, t)).Length
+                ln = lmax * (0.2 + 0.8 * wt / wmax)
+                p = s + vscale(e - s, t)
+                tail = p - vscale(dirn, ln)
+                arrows.append(Part.makeLine(FreeCAD.Vector(tail), FreeCAD.Vector(p)))
+                arrows.append(Part.makeCone(ln * 0.13, 0.0, ln * 0.28,
+                                            p - vscale(dirn, ln * 0.28), dirn))
+            shp = Part.makeCompound(arrows)
+        except Exception:
+            shp = None
+        o = doc.addObject("Part::Feature", "WindLoad")
+        if shp is not None:
+            o.Shape = shp
+        o.Label = "%s: wind %s %.3g..%.3g N/mm on %s" % (
+            case, dirlabel, w1vec.Length, w2vec.Length, m.Label)
+        _set(o, "App::PropertyString", "LoadType", "MemberTrap")
+        _set(o, "App::PropertyString", "LoadCase", case)
+        _set(o, "App::PropertyString", "OnMember", m.Name)
+        _set(o, "App::PropertyVector", "LoadVec", w1vec)
+        _set(o, "App::PropertyVector", "LoadVec2", w2vec)
+        try:
+            o.ViewObject.ShapeColor = (0.0, 0.6, 0.85); o.ViewObject.LineWidth = 2
+        except Exception:
+            pass
+        grp.addObject(o); n += 1
+    return n
+
+
 def _apply_thermal(doc, case, dT, elems):
     """Uniform temperature change dT (deg C) on each selected bar."""
     grp = _grp(doc, LOAD_GROUP)
@@ -3844,6 +3919,103 @@ class AddMemberLoad:
         doc.commitTransaction()
         doc.recompute()
         info(msg)
+
+
+class AddWindLoad:
+    _DIRS = {"+X": (1.0, 0.0, 0.0), "-X": (-1.0, 0.0, 0.0),
+             "+Y": (0.0, 1.0, 0.0), "-Y": (0.0, -1.0, 0.0)}
+
+    def GetResources(self):
+        return {"Pixmap": _icon("wind"), "MenuText": "Add Wind Load (EC1)",
+                "ToolTip": "EN 1991-1-4 wind load on the selected members: the peak "
+                           "velocity pressure q_p(z) is computed up the height and "
+                           "applied as a horizontal, height-varying line load "
+                           "(pressure x tributary width x pressure coefficient).",
+                "Accel": "A, W"}
+
+    def IsActive(self):
+        return bool(selected_elems())
+
+    def Activated(self):
+        elems = [m for m in selected_elems() if is_bar(m)]
+        if not elems:
+            info("Select the members the wind acts on (e.g. the windward face "
+                 "columns/beams), then add a wind load. The tributary width is the "
+                 "width of cladding each selected line carries.")
+            return
+        doc = FreeCAD.ActiveDocument
+        cs = [c[0] for c in _cases(doc)]
+        vals = form_dialog("Add Wind Load (EN 1991-1-4) - %d member(s)" % len(elems), [
+            {"key": "case", "label": "Load case", "kind": "combo",
+             "options": cs, "default": cs[-1]},
+            {"key": "_i", "kind": "info", "default":
+             "Peak velocity pressure q_p(z) is built up the height from the basic "
+             "wind velocity and terrain, then applied horizontally as q_p(z) x c_p "
+             "x tributary width - a line load that grows with height (stored as a "
+             "trapezoid per member). Put the wind onto the windward frame line and "
+             "give the cladding width it carries. Make a 'Wind' load case first if "
+             "you want it separate."},
+            {"key": "dir", "label": "Wind direction", "kind": "combo",
+             "options": list(self._DIRS.keys()), "default": "+X"},
+            {"key": "vb0", "label": "Basic wind velocity vb,0 (m/s)",
+             "kind": "float", "default": 24.0},
+            {"key": "terr", "label": "Terrain category", "kind": "combo",
+             "options": list(WIND_TERRAIN.keys()), "default": "II - Open, low vegetation"},
+            {"key": "cp", "label": "Pressure/force coeff c_p (net)",
+             "kind": "float", "default": 1.2},
+            {"key": "btrib", "label": "Tributary width (mm)", "kind": "float",
+             "default": 5000.0},
+            {"key": "c0", "label": "Orography factor c_o", "kind": "float", "default": 1.0},
+            {"key": "rho", "label": "Air density (kg/m3)", "kind": "float", "default": 1.25},
+            {"key": "cdir", "label": "Directional factor c_dir", "kind": "float", "default": 1.0},
+            {"key": "cseas", "label": "Season factor c_season", "kind": "float", "default": 1.0},
+        ])
+        if not vals:
+            return
+        d = self._DIRS.get(vals["dir"], (1.0, 0.0, 0.0))
+        dirv = FreeCAD.Vector(*d)
+        z0, zmin = WIND_TERRAIN.get(vals["terr"], (0.05, 2.0))
+        vb0 = float(vals["vb0"]); cp = float(vals["cp"]); btrib = float(vals["btrib"])
+        c0 = float(vals["c0"]); rho = float(vals["rho"])
+        cdir = float(vals["cdir"]); cseas = float(vals["cseas"])
+        # ground datum = lowest node of the whole analysis model
+        objs, _k = _analysis_objs(doc)
+        zg = None
+        for o in objs:
+            s, e = _elem_ends(o)
+            for p in (s, e):
+                zg = p.z if zg is None else min(zg, p.z)
+        if zg is None:
+            zg = 0.0
+
+        def wline(zmm):           # horizontal line load (N/mm) at height z [mm]
+            qp, _vm, _ce = _wind_qp(max(0.0, (zmm - zg)) / 1000.0, vb0, z0, zmin,
+                                    c0, rho, cdir, cseas)
+            # qp [Pa=N/m2] * cp * btrib [mm] -> N/m, /1000 -> N/mm
+            return qp * cp * (btrib / 1000.0) / 1000.0
+
+        items = []; qtop = 0.0; ztop = zg
+        for m in elems:
+            s, e = _elem_ends(m)
+            w1 = vscale(dirv, wline(s.z)); w2 = vscale(dirv, wline(e.z))
+            items.append((m, w1, w2))
+            for p, w in ((s, w1), (e, w2)):
+                if w.Length >= qtop:
+                    qtop = w.Length; ztop = p.z
+        qp_ref, vm_ref, ce_ref = _wind_qp(max(0.0, (ztop - zg)) / 1000.0, vb0, z0,
+                                          zmin, c0, rho, cdir, cseas)
+        doc.openTransaction("DynFrame: wind load")
+        n = _apply_wind(doc, vals["case"], items, vals["dir"])
+        doc.commitTransaction(); doc.recompute()
+        info("Wind load (EN 1991-1-4) added to case '%s' on %d member(s), wind %s.\n\n"
+             "Basic velocity vb=%.1f m/s, terrain '%s'.\n"
+             "At the top of the loaded members (z=%.2f m): q_p=%.3f kPa "
+             "(c_e=%.2f, v_m=%.1f m/s); line load there = %.3g N/mm "
+             "(= q_p x c_p=%.2f x trib=%.0f mm).\n\n"
+             "The load varies with height (trapezoid per member). Re-run Calculate "
+             "to apply. Tip: set c_p to your net windward+leeward coefficient."
+             % (vals["case"], n, vals["dir"], cdir * cseas * vb0, vals["terr"],
+                (ztop - zg) / 1000.0, qp_ref / 1000.0, ce_ref, vm_ref, qtop, cp, btrib))
 
 
 class AddPlate:
@@ -7156,6 +7328,7 @@ _add("DynFrame_AddMemberLoad", AddMemberLoad)
 _add("DynFrame_AddSettlement", AddSettlement)
 _add("DynFrame_AddPlate", AddPlate)
 _add("DynFrame_AddPlateLoad", AddPlateLoad)
+_add("DynFrame_AddWindLoad", AddWindLoad)
 _add("DynFrame_Combinations", Combinations)
 _add("DynFrame_MemberReleases", MemberReleases)
 _add("DynFrame_MemberType", MemberType)

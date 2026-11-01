@@ -191,6 +191,19 @@ model is what you analyse. Commands are on the toolbars/menus
   enter a uniform temperature change ΔT (°C); each material carries its own
   expansion coefficient α. A restrained member then develops N = −E·A·α·ΔT
   (validated exactly against the fixed-fixed bar).
+- **Wind loads (EN 1991-1-4)** — **Add Wind Load** builds the peak velocity
+  pressure q_p(z) up the height from the basic wind velocity v_b and terrain
+  category (0–IV roughness), and applies it to the selected members as a
+  **horizontal, height-varying line load** (q_p(z) × net pressure coefficient
+  c_p × tributary width), stored as a per-member trapezoid so it grows with
+  height — then solved like any other case and combined in the ULS/SLS
+  combinations. Validated: q_p(10 m, terrain II, v_b = 26 m/s) ≈ 0.99 kPa
+  (exposure factor c_e ≈ 2.35, matching the EN chart) and the applied base
+  shear equals the pressure integral exactly. For true CFD (flow field,
+  non-standard shapes), see **`CFD_with_OpenFOAM.md`**: DynFrame is a
+  structural solver, so CFD is run with OpenFOAM via the free **CfdOF**
+  FreeCAD workbench (the same engine SimScale uses), and the CFD pressure
+  coefficients feed straight back into this wind tool.
 - **Support settlement** — in **Support Settlement** select the supported
   node(s) and prescribe an imposed support movement (translations in mm,
   −Z = sinks down; rotations in rad) for a load case, e.g. a foundation that

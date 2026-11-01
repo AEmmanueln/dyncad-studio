@@ -2161,6 +2161,42 @@ def _shell_moments(pts, E, nu, t, u_glob18, En, Ex, Ey):
     return mxx, myy, mxy, avg + rad, avg - rad
 
 
+def _wood_armer(mx, my, mxy):
+    """Wood-Armer design moments for orthogonal (x, y) slab reinforcement
+    (Wood 1968 / Armer). Returns (mxb, myb, mxt, myt): the bottom-face design
+    moments (>=0, sagging, carried by bottom steel in x and y) and the
+    top-face design moments (<=0, hogging, top steel). The twisting moment
+    |Mxy| augments the demand; the standard corner corrections keep each
+    moment on the correct side. Sign convention: a sagging moment (bottom in
+    tension) is positive, consistent with _shell_moments."""
+    amxy = abs(mxy)
+    # bottom (sagging) reinforcement
+    mxb = mx + amxy; myb = my + amxy
+    if mxb < 0.0:
+        mxb = 0.0
+        myb = (my + abs(mxy * mxy / mx)) if abs(mx) > 1e-12 else (my + amxy)
+        if myb < 0.0:
+            myb = 0.0
+    elif myb < 0.0:
+        myb = 0.0
+        mxb = (mx + abs(mxy * mxy / my)) if abs(my) > 1e-12 else (mx + amxy)
+        if mxb < 0.0:
+            mxb = 0.0
+    # top (hogging) reinforcement
+    mxt = mx - amxy; myt = my - amxy
+    if mxt > 0.0:
+        mxt = 0.0
+        myt = (my - abs(mxy * mxy / mx)) if abs(mx) > 1e-12 else (my - amxy)
+        if myt > 0.0:
+            myt = 0.0
+    elif myt > 0.0:
+        myt = 0.0
+        mxt = (mx - abs(mxy * mxy / my)) if abs(my) > 1e-12 else (mx - amxy)
+        if mxt > 0.0:
+            mxt = 0.0
+    return mxb, myb, mxt, myt
+
+
 def _tri_normal_area(pts):
     """Unit normal (FreeCAD.Vector) and area of a 3D triangle."""
     import numpy as np
@@ -4485,10 +4521,11 @@ class RunAnalysis:
         # (Mx, My, Mxy) are expressed in one shared plate frame so the contour
         # is smooth; von Mises is the surface stress.
         shell_vm_max = 0.0
-        mom_peak = {"Mx": 0.0, "My": 0.0, "Mxy": 0.0, "M1": 0.0, "M2": 0.0}
+        mcomps = ("Mx", "My", "Mxy", "M1", "M2", "WAxb", "WAyb", "WAxt", "WAyt")
+        mom_peak = {c: 0.0 for c in mcomps}
         for sh in shells:
             En, Ex, Ey = _plate_frame([pts for (ni, pts) in sh["tris"]])
-            pervm = []; per = {c: [] for c in ("Mx", "My", "Mxy", "M1", "M2")}
+            pervm = []; per = {c: [] for c in mcomps}
             for (ni, pts) in sh["tris"]:
                 ug = []
                 for n in ni:
@@ -4496,8 +4533,11 @@ class RunAnalysis:
                 pervm.append(_shell_vm_stress(pts, sh["E"], sh["nu"], sh["t"], ug))
                 mxx, myy, mxy, m1, m2 = _shell_moments(
                     pts, sh["E"], sh["nu"], sh["t"], ug, En, Ex, Ey)
+                mxb, myb, mxt, myt = _wood_armer(mxx, myy, mxy)
                 per["Mx"].append(mxx); per["My"].append(myy); per["Mxy"].append(mxy)
                 per["M1"].append(m1); per["M2"].append(m2)
+                per["WAxb"].append(mxb); per["WAyb"].append(myb)
+                per["WAxt"].append(mxt); per["WAyt"].append(myt)
             sh["pervm"] = pervm
             for c in per:
                 sh["per" + c] = per[c]
@@ -4509,7 +4549,7 @@ class RunAnalysis:
                 _set(sh["o"], "App::PropertyFloat", "ShellVM", float(sh["vmmax"]))
                 _set(sh["o"], "App::PropertyFloat", "ShellUtil",
                      float(sh["vmmax"] / sh["Fy"]) if sh["Fy"] > 0 else 0.0)
-                for c in ("Mx", "My", "Mxy"):
+                for c in ("Mx", "My", "Mxy", "WAxb", "WAyb", "WAxt", "WAyt"):
                     pk = max((abs(v) for v in sh.get("per" + c, [])), default=0.0)
                     _set(sh["o"], "App::PropertyFloat", "Shell" + c, float(pk))
             except Exception:
@@ -4544,9 +4584,10 @@ class RunAnalysis:
         if shells:
             _build_plate_stress(doc, dg, shells, shell_vm_max,
                                 visible=(not elems))
-            for c in ("Mx", "My", "Mxy"):      # signed bending-moment contours
-                _build_plate_moment(doc, dg, shells, c, mom_peak[c], visible=False)
+            # moments, principal moments and Wood-Armer reinforcement contours
+            _build_plate_fields(doc, dg, shells, mom_peak, visible=False)
             self._plate_table(doc, shells, rg)
+            self._plate_reinf_table(doc, shells, rg)
         self._tables(doc, nodes, sup_nodes, Rreac, u, elems, run_name, rg, "Disp")
         doc.recompute()
         _apply_result_colors(doc)       # restore per-face gradient after recompute
@@ -4560,9 +4601,10 @@ class RunAnalysis:
         if shells:
             ntri = sum(len(s["tris"]) for s in shells)
             pnote = ("\n\n%d plate(s) / %d shell elements: max von Mises %.1f MPa; "
-                     "max |Mx| %.0f, |My| %.0f, |Mxy| %.0f N.mm/mm. See the 'Plate "
-                     "stress' and 'Plate Mx / My / Mxy' results in the Results Viewer "
-                     "and the 'PlateForces' table."
+                     "max |Mx| %.0f, |My| %.0f, |Mxy| %.0f N.mm/mm. Results Viewer: "
+                     "'Plate stress', 'Plate Mx / My / Mxy', principal 'M1 / M2' and "
+                     "the 'Wood-Armer' reinforcement moments (top & bottom, X & Y). "
+                     "Tables: 'PlateForces' and 'PlateReinforcement'."
                      % (len(shells), ntri, shell_vm_max,
                         mom_peak["Mx"], mom_peak["My"], mom_peak["Mxy"]))
         info("Analysis complete - %s  (%d bars, %d plates).\n\n"
@@ -4602,6 +4644,34 @@ class RunAnalysis:
                 rg.addObject(sh)
         except Exception as e:
             FreeCAD.Console.PrintError("DynFrame: plate table failed (%s)\n" % e)
+
+    def _plate_reinf_table(self, doc, shells, rg):
+        """Per-plate Wood-Armer design moments for orthogonal reinforcement:
+        the peak sagging (bottom) and hogging (top) design moment in each
+        direction - what you size the x- and y-bars against, top and bottom."""
+        try:
+            sh = (doc.getObject("PlateReinforcement")
+                  or doc.addObject("Spreadsheet::Sheet", "PlateReinforcement"))
+            sh.Label = "PlateReinforcement"; sh.clearAll()
+            sh.set("A1", "PLATE REINFORCEMENT - Wood-Armer design moments (N.mm/mm)")
+            for c, h in zip("ABCDE", ["Plate", "Mxd bottom (+x steel)",
+                                      "Myd bottom (+y steel)", "Mxd top (-x steel)",
+                                      "Myd top (-y steel)"]):
+                sh.set("%s2" % c, h)
+            r = 3
+
+            def _pk(s, c):
+                return max((abs(v) for v in s.get("per" + c, [])), default=0.0)
+            for s in shells:
+                row = [str(s["o"].Label), _pk(s, "WAxb"), _pk(s, "WAyb"),
+                       _pk(s, "WAxt"), _pk(s, "WAyt")]
+                for c, v in zip("ABCDE", row):
+                    sh.set("%s%d" % (c, r), ("%.4g" % v if isinstance(v, float) else str(v)))
+                r += 1
+            if rg is not None and sh not in rg.Group:
+                rg.addObject(sh)
+        except Exception as e:
+            FreeCAD.Console.PrintError("DynFrame: reinforcement table failed (%s)\n" % e)
 
     def _tables(self, doc, nodes, sup_nodes, Rreac, u, elems, run_name, rg, akind):
         def sheet(name):
@@ -4670,7 +4740,13 @@ RESULT_LABELS = {"Disp": "Displacement (mm)", "N": "N - axial force (N)",
                  "_plate": "Plate stress - von Mises (MPa)",
                  "_plateMx": "Plate Mx - bending (N.mm/mm)",
                  "_plateMy": "Plate My - bending (N.mm/mm)",
-                 "_plateMxy": "Plate Mxy - twisting (N.mm/mm)"}
+                 "_plateMxy": "Plate Mxy - twisting (N.mm/mm)",
+                 "_plateM1": "Plate M1 - principal max (N.mm/mm)",
+                 "_plateM2": "Plate M2 - principal min (N.mm/mm)",
+                 "_plateWAxb": "Plate Wood-Armer bottom X (N.mm/mm)",
+                 "_plateWAyb": "Plate Wood-Armer bottom Y (N.mm/mm)",
+                 "_plateWAxt": "Plate Wood-Armer top X (N.mm/mm)",
+                 "_plateWAyt": "Plate Wood-Armer top Y (N.mm/mm)"}
 RESULT_ORDER = ["Disp", "N", "Vy", "Vz", "Mx", "My", "Mz", "Stress"]
 
 
@@ -4723,7 +4799,8 @@ class ClearAnalysis:
         everything = kill.startswith("Everything")
         doc.openTransaction("DynFrame: clear")
         res_sheets = ("Reactions", "Displacements", "BarForces",
-                      "ModalFrequencies", "CodeCheck", "Envelope", "Seismic")
+                      "ModalFrequencies", "CodeCheck", "Envelope", "Seismic",
+                      "PlateForces", "PlateReinforcement")
         all_sheets = res_sheets + ("LoadCases", "Combinations", "AnalysisResults")
         to_del = []
         for o in list(doc.Objects):
@@ -5719,8 +5796,8 @@ def _result_list(doc):
     seen = set()
     for o in doc.Objects:
         dk = getattr(o, "DiagKind", None)
-        if dk and (dk in ("_mode", "_buckling", "_seismic", "_plate")
-                   or dk.startswith("_plateM")) and dk not in seen:
+        if dk and (dk in ("_mode", "_buckling", "_seismic")
+                   or dk.startswith("_plate")) and dk not in seen:
             seen.add(dk)
             out.append((o.Label or dk.strip("_").title(), dk, "obj"))
     return out
@@ -5786,6 +5863,11 @@ def _result_summary(doc):
         if max(mx, my, mxy) > 1e-9:
             lines.append("Plate max |Mx| %.4g | |My| %.4g | |Mxy| %.4g  N.mm/mm"
                          % (mx, my, mxy))
+        wxb, wyb = ppk("ShellWAxb"), ppk("ShellWAyb")
+        wxt, wyt = ppk("ShellWAxt"), ppk("ShellWAyt")
+        if max(wxb, wyb, wxt, wyt) > 1e-9:
+            lines.append("Wood-Armer design M - bottom x/y %.4g / %.4g, "
+                         "top x/y %.4g / %.4g  N.mm/mm" % (wxb, wyb, wxt, wyt))
     cc = doc.getObject("CodeCheck")
     if cc is not None:
         lines.append("Code check: see 'CodeCheck' table (class, chi_LT, U).")
@@ -6766,11 +6848,12 @@ def _build_plate_stress(doc, grp, shells, vmmax, visible=False):
     return first
 
 
-def _build_plate_moment(doc, grp, shells, comp, peak, visible=False):
-    """Signed bending-moment contour of the plates for one component (Mx, My,
-    Mxy or the principal M1 / M2): each triangle binned into a colour band over
-    a symmetric range -peak..+peak (blue = hogging, red = sagging) and drawn
-    with a plain ShapeColor, one object per band, like the von Mises contour."""
+def _build_plate_field(doc, grp, shells, comp, vmin, vmax, label, visible=False):
+    """Generic plate scalar-field contour for one per-triangle component
+    (key 'per'+comp): each triangle binned into a colour band over [vmin, vmax]
+    and drawn with a plain ShapeColor, one object per band (reliable gradient).
+    Used for the signed bending moments Mx/My/Mxy, the principal moments M1/M2
+    and the one-signed Wood-Armer reinforcement moments."""
     dk = "_plate" + comp; key = "per" + comp
     for o in list(doc.Objects):
         if o.Name.startswith("Plate" + comp + "_b"):
@@ -6780,7 +6863,7 @@ def _build_plate_moment(doc, grp, shells, comp, peak, visible=False):
                 pass
     NBAND = 16
     bands = [[] for _ in range(NBAND)]
-    vmin = -peak; span = (2.0 * peak) or 1.0
+    span = (vmax - vmin) or 1.0
     for sh in shells:
         vals = sh.get(key, [])
         for k, (ni, pts) in enumerate(sh["tris"]):
@@ -6799,10 +6882,10 @@ def _build_plate_moment(doc, grp, shells, comp, peak, visible=False):
             continue
         ob = doc.addObject("Part::Feature", "Plate%s_b%d" % (comp, k))
         ob.Shape = Part.makeCompound(fs)
-        ob.Label = "Plate %s (N.mm/mm)" % comp
+        ob.Label = label
         _set(ob, "App::PropertyString", "DiagKind", dk)
-        _set(ob, "App::PropertyFloat", "CompMax", float(peak))
-        _set(ob, "App::PropertyFloat", "CompMin", float(-peak))
+        _set(ob, "App::PropertyFloat", "CompMax", float(vmax))
+        _set(ob, "App::PropertyFloat", "CompMin", float(vmin))
         col = _ramp((k + 0.5) / NBAND)
         try:
             ob.ViewObject.Visibility = bool(visible)
@@ -6816,6 +6899,35 @@ def _build_plate_moment(doc, grp, shells, comp, peak, visible=False):
         if first is None:
             first = ob
     return first
+
+
+# plate contour fields, in Results-Viewer order: (component key, signed?, label)
+PLATE_FIELDS = [
+    ("Mx",   True,  "Plate Mx - bending (N.mm/mm)"),
+    ("My",   True,  "Plate My - bending (N.mm/mm)"),
+    ("Mxy",  True,  "Plate Mxy - twisting (N.mm/mm)"),
+    ("M1",   True,  "Plate M1 - principal max (N.mm/mm)"),
+    ("M2",   True,  "Plate M2 - principal min (N.mm/mm)"),
+    ("WAxb", False, "Plate Wood-Armer bottom X (N.mm/mm)"),
+    ("WAyb", False, "Plate Wood-Armer bottom Y (N.mm/mm)"),
+    ("WAxt", False, "Plate Wood-Armer top X (N.mm/mm)"),
+    ("WAyt", False, "Plate Wood-Armer top Y (N.mm/mm)"),
+]
+
+
+def _build_plate_fields(doc, grp, shells, mom_peak, visible=False):
+    """Build every plate moment / principal / Wood-Armer contour (hidden),
+    each scaled to its own peak: signed fields over -peak..+peak, one-signed
+    Wood-Armer fields over 0..peak (bottom) or -peak..0 (top)."""
+    for (comp, signed, label) in PLATE_FIELDS:
+        pk = float(mom_peak.get(comp, 0.0))
+        if signed:
+            vmin, vmax = -pk, pk
+        elif comp.endswith("t"):          # top: hogging, values <= 0
+            vmin, vmax = -pk, 0.0
+        else:                             # bottom: sagging, values >= 0
+            vmin, vmax = 0.0, pk
+        _build_plate_field(doc, grp, shells, comp, vmin, vmax, label, visible=visible)
 
 
 class RebuildFromSketch:

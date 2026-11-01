@@ -215,10 +215,16 @@ model is what you analyse. Commands are on the toolbars/menus
   moments per unit width recovered from the DKT element and reported in one
   consistent plate coordinate frame, so the contour is smooth across the mesh;
   drawn with a signed blue→red map, hogging→sagging, with a −peak … +peak
-  colour bar — the Robot/Inventor way of reading a slab), a `PlateForces`
-  table (max von Mises, utilisation and max |Mₓ| / |M_y| / |M_xy| per plate),
-  and the plate nodes' deflections in the `Displacements` table. Pick **Plate
-  Mx / My / Mxy** in the Results Viewer to switch between them.
+  colour bar — the Robot/Inventor way of reading a slab), the **principal
+  moments M₁ / M₂**, and the **Wood–Armer design moments** for orthogonal
+  reinforcement — the sagging (bottom) and hogging (top) moment the x- and
+  y-bars must resist, |M_xy| folded in by the standard corner corrections
+  (Wood 1968). Tables: `PlateForces` (max von Mises, utilisation, max
+  |Mₓ| / |M_y| / |M_xy| per plate) and `PlateReinforcement` (the four
+  Wood–Armer design moments per plate), plus the plate nodes' deflections in
+  `Displacements`. Pick any of **Plate stress / Mx / My / Mxy / M1 / M2 /
+  Wood–Armer (bottom & top, X & Y)** in the Results Viewer to switch the
+  contour; the colour bar re-ranges to match.
 
 **Materials:** Steel S235 / S275 / S355, Stainless 304, Aluminium 6061-T6
 (each with its own E, G, yield and density). Edit `MATERIALS` in
@@ -246,6 +252,10 @@ model is what you analyse. Commands are on the toolbars/menus
 > deflection (w_c = 0.00406 q a⁴/D, ratio ≈ 0.996), its recovered
 > **bending moment** matches the Timoshenko centre value (Mₓ = M_y =
 > 0.0479 q a², ratio ≈ 0.99), and it is frame-invariant on a tilted plane;
+> **Wood–Armer** design moments reproduce the closed-form corner cases (pure
+> sagging → bottom steel one way, pure twist → equal steel all four faces,
+> combined → the corrected design moments), and are always sign-correct
+> (bottom ≥ 0, top ≤ 0, enveloping the raw field);
 > **support settlement** matches 3EIδ/L² and 3EIδ/L³ for a settling prop, and
 > **tension-only / compression-only** members drop out under the wrong-sign
 > axial force (active-set), matching the spring-parallel closed form. It

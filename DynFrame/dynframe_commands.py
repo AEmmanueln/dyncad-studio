@@ -3613,6 +3613,21 @@ def _wind_qp(z_m, vb0, z0, zmin, c0=1.0, rho=1.25, cdir=1.0, cseason=1.0):
     return qp, vm, ce
 
 
+def _sway_phi(h_m, m):
+    """EN 1993-1-1 (5.3.2) global initial sway imperfection
+    phi = phi_0 * alpha_h * alpha_m, with phi_0 = 1/200,
+    alpha_h = 2/sqrt(h) clamped to [2/3, 1] (h = frame height in m), and
+    alpha_m = sqrt(0.5*(1 + 1/m)) (m = number of columns in the row).
+    Returns (phi, alpha_h, alpha_m)."""
+    import math
+    phi0 = 1.0 / 200.0
+    ah = (2.0 / math.sqrt(h_m)) if h_m > 1e-9 else 1.0
+    ah = max(2.0 / 3.0, min(1.0, ah))
+    mm = max(1, int(m))
+    am = math.sqrt(0.5 * (1.0 + 1.0 / mm))
+    return phi0 * ah * am, ah, am
+
+
 def _apply_wind(doc, case, items, dirlabel):
     """Create the wind member loads: `items` is a list of (member, w1vec, w2vec)
     where w1/w2 are the horizontal line loads (N/mm) at the member start/end
@@ -4016,6 +4031,93 @@ class AddWindLoad:
              "to apply. Tip: set c_p to your net windward+leeward coefficient."
              % (vals["case"], n, vals["dir"], cdir * cseas * vb0, vals["terr"],
                 (ztop - zg) / 1000.0, qp_ref / 1000.0, ce_ref, vm_ref, qtop, cp, btrib))
+
+
+class AddImperfection:
+    _DIRS = {"+X": (1.0, 0.0, 0.0), "-X": (-1.0, 0.0, 0.0),
+             "+Y": (0.0, 1.0, 0.0), "-Y": (0.0, -1.0, 0.0)}
+
+    def GetResources(self):
+        return {"Pixmap": _icon("sway"), "MenuText": "Sway Imperfection (EC3)",
+                "ToolTip": "EN 1993-1-1 global initial sway imperfection as "
+                           "equivalent horizontal forces: phi = (1/200) alpha_h "
+                           "alpha_m times each column's axial load, applied at the "
+                           "column tops. Run a gravity Calculate first (it uses the "
+                           "column axial forces).", "Accel": "A, I"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        doc = FreeCAD.ActiveDocument
+        bars = [o for o in doc.Objects if is_analysis_elem(o) and hasattr(o, "ResN")]
+        if not bars:
+            info("Run a gravity Calculate first - the sway imperfection uses the "
+                 "column axial forces (N_Ed) from the analysis to form the "
+                 "equivalent horizontal forces phi x N.")
+            return
+        # columns = predominantly vertical members; collect top node + axial
+        cols = []; zmin = None; zmax = None
+        for o in bars:
+            s, e = _elem_ends(o)
+            L = s.distanceToPoint(e)
+            if L < 1e-6:
+                continue
+            dz = abs(e.z - s.z)
+            for p in (s, e):
+                zmin = p.z if zmin is None else min(zmin, p.z)
+                zmax = p.z if zmax is None else max(zmax, p.z)
+            if dz / L > 0.7:                      # a column
+                top = e if e.z >= s.z else s
+                ncomp = max(0.0, -float(getattr(o, "ResN", 0.0)))   # compression
+                cols.append((top, ncomp))
+        if not cols:
+            info("No columns (vertical members) found. The sway imperfection needs "
+                 "vertical members carrying axial load."); return
+        h_m = max(1e-6, (zmax - zmin) / 1000.0)
+        cs = [c[0] for c in _cases(doc)]
+        vals = form_dialog("Sway Imperfection (EN 1993-1-1)", [
+            {"key": "case", "label": "Load case", "kind": "combo",
+             "options": cs, "default": cs[-1]},
+            {"key": "_i", "kind": "info", "default":
+             "phi = (1/200) x alpha_h x alpha_m.  alpha_h = 2/sqrt(h) in [2/3, 1] "
+             "with h the frame height; alpha_m = sqrt(0.5(1+1/m)), m = number of "
+             "columns. The equivalent horizontal force phi x N (column axial) is "
+             "applied at each column top. Apply in a separate case and combine with "
+             "gravity. For a multi-storey frame this phi x (column axial) is "
+             "conservative (a per-storey split gives less)."},
+            {"key": "dir", "label": "Direction", "kind": "combo",
+             "options": list(self._DIRS.keys()), "default": "+X"},
+            {"key": "m", "label": "Number of columns m", "kind": "int",
+             "default": len(cols), "min": 1, "max": 1000},
+        ])
+        if not vals:
+            return
+        phi, ah, am = _sway_phi(h_m, int(vals["m"]))
+        d = self._DIRS.get(vals["dir"], (1.0, 0.0, 0.0))
+        dirv = FreeCAD.Vector(*d)
+        # accumulate phi*N per (merged) top node
+        acc = {}
+        for (top, ncomp) in cols:
+            key = (round(top.x, 3), round(top.y, 3), round(top.z, 3))
+            acc[key] = acc.get(key, 0.0) + phi * ncomp
+        doc.openTransaction("DynFrame: sway imperfection")
+        ntot = 0.0; applied = 0
+        for (key, mag) in acc.items():
+            if mag <= 1e-9:
+                continue
+            _apply_nodal(doc, vals["case"], vscale(dirv, mag),
+                         [FreeCAD.Vector(*key)])
+            ntot += mag; applied += 1
+        doc.commitTransaction(); doc.recompute()
+        info("Sway imperfection (EN 1993-1-1) added to case '%s', direction %s.\n\n"
+             "Frame height h = %.2f m, m = %d columns -> phi = %.5f "
+             "(alpha_h = %.3f, alpha_m = %.3f).\n"
+             "Equivalent horizontal forces phi x N applied at %d column top(s); "
+             "total notional shear = %.0f N.\n\nRe-run Calculate (combine this case "
+             "with gravity) to capture the second-order sway effect - pair it with "
+             "the P-Delta option." % (vals["case"], vals["dir"], h_m, int(vals["m"]),
+                                      phi, ah, am, applied, ntot))
 
 
 class AddPlate:
@@ -7329,6 +7431,7 @@ _add("DynFrame_AddSettlement", AddSettlement)
 _add("DynFrame_AddPlate", AddPlate)
 _add("DynFrame_AddPlateLoad", AddPlateLoad)
 _add("DynFrame_AddWindLoad", AddWindLoad)
+_add("DynFrame_AddImperfection", AddImperfection)
 _add("DynFrame_Combinations", Combinations)
 _add("DynFrame_MemberReleases", MemberReleases)
 _add("DynFrame_MemberType", MemberType)

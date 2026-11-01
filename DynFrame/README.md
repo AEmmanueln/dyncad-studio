@@ -204,6 +204,13 @@ model is what you analyse. Commands are on the toolbars/menus
   structural solver, so CFD is run with OpenFOAM via the free **CfdOF**
   FreeCAD workbench (the same engine SimScale uses), and the CFD pressure
   coefficients feed straight back into this wind tool.
+- **Sway imperfections (EC3)** — **Sway Imperfection** forms the EN 1993-1-1
+  (5.3.2) global initial sway as **equivalent horizontal forces**: φ =
+  (1/200)·α_h·α_m (α_h = 2/√h clamped to [2/3, 1], α_m = √(0.5(1+1/m))), and
+  applies φ·N at each column top, where N is the column axial force from the
+  gravity analysis. Put it in its own case, combine with gravity and tick
+  **P-Δ** to capture the second-order sway. (Validated: φ(h=10 m, m=1) =
+  0.00333 and the notional force equals φ·N exactly.)
 - **Support settlement** — in **Support Settlement** select the supported
   node(s) and prescribe an imposed support movement (translations in mm,
   −Z = sinks down; rotations in rad) for a load case, e.g. a foundation that
@@ -253,6 +260,23 @@ and Concrete C25/30 / C30/37 / C35/45 (E_cm and ν = 0.2 per EN 1992-1-1, for
 RC slabs) — each with its own E, G, yield/fck and density. Edit `MATERIALS`
 in `dynframe_commands.py` to add more.
 
+## Verification & Validation
+
+Correctness here is reproducible, not a matter of trust in a logo. Every
+feature is checked against a closed-form or benchmark solution in a test suite
+that runs with no GUI (FreeCAD/Part/PySide are mocked; the solver uses real
+numpy). Run it yourself from the repository root:
+
+```
+python3 DynFrame/tests/validate.py          # engine vs closed-form benchmarks
+python3 DynFrame/tests/test_registration.py # workbench + all commands register
+```
+
+`validate.py` prints each check with its expected value and exits non-zero on
+any mismatch — so "it matches theory" is something you can watch happen, the
+same Verification & Validation discipline commercial tools (Ansys, SimScale)
+rely on. The checks it runs:
+
 > **Validation** (all numeric, against closed-form solutions): the static
 > solver is exact in both bending planes — cantilever (point and UDL),
 > simply-supported and fixed-fixed beams (tip = wL⁴/8EI, mid = 5wL⁴/384EI,
@@ -279,11 +303,17 @@ in `dynframe_commands.py` to add more.
 > sagging → bottom steel one way, pure twist → equal steel all four faces,
 > combined → the corrected design moments), and are always sign-correct
 > (bottom ≥ 0, top ≤ 0, enveloping the raw field);
-> **support settlement** matches 3EIδ/L² and 3EIδ/L³ for a settling prop, and
+> **support settlement** matches 3EIδ/L² and 3EIδ/L³ for a settling prop;
 > **tension-only / compression-only** members drop out under the wrong-sign
-> axial force (active-set), matching the spring-parallel closed form. It
+> axial force (active-set), matching the spring-parallel closed form; the
+> **EC2 slab reinforcement** matches the hand calc (200 mm C30/37 slab at
+> 50 kN·m/m → ≈757 mm²/m, min-steel and over-moment cases flagged); the
+> **EN 1991-1-4 wind** pressure q_p(10 m, terrain II, v_b = 26 m/s) ≈ 0.99 kPa
+> (c_e ≈ 2.35, matching the exposure chart) with the applied base shear equal
+> to the pressure integral; and the **EC3 sway imperfection** gives φ =
+> (1/200)α_h α_m with the notional force φ·N applied exactly. It
 > covers **static, P-Δ, modal, buckling, seismic (response-spectrum),
-> plates/shells and a full EN 1993-1-1 design check**.
+> plates/shells, wind and a full EN 1993-1-1 / EN 1992-1-1 design check**.
 > FreeCAD is not Robot — this reproduces Robot's *workflow and core
 > engineering* on its kernel.
 

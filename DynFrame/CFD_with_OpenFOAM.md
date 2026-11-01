@@ -90,6 +90,81 @@ current reference — follow it where it differs from the outline below.
 
 ---
 
+## 3b. Step-by-step worked example — wind around a building block
+
+A concrete walk-through you can follow click-by-click. Example: a
+**30 m × 20 m × 40 m (tall) building**, wind at **27 m/s**, air (ν = 1.5e-5
+m²/s, ρ = 1.225). The goal is the surface **pressure coefficients c_p** and the
+**drag**, which is exactly what SimScale's "Incompressible" analysis gives —
+same solver, so matching it is a matter of matching the setup.
+
+> Units: OpenFOAM/CfdOF work in **metres and m/s** (SI), unlike DynFrame's mm.
+> Build the CFD geometry in metres.
+
+1. **Model the envelope solid.** In the **Part** workbench, `Part → Primitives
+   → Box`, 30 × 20 × 40 m, sitting on the ground plane (z = 0). This is the
+   *obstacle* the air flows around (not the frame). Name it `Building`.
+2. **Switch to the CfdOF workbench.**
+3. **Create the analysis:** toolbar **"Analysis container"**. A `CfdAnalysis`
+   plus a `PhysicsModel`, `FluidProperties` and `CfdMesh` tree appear.
+4. **Physics model** (double-click): *Flow = Incompressible*, *Steady state*,
+   *Turbulence = RANS → k-ω SST*. (SST is the standard choice for bluff-body
+   external flow; SimScale defaults to it too.)
+5. **Fluid properties:** *Air* — kinematic viscosity `1.5e-5`, density `1.225`.
+6. **Domain / wind tunnel.** Make a second, large `Box` around the building and
+   mark it the flow region. Sizes (H = 40 m building height):
+   - inlet face 5H = 200 m upstream, outlet 15H = 600 m downstream,
+   - 5H = 200 m to each side and above; blockage < 3 %.
+   In CfdOF you can set this as the mesh's background domain extent.
+7. **Mesh** (double-click `CfdMesh`): mesher **cfMesh** (robust) or
+   **snappyHexMesh**. Base cell ≈ 4–8 m; add a **surface refinement** on the
+   `Building` faces (down to ~0.5–1 m) and **boundary-layer prism layers**
+   (3–5 layers) so the near-wall y⁺ suits the SST wall functions. Right-click →
+   **"Write mesh case"**, then **"Run mesher"**. Check it completes and the
+   cell count is reasonable (start coarse — tens of thousands — then refine).
+8. **Boundary conditions** (CfdOF → "Fluid boundary", one per face group):
+   - **Inlet** (upstream face): type *Velocity inlet*, U = (27, 0, 0) m/s.
+     For a code-consistent profile, use an **atmospheric boundary layer** log
+     profile instead of uniform U — this is the same mean-wind shape
+     EN 1991-1-4 (and DynFrame's wind tool) use.
+   - **Outlet** (downstream face): *Pressure outlet*, p = 0.
+   - **Building + ground**: *Wall*, no-slip (with wall functions).
+   - **Sides + top**: *Slip* (or symmetry).
+9. **Initialise** the internal field (U = inlet, p = 0, with k and ω from the
+   turbulence-intensity estimate CfdOF offers).
+10. **Solve:** CfdOF → **"Run"**. It calls `simpleFoam`. Watch the residuals
+    (Ux, Uy, Uz, p, k, ω) fall several orders of magnitude and a monitored
+    quantity (e.g. drag force on the building) flatten out — that is
+    convergence. A few hundred to a few thousand iterations is typical.
+11. **Post-process:** CfdOF → **"Paraview"** opens the case. Colour the building
+    surface by pressure; compute **c_p = (p − p_ref)/(½ρU_ref²)** (p is kinematic
+    pressure p/ρ in incompressible OpenFOAM, so multiply by ρ first). Add
+    streamlines/velocity glyphs to see separation and the wake.
+
+### Getting the *same* numbers as SimScale
+
+Because the engine is identical, differences come only from the setup. To match
+a SimScale run (or any reference):
+
+- **Same turbulence model and wall treatment** (k-ω SST + wall functions).
+- **Same inlet** (uniform vs ABL profile, same U, same turbulence intensity).
+- **Equivalent mesh** — comparable near-wall resolution (y⁺) and surface
+  refinement. Exact cell-for-cell identity is not required; *mesh-independent*
+  results are. Refine both until c_p / drag stop changing — they converge to
+  the same values.
+- **Same fluid properties and reference pressure**.
+
+Then confirm trustworthiness independently of any product:
+
+- **Mesh-independence study:** run coarse → medium → fine; the reported c_p /
+  drag should change < a few %. If they keep moving, the mesh (not the brand)
+  is the problem.
+- **Benchmark once:** reproduce a published case before trusting your own — the
+  **surface-mounted cube** (Martinuzzi & Tropea; AIJ building benchmarks) is the
+  standard external-flow check; `pitzDaily`/backward-facing step is the standard
+  internal one. Match the benchmark and you have shown *your* setup is right,
+  which is the only thing a brand name would have been standing in for.
+
 ## 4. Feeding CFD results back into DynFrame
 
 CFD gives you **pressure coefficients** on the real geometry; DynFrame turns

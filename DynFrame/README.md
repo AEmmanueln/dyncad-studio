@@ -217,11 +217,20 @@ model is what you analyse. Commands are on the toolbars/menus
   code idealises the response. (Validated: 6-mode superposition reproduces the
   direct step-load DAF to 0.5 %.) It reports the peak response, the dynamic
   amplification, the peak base shear, a monitored-node **`ResponseHistory`**
-  table, the deformed shape at peak, and a member-force envelope stored for the
-  code check. (Validated: a cantilever under a suddenly-applied step force
+  table, the deformed shape at peak, an **inter-storey drift** envelope
+  (`StoreyDrift` table — peak relative displacement and drift ratio per storey)
+  and a member-force envelope stored for the code check. (Validated: a
+  cantilever under a suddenly-applied step force
   gives the exact SDOF dynamic amplification factor of 2.0, the response
   oscillates at its natural period T₁, f₁ matches the analytical cantilever,
   and heavy damping collapses the response to the static value.)
+- **Ground-Motion Spectrum** — the **elastic response spectrum** (Sd, Sa vs
+  period T) of a recorded accelerogram: a unit SDOF is run over a range of
+  periods to get its peak response per period — the classic Sa-vs-T curve for
+  comparing a record against the code design spectrum. Reads the record from a
+  spreadsheet, writes a `GMSpectrum` table. (Validated: for a sinusoid the
+  spectrum gives Sa → PGA at short period and a resonant peak Sa ≈ PGA/2ζ at
+  T = 1/f, matching the closed form.)
 - **Seismic (Response Spectrum)** — EN 1998-1 (EC8) response-spectrum
   analysis built on the modal results: pick the direction, ground
   acceleration aₘ, ground type (A–E) and behaviour factor q; it reports
@@ -346,9 +355,12 @@ rely on. The checks it runs:
 > **seismic** effective modal masses sum to 100 % of the total mass; the
 > **time-history** (Newmark-β) reproduces the exact step-load dynamic
 > amplification factor of 2.0, oscillates at the natural period T₁, and
-> collapses to the static response under heavy damping, and a **recorded
-> accelerogram** read from a spreadsheet reproduces the matching built-in
-> excitation to the digit; the
+> collapses to the static response under heavy damping; **modal superposition**
+> matches the direct result to 0.5 %, a **recorded accelerogram** read from a
+> spreadsheet reproduces the matching built-in excitation to the digit, the
+> inter-storey **drift ratio** equals the relative storey displacement over the
+> storey height, and the **ground-motion response spectrum** of a sinusoid
+> gives Sa → PGA at short period and a resonant peak Sa ≈ PGA/2ζ at T = 1/f; the
 > **plate/shell** element converges to the exact simply-supported-plate
 > deflection (w_c = 0.00406 q a⁴/D, ratio ≈ 0.996), its recovered
 > **bending moment** matches the Timoshenko centre value (Mₓ = M_y =

@@ -1316,4 +1316,57 @@ _os2.remove(pth)
 print("  imported %d pts; '%s'"%(len(rr[0]), gGM["msg"].split(chr(10))[0]))
 print("ground-motion import OK")
 
+print("\n=== Storey drift (time-history) + response spectrum ===")
+import math as _ms2, re as _re4
+# storey-level grouping
+assert C._storey_levels([0.0,0.0,3000.0,3000.4,6000.0],1.0)==[0.0,3000.0,6000.0]
+# a 2-storey column: levels 0 / 3000 / 6000, lateral step at the top
+C._section_props_from_name=lambda name:(2000.0,1.0e6,1.0e6,2.0e6,100.0)
+dSD=Doc(); FreeCAD.ActiveDocument=dSD
+for (za,zb) in ((0,3000),(3000,6000)):
+    b=dSD.addObject("Part::Feature","C_%d"%zb); b.Shape=Shape(0,[Vec(0,0,za),Vec(0,0,zb)])
+    b.IsBar=True; b.Section="IPE 200"; b.Material="Steel S235"
+    b.BarStart=Vec(0,0,za); b.BarEnd=Vec(0,0,zb)
+dSD.addObject("Part::Feature","S").Restrain="111111"; dSD.Objects[-1].AtNode=Vec(0,0,0)
+C._sel_vertices=lambda: [Vec(0,0,6000)]
+C.form_dialog=lambda title,fields:{"exc":"Nodal force","dir":"+X","amp":20000.0,
+  "func":"Step","freq":5.0,"td":0.1,"recsheet":"GroundMotion","recunit":"g",
+  "dur":0.5,"dt":0.002,"zeta":0.05,"method":"Direct (Newmark)","nmodes":6}
+gSD={}; C.info=lambda m,g=gSD: g.setdefault("msg",m)
+C.TimeHistory().Activated()
+dr=dSD.getObject("StoreyDrift")
+assert dr is not None and dr._cells.get("D2","").startswith("drift")
+# two storeys, and the reported drift ratio equals drift / storey height
+d1=float(dr._cells["D3"]); rat1=float(_re4.match(r"([\d.]+)",dr._cells["E3"]).group(1))
+assert "E4" in dr._cells and abs(rat1-d1/3000.0)<5e-3, (d1,rat1)  # =d/h (to rounding)
+assert "inter-storey drift" in gSD["msg"].lower()
+print("  2-storey drift: storey-1 drift=%.4g mm ratio=%.5f (=d/h OK)"%(d1,rat1))
+# response spectrum of a sine: Sa(small T) ~ PGA, resonant peak at T=1/f ~ A/2zeta
+f=2.0; A=1000.0; zt=0.05; Nr=4000; dtr=0.005
+tss=[i*dtr for i in range(Nr+1)]; agg=[A*_ms2.sin(2*_ms2.pi*f*t) for t in tss]
+pers=[0.04+(1.0-0.04)*i/59 for i in range(60)]
+Sd,Sa=C._response_spectrum(tss,agg,zt,pers)
+im=max(range(60),key=lambda i:Sa[i])
+print("  spectrum: Sa(T=%.2f)=%.0f (PGA=%.0f); peak Sa=%.0f at T=%.3f (~1/f=0.5, ~A/2z=%.0f)"
+      %(pers[0],Sa[0],A,max(Sa),pers[im],A/(2*zt)))
+assert 0.8*A<=Sa[0]<=1.4*A, Sa[0]
+assert abs(pers[im]-1.0/f)<0.08, pers[im]
+assert abs(max(Sa)-A/(2*zt))/(A/(2*zt))<0.2, max(Sa)
+# GMSpectrum command on a sine sheet (unit mm/s2)
+dGS=Doc(); FreeCAD.ActiveDocument=dGS
+gm=dGS.addObject("Spreadsheet::Sheet","GM2"); gm.Label="GM2"
+gm.set("A1","t"); gm.set("B1","a")
+for i in range(Nr+1):
+    gm.set("A%d"%(i+2), tss[i]); gm.set("B%d"%(i+2), agg[i])
+C.form_dialog=lambda title,fields:{"sheet":"GM2","unit":"mm/s2","zeta":0.05,
+                                   "tmax":1.0,"nt":60}
+gGS={}; C.info=lambda m,g=gGS: g.setdefault("msg",m)
+C.GMSpectrum().Activated()
+sp=dGS.getObject("GMSpectrum")
+assert sp is not None and sp._cells.get("C2","").startswith("Sa")
+pkT=float(_re4.search(r"at T = ([\d.]+) s",gGS["msg"]).group(1))
+print("  GMSpectrum command: peak Sa at T=%.3f s (expect ~0.5)"%pkT)
+assert abs(pkT-0.5)<0.08, pkT
+print("storey drift + response spectrum OK")
+
 print("\nALL RUNTIME CHECKS PASSED")

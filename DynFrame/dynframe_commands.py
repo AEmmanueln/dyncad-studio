@@ -5175,7 +5175,8 @@ class ClearAnalysis:
         res_sheets = ("Reactions", "Displacements", "BarForces",
                       "ModalFrequencies", "CodeCheck", "Envelope", "Seismic",
                       "PlateForces", "PlateReinforcement", "PlateSteel",
-                      "PunchingShear", "MovingEnvelope", "ResponseHistory")
+                      "PunchingShear", "MovingEnvelope", "ResponseHistory",
+                      "StoreyDrift", "GMSpectrum")
         all_sheets = res_sheets + ("LoadCases", "Combinations", "AnalysisResults")
         to_del = []
         for o in list(doc.Objects):
@@ -6141,6 +6142,56 @@ def _frame_stiffness(doc):
     return nodes, elems, K, fixed, sup
 
 
+def _storey_levels(zs, tol=1.0):
+    """Distinct storey elevations (sorted) from a list of node Z coordinates,
+    merging levels within `tol`."""
+    levels = []
+    for z in zs:
+        if not any(abs(z - L) <= tol for L in levels):
+            levels.append(float(z))
+    levels.sort()
+    return levels
+
+
+def _response_spectrum(ts, ag, zeta, periods):
+    """Elastic response spectrum of a ground-acceleration record ag(t) (in
+    mm/s^2 at times ts) for the given damping ratio: for each natural period T
+    a unit-mass SDOF (w=2pi/T) is integrated under -ag(t) by Newmark, and its
+    peak relative displacement Sd and pseudo-acceleration Sa = w^2 Sd are
+    returned. Lists (Sd, Sa) aligned with `periods` (all in mm, mm/s^2)."""
+    import numpy as np
+    ts = np.asarray(ts, float); ag = np.asarray(ag, float)
+    t0, t1 = ts[0], ts[-1]
+    rec_dt = (t1 - t0) / (len(ts) - 1) if len(ts) > 1 else 0.01
+    beta = 0.25; gamma = 0.5
+    Sd = []; Sa = []
+    for T in periods:
+        w = 2.0 * np.pi / T if T > 1e-9 else 1e9
+        dt = min(rec_dt, T / 15.0)
+        n = max(2, int(np.ceil((t1 - t0) / dt)))
+        dt = (t1 - t0) / n
+        grid = t0 + dt * np.arange(n + 1)
+        a_g = np.interp(grid, ts, ag, left=0.0, right=0.0)
+        c = 2.0 * zeta * w; k = w * w
+        a0 = 1.0 / (beta * dt * dt); a1 = gamma / (beta * dt)
+        a2 = 1.0 / (beta * dt); a3 = 1.0 / (2 * beta) - 1.0
+        a4 = gamma / beta - 1.0; a5 = dt * (gamma / (2 * beta) - 1.0)
+        khat = k + a0 + a1 * c
+        q = 0.0; v = 0.0; acc = -a_g[0]           # m=1
+        peak = 0.0
+        for i in range(n):
+            p1 = -a_g[i + 1] + (a0 * q + a2 * v + a3 * acc) \
+                + c * (a1 * q + a4 * v + a5 * acc)
+            q1 = p1 / khat
+            acc1 = a0 * (q1 - q) - a2 * v - a3 * acc
+            v1 = v + dt * ((1 - gamma) * acc + gamma * acc1)
+            q, v, acc = q1, v1, acc1
+            if abs(q) > peak:
+                peak = abs(q)
+        Sd.append(peak); Sa.append(w * w * peak)
+    return Sd, Sa
+
+
 def _frame_fine_MK(doc, nsub=4):
     """Assemble the frame's global stiffness K and consistent mass M on a mesh
     that subdivides each bar into `nsub` sub-elements (the coarse support nodes
@@ -6630,6 +6681,77 @@ class ImportGroundMotion:
              (len(ts), name, ts[-1], dtv, pga))
 
 
+class GMSpectrum:
+    def GetResources(self):
+        return {"Pixmap": _icon("spectrum"), "MenuText": "Ground-Motion Spectrum",
+                "ToolTip": "Elastic response spectrum (Sd, Sa) of a recorded "
+                           "accelerogram in a spreadsheet: a unit SDOF is run over a "
+                           "range of periods to get the peak response per period. "
+                           "The classic Sa-vs-T plot for comparing a record to the "
+                           "code spectrum.", "Accel": "A, Q"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        import numpy as np
+        doc = FreeCAD.ActiveDocument
+        vals = form_dialog("Ground-Motion Response Spectrum", [
+            {"key": "_i", "kind": "info", "default":
+             "Reads an accelerogram from a spreadsheet (column A = time, column "
+             "B = accel) and builds its elastic response spectrum: the peak SDOF "
+             "response at each natural period. Sa = pseudo-acceleration, Sd = "
+             "spectral displacement."},
+            {"key": "sheet", "label": "Record sheet", "kind": "text",
+             "default": "GroundMotion"},
+            {"key": "unit", "label": "Record unit (accel)", "kind": "combo",
+             "options": ["g", "m/s2", "mm/s2"], "default": "g"},
+            {"key": "zeta", "label": "Damping ratio zeta", "kind": "float",
+             "default": 0.05, "decimals": 4},
+            {"key": "tmax", "label": "Max period T (s)", "kind": "float", "default": 4.0},
+            {"key": "nt", "label": "Number of periods", "kind": "int",
+             "default": 60, "min": 5, "max": 400},
+        ])
+        if not vals:
+            return
+        rec = _read_record(doc, str(vals.get("sheet", "GroundMotion")).strip())
+        if rec is None:
+            info("Record sheet '%s' not found (need column A = time, column B = "
+                 "accel)." % vals.get("sheet", "GroundMotion")); return
+        uf = {"g": 9810.0, "m/s2": 1000.0, "mm/s2": 1.0}.get(
+            str(vals.get("unit", "g")), 9810.0)
+        ts = rec[0]; ag = [a * uf for a in rec[1]]              # -> mm/s^2
+        zeta = max(0.0, float(vals["zeta"])); tmax = max(0.1, float(vals["tmax"]))
+        nt = max(5, int(vals["nt"]))
+        periods = [0.04 + (tmax - 0.04) * i / (nt - 1) for i in range(nt)]
+        Sd, Sa = _response_spectrum(ts, ag, zeta, periods)
+        imax = max(range(nt), key=lambda i: Sa[i]); pga = max(abs(a) for a in ag)
+        doc.openTransaction("DynFrame: ground-motion spectrum")
+        try:
+            sh = doc.getObject("GMSpectrum") or \
+                doc.addObject("Spreadsheet::Sheet", "GMSpectrum")
+            sh.Label = "GMSpectrum"; sh.clearAll()
+            sh.set("A1", "RESPONSE SPECTRUM of '%s' (zeta=%.3f); PGA=%.4g g"
+                   % (vals.get("sheet", "GroundMotion"), zeta, pga / 9810.0))
+            for c, h in zip("ABCD", ["T (s)", "Sd (mm)", "Sa (mm/s2)", "Sa (g)"]):
+                sh.set("%s2" % c, h)
+            for i in range(nt):
+                sh.set("A%d" % (i + 3), "%.4g" % periods[i])
+                sh.set("B%d" % (i + 3), "%.5g" % Sd[i])
+                sh.set("C%d" % (i + 3), "%.5g" % Sa[i])
+                sh.set("D%d" % (i + 3), "%.4g" % (Sa[i] / 9810.0))
+            _grp(doc, RES_GROUP).addObject(sh)
+            doc.commitTransaction(); doc.recompute()
+        except Exception as e:
+            doc.abortTransaction(); err("Spectrum failed: %s" % e); return
+        info("Response spectrum of '%s' (zeta = %.3f) built over %d periods to "
+             "%.2f s.\n\nPGA = %.4g g. Peak Sa = %.4g g at T = %.3f s (Sd = "
+             "%.3g mm).\n\nSee the 'GMSpectrum' table (T, Sd, Sa). Compare its "
+             "shape to the EC8 design spectrum used in Response Spectrum." %
+             (vals.get("sheet", "GroundMotion"), zeta, nt, tmax, pga / 9810.0,
+              Sa[imax] / 9810.0, periods[imax], Sd[imax]))
+
+
 class TimeHistory:
     _DIRS = {"+X": (1.0, 0.0, 0.0, 0), "-X": (-1.0, 0.0, 0.0, 0),
              "+Y": (0.0, 1.0, 0.0, 1), "-Y": (0.0, -1.0, 0.0, 1),
@@ -6803,10 +6925,25 @@ class TimeHistory:
         hist = [(0.0, 0.0)]; peak_abs = [0.0]; u_peak = [np.zeros(ndof)]
         peak_shear = [0.0]
         fullu = np.zeros(ndof); fulla = np.zeros(ndof)
+        # storey levels + a representative (most responsive) node per level, for
+        # the inter-storey drift envelope
+        levels = _storey_levels([coarse[i].z for i in range(ncoarse)], 1.0)
+        rep = {}
+        for Lv in levels:
+            cand = [i for i in range(ncoarse) if abs(coarse[i].z - Lv) <= 1.0]
+            rep[Lv] = max(cand, key=lambda i: abs(ust_full[6 * i + dirdof])) \
+                if cand else None
+        drift_peak = [0.0] * max(0, len(levels) - 1)
 
         def record_step(t1, uf, af, gi):
             fullu[free] = uf; fulla[free] = af
             hist.append((t1, float(fullu[6 * mon + dirdof])))
+            for kk in range(len(levels) - 1):
+                a = rep[levels[kk]]; b = rep[levels[kk + 1]]
+                if a is not None and b is not None:
+                    dd = fullu[6 * b + dirdof] - fullu[6 * a + dirdof]
+                    if abs(dd) > drift_peak[kk]:
+                        drift_peak[kk] = abs(dd)
             res = max((fullu[6 * j] ** 2 + fullu[6 * j + 1] ** 2
                        + fullu[6 * j + 2] ** 2) for j in range(ncoarse)) ** 0.5
             if res > peak_abs[0]:
@@ -6921,6 +7058,32 @@ class TimeHistory:
                 rg.addObject(sh)
         except Exception as ex:
             FreeCAD.Console.PrintError("DynFrame: response table failed (%s)\n" % ex)
+        # inter-storey drift envelope (if the frame has >= 2 storey levels)
+        max_dr = 0.0
+        if len(levels) >= 2:
+            try:
+                sd = doc.getObject("StoreyDrift") or \
+                    doc.addObject("Spreadsheet::Sheet", "StoreyDrift")
+                sd.Label = "StoreyDrift"; sd.clearAll()
+                sd.set("A1", "INTER-STOREY DRIFT (peak over time, %s dir)" % vals["dir"])
+                for c, h in zip("ABCDE", ["Storey", "z_bot (mm)", "z_top (mm)",
+                                          "drift (mm)", "drift ratio"]):
+                    sd.set("%s2" % c, h)
+                r = 3
+                for kk in range(len(levels) - 1):
+                    hstorey = levels[kk + 1] - levels[kk]
+                    ratio = drift_peak[kk] / hstorey if hstorey > 1e-9 else 0.0
+                    max_dr = max(max_dr, ratio)
+                    row = [str(kk + 1), "%.1f" % levels[kk], "%.1f" % levels[kk + 1],
+                           "%.4g" % drift_peak[kk],
+                           "%.5f (1/%.0f)" % (ratio, (1.0 / ratio) if ratio > 1e-9 else 0.0)]
+                    for c, v in zip("ABCDE", row):
+                        sd.set("%s%d" % (c, r), v)
+                    r += 1
+                if rg is not None and sd not in rg.Group:
+                    rg.addObject(sd)
+            except Exception as ex:
+                FreeCAD.Console.PrintError("DynFrame: drift table failed (%s)\n" % ex)
         doc.recompute()
         if func.startswith("Record"):
             src = "record '%s' (%s)" % (vals.get("recsheet", "GroundMotion"),
@@ -6928,15 +7091,19 @@ class TimeHistory:
         else:
             src = vals["func"]
         base = ("ground accel" if seismic else "nodal force %.0f N" % amp)
-        info("Time-history complete (Newmark-beta): %s, %s, %s over %.3g s "
+        meth = "modal (%d modes)" % nmodes if modal else "direct Newmark"
+        drift_note = ("\nMax inter-storey drift ratio = %.5f (1/%.0f) - see the "
+                      "'StoreyDrift' table." % (max_dr, (1.0 / max_dr) if max_dr > 1e-9
+                                                else 0.0)) if len(levels) >= 2 else ""
+        info("Time-history complete (%s): %s, %s, %s over %.3g s "
              "(dt=%.4g s, %d steps).\n\nf1 = %.3f Hz (T1 = %.4f s), Rayleigh "
              "zeta = %.3f.\nPeak response at node N%d = %.4g mm (dyn. amplification "
-             "%.2f x the static).\nPeak base shear = %.0f N.\n\nShowing the deformed "
+             "%.2f x the static).\nPeak base shear = %.0f N.%s\n\nShowing the deformed "
              "shape at peak response; the monitored-node time history is in the "
              "'ResponseHistory' table and the member-force envelope is stored for "
-             "the code check." % (base, src, vals["dir"], dur, dt, nstep,
+             "the code check." % (meth, base, src, vals["dir"], dur, dt, nstep,
                                   f1, 1.0 / f1 if f1 > 0 else 0.0, zeta, mon + 1,
-                                  peak_mon, daf, peak_shear))
+                                  peak_mon, daf, peak_shear, drift_note))
 
 
 def _auto_combos(doc):
@@ -8501,6 +8668,7 @@ _add("DynFrame_ResponseSpectrum", ResponseSpectrum)
 _add("DynFrame_Envelope", Envelope)
 _add("DynFrame_MovingLoad", MovingLoad)
 _add("DynFrame_ImportGroundMotion", ImportGroundMotion)
+_add("DynFrame_GMSpectrum", GMSpectrum)
 _add("DynFrame_TimeHistory", TimeHistory)
 _add("DynFrame_CodeCheck", CodeCheck)
 _add("DynFrame_ShowDiagram", ShowDiagram)

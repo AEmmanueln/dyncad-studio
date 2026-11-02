@@ -62,8 +62,8 @@ class DynFrameWorkbench(FreeCADGui.Workbench):
                  "DynFrame_Combinations"]
         results = ["DynFrame_RunAnalysis", "DynFrame_ModalAnalysis",
                    "DynFrame_BucklingAnalysis", "DynFrame_ResponseSpectrum",
-                   "DynFrame_ImportGroundMotion", "DynFrame_TimeHistory",
-                   "DynFrame_Envelope",
+                   "DynFrame_ImportGroundMotion", "DynFrame_GMSpectrum",
+                   "DynFrame_TimeHistory", "DynFrame_Envelope",
                    "DynFrame_MovingLoad", "DynFrame_CodeCheck",
                    "DynFrame_PlateReinfEC2", "DynFrame_PunchingEC2",
                    "DynFrame_ShowDiagram", "DynFrame_ClearAnalysis"]

@@ -1287,4 +1287,33 @@ C.TimeHistory().Activated()
 assert "not found" in gmiss.get("msg","").lower(), gmiss
 print("earthquake record OK")
 
+print("\n=== Ground-motion import (.AT2 / CSV parser + command) ===")
+# PEER .AT2: a header with NPTS/DT then accel values, time = i*DT
+at2="PEER NGA STRONG MOTION\nEL CENTRO ARRAY\nNPTS=  5, DT=  0.0200 SEC\n"\
+    " 0.000  0.100  0.200\n 0.300  0.400\n"
+ts,acc=C._parse_motion(at2,"Auto",0.02)
+print("  .AT2 -> %d pts, dt=%.4f, acc[:3]=%s"%(len(ts),ts[1]-ts[0],acc[:3]))
+assert len(ts)==5 and abs(ts[1]-0.02)<1e-9 and acc==[0.0,0.1,0.2,0.3,0.4], (ts,acc)
+# CSV time,accel and accel-only
+tsc,accc=C._parse_motion("t,a\n0,0\n0.02,0.1\n0.04,0.2\n","Auto",0.02)
+assert tsc==[0.0,0.02,0.04] and accc==[0.0,0.1,0.2], (tsc,accc)
+tsa,acca=C._parse_motion("0\n0.1\n0.2\n","CSV accel-only",0.02)
+assert abs(tsa[2]-0.04)<1e-9 and acca==[0.0,0.1,0.2], (tsa,acca)
+# command end-to-end: import an .AT2 file into a sheet
+import tempfile as _tf, os as _os2
+fd,pth=_tf.mkstemp(suffix=".AT2"); _os2.write(fd,at2.encode()); _os2.close(fd)
+dGM=Doc(); FreeCAD.ActiveDocument=dGM
+C.form_dialog=lambda title,fields:{"path":pth,"fmt":"PEER .AT2","dt":0.02,
+                                   "sheet":"GroundMotion"}
+gGM={}; C.info=lambda m,g=gGM: g.setdefault("msg",m)
+C.ImportGroundMotion().Activated()
+gm=dGM.getObject("GroundMotion")
+assert gm is not None and gm._cells.get("A1","").startswith("time")
+assert abs(float(gm._cells["A3"])-0.02)<1e-9 and abs(float(gm._cells["B4"])-0.2)<1e-9
+rr=C._read_record(dGM,"GroundMotion")
+assert rr is not None and len(rr[0])==5
+_os2.remove(pth)
+print("  imported %d pts; '%s'"%(len(rr[0]), gGM["msg"].split(chr(10))[0]))
+print("ground-motion import OK")
+
 print("\nALL RUNTIME CHECKS PASSED")

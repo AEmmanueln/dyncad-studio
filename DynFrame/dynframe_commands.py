@@ -6476,6 +6476,50 @@ class MovingLoad:
              % (train, vals["dir"], NSTA, len(laneels), comp_max["My"]))
 
 
+def _parse_motion(text, fmt="Auto", dt=0.02):
+    """Parse a ground-motion file's text into (times, accels). Formats:
+    'PEER .AT2' (a header line with NPTS=.. DT=.. then whitespace accel values,
+    time = i*DT), 'CSV time,accel' (two numeric columns), 'CSV accel-only' (one
+    column, time = i*dt), or 'Auto' to detect. Returns (times, accels) or None."""
+    import re
+    lines = text.splitlines(); low = text.lower()
+
+    def floats(s):
+        return [float(x) for x in
+                re.findall(r'[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?', s)]
+    is_at2 = ("npts" in low and "dt" in low)
+    if fmt.startswith("PEER") or (fmt == "Auto" and is_at2):
+        dtv = None; data_start = 0
+        for n, ln in enumerate(lines):
+            l2 = ln.lower()
+            if "npts" in l2 and "dt" in l2:
+                m = re.search(r'dt\s*=?\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)', l2)
+                if m:
+                    dtv = float(m.group(1))
+                data_start = n + 1; break
+        if dtv is None:
+            dtv = dt
+        acc = []
+        for ln in lines[data_start:]:
+            acc += floats(ln)
+        if not acc:
+            return None
+        return [i * dtv for i in range(len(acc))], acc
+    rows = [floats(ln) for ln in lines]
+    rows = [r for r in rows if r]
+    if not rows:
+        return None
+    ncol = max(len(r) for r in rows)
+    if fmt.startswith("CSV accel") or (fmt == "Auto" and ncol < 2):
+        acc = [r[0] for r in rows]
+        return [i * dt for i in range(len(acc))], acc
+    ts = [r[0] for r in rows if len(r) >= 2]
+    acc = [r[1] for r in rows if len(r) >= 2]
+    if len(ts) < 2:
+        return None
+    return ts, acc
+
+
 def _read_record(doc, name):
     """Read an acceleration (or force) time-series from a spreadsheet: column A
     = time (s), column B = value. A non-numeric first row (a header) is skipped;
@@ -6509,6 +6553,81 @@ def _read_record(doc, name):
     if len(ts) < 2:
         return None
     return ts, vs
+
+
+class ImportGroundMotion:
+    def GetResources(self):
+        return {"Pixmap": _icon("import"), "MenuText": "Import Ground Motion",
+                "ToolTip": "Read an earthquake accelerogram (PEER .AT2, or a CSV of "
+                           "time,accel or accel-only) from a file into a spreadsheet "
+                           "(time | acceleration), ready for the Time-History "
+                           "analysis.", "Accel": "A, J"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        doc = FreeCAD.ActiveDocument
+        vals = form_dialog("Import Ground Motion", [
+            {"key": "_i", "kind": "info", "default":
+             "Reads a ground-motion file into a spreadsheet (column A = time s, "
+             "column B = acceleration) that the Time-History analysis can use. "
+             "PEER .AT2 files carry their own time step; a CSV can be two columns "
+             "(time, accel) or one column (accel) with the time step below."},
+            {"key": "path", "label": "File path (blank = browse)", "kind": "text",
+             "default": ""},
+            {"key": "fmt", "label": "Format", "kind": "combo",
+             "options": ["Auto", "PEER .AT2", "CSV time,accel", "CSV accel-only"],
+             "default": "Auto"},
+            {"key": "dt", "label": "Time step dt (accel-only CSV, s)",
+             "kind": "float", "default": 0.02, "decimals": 5},
+            {"key": "sheet", "label": "Target sheet name", "kind": "text",
+             "default": "GroundMotion"},
+        ])
+        if not vals:
+            return
+        path = str(vals.get("path", "")).strip()
+        if not path:
+            try:
+                from PySide import QtGui as _QtG
+                path = _QtG.QFileDialog.getOpenFileName(_mw(),
+                                                        "Open ground-motion file")[0]
+            except Exception:
+                path = ""
+        if not path:
+            info("No file chosen."); return
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+                text = fh.read()
+        except Exception as e:
+            err("Could not read '%s': %s" % (path, e)); return
+        rec = _parse_motion(text, str(vals.get("fmt", "Auto")),
+                            max(1e-5, float(vals.get("dt", 0.02))))
+        if rec is None or len(rec[0]) < 2:
+            err("Could not parse a time series from the file (try a specific "
+                "format, or check the file has numeric columns)."); return
+        ts, acc = rec
+        name = str(vals.get("sheet", "GroundMotion")).strip() or "GroundMotion"
+        doc.openTransaction("DynFrame: import ground motion")
+        try:
+            sh = doc.getObject(name) or doc.addObject("Spreadsheet::Sheet", name)
+            sh.Label = name; sh.clearAll()
+            sh.set("A1", "time (s)"); sh.set("B1", "accel")
+            nmax = min(len(ts), 20000)
+            for i in range(nmax):
+                sh.set("A%d" % (i + 2), "%.6g" % ts[i])
+                sh.set("B%d" % (i + 2), "%.6g" % acc[i])
+            _grp(doc, RES_GROUP).addObject(sh)
+            doc.commitTransaction(); doc.recompute()
+        except Exception as e:
+            doc.abortTransaction(); err("Writing the sheet failed: %s" % e); return
+        pga = max(abs(a) for a in acc)
+        dtv = (ts[1] - ts[0]) if len(ts) > 1 else 0.0
+        info("Imported %d points into sheet '%s'.\n\nDuration %.3f s, dt ~ %.4g s, "
+             "peak |accel| = %.4g (in the file's units).\n\nRun Time-History, pick "
+             "'Record (spreadsheet)' and this sheet (set the record unit to match "
+             "the file - .AT2 files are in g)." %
+             (len(ts), name, ts[-1], dtv, pga))
 
 
 class TimeHistory:
@@ -8381,6 +8500,7 @@ _add("DynFrame_BucklingAnalysis", BucklingAnalysis)
 _add("DynFrame_ResponseSpectrum", ResponseSpectrum)
 _add("DynFrame_Envelope", Envelope)
 _add("DynFrame_MovingLoad", MovingLoad)
+_add("DynFrame_ImportGroundMotion", ImportGroundMotion)
 _add("DynFrame_TimeHistory", TimeHistory)
 _add("DynFrame_CodeCheck", CodeCheck)
 _add("DynFrame_ShowDiagram", ShowDiagram)

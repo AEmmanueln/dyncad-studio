@@ -207,7 +207,10 @@ model is what you analyse. Commands are on the toolbars/menus
   internally). A record is read from a FreeCAD **spreadsheet** — column A =
   time (s), column B = acceleration (g, m/s² or mm/s²); name the sheet and
   pick it in the dialog (a header row is skipped, and the analysis runs on
-  past the record for the free-vibration decay). Two solution methods:
+  past the record for the free-vibration decay). **Import Ground Motion** reads
+  a record straight from a file — **PEER `.AT2`** (NGA strong-motion format,
+  which carries its own time step) or a **CSV** (time,accel or accel-only) —
+  into that spreadsheet in one step. Two solution methods:
   **direct** Newmark integration of the full system, or **modal
   superposition** (project onto the lowest N modes, integrate the decoupled
   modal SDOFs, reconstruct) — faster for large models and closer to how the

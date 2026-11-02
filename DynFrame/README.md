@@ -202,8 +202,12 @@ model is what you analyse. Commands are on the toolbars/menus
   integration** (average-acceleration, unconditionally stable). Excite the
   frame with a **nodal force** (on selected nodes) or a **ground acceleration**
   (seismic base motion), with a **step / harmonic / half-sine-pulse** time
-  function and **Rayleigh damping** (ζ anchored at the first two natural
-  frequencies, found internally). It reports the peak response, the dynamic
+  function **or a real recorded accelerogram** (El Centro, etc.), and
+  **Rayleigh damping** (ζ anchored at the first two natural frequencies, found
+  internally). A record is read from a FreeCAD **spreadsheet** — column A =
+  time (s), column B = acceleration (g, m/s² or mm/s²); name the sheet and
+  pick it in the dialog (a header row is skipped, and the analysis runs on
+  past the record for the free-vibration decay). It reports the peak response, the dynamic
   amplification, the peak base shear, a monitored-node **`ResponseHistory`**
   table, the deformed shape at peak, and a member-force envelope stored for the
   code check. (Validated: a cantilever under a suddenly-applied step force
@@ -334,7 +338,9 @@ rely on. The checks it runs:
 > **seismic** effective modal masses sum to 100 % of the total mass; the
 > **time-history** (Newmark-β) reproduces the exact step-load dynamic
 > amplification factor of 2.0, oscillates at the natural period T₁, and
-> collapses to the static response under heavy damping; the
+> collapses to the static response under heavy damping, and a **recorded
+> accelerogram** read from a spreadsheet reproduces the matching built-in
+> excitation to the digit; the
 > **plate/shell** element converges to the exact simply-supported-plate
 > deflection (w_c = 0.00406 q a⁴/D, ratio ≈ 0.996), its recovered
 > **bending moment** matches the Timoshenko centre value (Mₓ = M_y =

@@ -6476,6 +6476,41 @@ class MovingLoad:
              % (train, vals["dir"], NSTA, len(laneels), comp_max["My"]))
 
 
+def _read_record(doc, name):
+    """Read an acceleration (or force) time-series from a spreadsheet: column A
+    = time (s), column B = value. A non-numeric first row (a header) is skipped;
+    reading stops at the first empty time cell. Returns (times, values) or None.
+    This is how a real earthquake record (e.g. El Centro) is driven in - paste
+    the two columns into a sheet and name it."""
+    sh = doc.getObject(name)
+    if sh is None:
+        for o in doc.Objects:
+            if getattr(o, "TypeId", "") == "Spreadsheet::Sheet" \
+                    and getattr(o, "Label", "") == name:
+                sh = o; break
+    if sh is None:
+        return None
+
+    def cell(addr):
+        try:
+            return sh.get(addr)
+        except Exception:
+            return None
+    ts = []; vs = []; r = 1
+    while r < 500000:
+        a = cell("A%d" % r); b = cell("B%d" % r)
+        if a is None and b is None:
+            break
+        try:
+            ts.append(float(a)); vs.append(float(b))
+        except Exception:
+            pass                               # header / non-numeric -> skip
+        r += 1
+    if len(ts) < 2:
+        return None
+    return ts, vs
+
+
 class TimeHistory:
     _DIRS = {"+X": (1.0, 0.0, 0.0, 0), "-X": (-1.0, 0.0, 0.0, 0),
              "+Y": (0.0, 1.0, 0.0, 1), "-Y": (0.0, -1.0, 0.0, 1),
@@ -6530,10 +6565,15 @@ class TimeHistory:
             {"key": "amp", "label": "Amplitude (force N, or accel in g)",
              "kind": "float", "default": 100000.0},
             {"key": "func", "label": "Time function", "kind": "combo",
-             "options": ["Step", "Harmonic", "Half-sine pulse"], "default": "Step"},
+             "options": ["Step", "Harmonic", "Half-sine pulse",
+                         "Record (spreadsheet)"], "default": "Step"},
             {"key": "freq", "label": "Harmonic frequency (Hz)", "kind": "float",
              "default": max(0.1, f1)},
             {"key": "td", "label": "Pulse duration (s)", "kind": "float", "default": 0.1},
+            {"key": "recsheet", "label": "Record sheet (time | value cols)",
+             "kind": "text", "default": "GroundMotion"},
+            {"key": "recunit", "label": "Record unit (accel)", "kind": "combo",
+             "options": ["g", "m/s2", "mm/s2"], "default": "g"},
             {"key": "dur", "label": "Total duration (s)", "kind": "float",
              "default": max(1.0, 6.0 / f1 if f1 > 0 else 2.0)},
             {"key": "dt", "label": "Time step dt (s)", "kind": "float",
@@ -6549,6 +6589,16 @@ class TimeHistory:
         func = vals["func"]; fh = float(vals["freq"]); td = float(vals["td"])
         dur = float(vals["dur"]); dt = max(1e-5, float(vals["dt"]))
         zeta = max(0.0, float(vals["zeta"]))
+        rec = None
+        if func.startswith("Record"):
+            rec = _read_record(doc, str(vals.get("recsheet", "GroundMotion")).strip())
+            if rec is None:
+                info("Record sheet '%s' not found, or it has fewer than 2 numeric "
+                     "rows. Put the time series in a spreadsheet: column A = time "
+                     "(s), column B = acceleration; name the sheet to match."
+                     % vals.get("recsheet", "GroundMotion"))
+                return
+            dur = max(dur, rec[0][-1] + 3.0 / f1)   # run past the record for decay
 
         # load pattern p (full) and scalar time function g(t)
         p = np.zeros(ndof)
@@ -6557,7 +6607,12 @@ class TimeHistory:
             for i in range(len(fine)):
                 r[6 * i + dirdof] = 1.0
             p = -(M @ r)                 # effective seismic force = -M r a_g(t)
-            scale = amp * 9810.0         # g -> mm/s^2
+            if func.startswith("Record"):
+                _uf = {"g": 9810.0, "m/s2": 1000.0, "mm/s2": 1.0}.get(
+                    str(vals.get("recunit", "g")), 9810.0)
+            else:
+                _uf = 9810.0             # built-in functions: amplitude is in g
+            scale = amp * _uf            # -> mm/s^2
         else:
             if not sel_pts:
                 info("Select the node vertices to load (nodal force), then run."); return
@@ -6610,8 +6665,14 @@ class TimeHistory:
             err("Newmark factorisation failed (singular system)."); return
 
         nstep = max(1, int(round(dur / dt)))
+        tgrid = np.array([i * dt for i in range(nstep + 1)])
+        if rec is not None:                 # resample the record onto the time grid
+            gseries = np.interp(tgrid, np.array(rec[0]), np.array(rec[1]),
+                                left=0.0, right=0.0)
+        else:
+            gseries = np.array([gfun(float(t)) for t in tgrid])
         u = np.zeros(len(free)); v = np.zeros(len(free))
-        F0 = pf * scale * gfun(0.0)
+        F0 = pf * scale * float(gseries[0])
         acc = Minv @ (F0 - Cf @ v - Kf @ u)
         # coarse-element force envelope (reuse _frame_stiffness elements)
         _cn, celems, _Kc, _fx, _sp = _frame_stiffness(doc)
@@ -6621,7 +6682,8 @@ class TimeHistory:
         fullu = np.zeros(ndof); fullv = np.zeros(ndof); fulla = np.zeros(ndof)
         for i in range(nstep):
             t1 = (i + 1) * dt
-            F1 = pf * scale * gfun(t1)
+            gi = float(gseries[i + 1])
+            F1 = pf * scale * gi
             phat = F1 + Mf @ (a0 * u + a2 * v + a3 * acc) \
                 + Cf @ (a1 * u + a4 * v + a5 * acc)
             u1 = Khat_inv @ phat
@@ -6637,7 +6699,7 @@ class TimeHistory:
             if res > peak_abs:
                 peak_abs = res; u_peak = fullu.copy()
             # base shear = sum of support reactions in the excitation direction
-            R = K @ fullu + M @ fulla - p * scale * gfun(t1)   # C term ~0 on supports
+            R = K @ fullu + M @ fulla - p * scale * gi         # C term ~0 on supports
             vb = sum(R[6 * s + dirdof] for s in sup)
             if abs(vb) > peak_shear:
                 peak_shear = abs(vb)
@@ -6711,14 +6773,19 @@ class TimeHistory:
         except Exception as ex:
             FreeCAD.Console.PrintError("DynFrame: response table failed (%s)\n" % ex)
         doc.recompute()
-        exc = ("ground accel %.3g g" % amp if seismic else "nodal force %.0f N" % amp)
-        info("Time-history complete (Newmark-beta): %s, %s %s over %.3g s "
+        if func.startswith("Record"):
+            src = "record '%s' (%s)" % (vals.get("recsheet", "GroundMotion"),
+                                        vals.get("recunit", "g"))
+        else:
+            src = vals["func"]
+        base = ("ground accel" if seismic else "nodal force %.0f N" % amp)
+        info("Time-history complete (Newmark-beta): %s, %s, %s over %.3g s "
              "(dt=%.4g s, %d steps).\n\nf1 = %.3f Hz (T1 = %.4f s), Rayleigh "
              "zeta = %.3f.\nPeak response at node N%d = %.4g mm (dyn. amplification "
              "%.2f x the static).\nPeak base shear = %.0f N.\n\nShowing the deformed "
              "shape at peak response; the monitored-node time history is in the "
              "'ResponseHistory' table and the member-force envelope is stored for "
-             "the code check." % (exc, vals["func"], vals["dir"], dur, dt, nstep,
+             "the code check." % (base, src, vals["dir"], dur, dt, nstep,
                                   f1, 1.0 / f1 if f1 > 0 else 0.0, zeta, mon + 1,
                                   peak_mon, daf, peak_shear))
 

@@ -1240,4 +1240,42 @@ print("  heavy damping (zeta=0.7): DAF=%.3f (expect ~1.0, <1.3)"%daf2)
 assert 0.8<daf2<1.3, daf2
 print("time-history OK")
 
+print("\n=== Earthquake record (spreadsheet) vs built-in half-sine ===")
+import math as _mr, re as _re3
+dRC=Doc(); FreeCAD.ActiveDocument=dRC
+Lr=3000.
+cr=dRC.addObject("Part::Feature","Col"); cr.Shape=Shape(0,[Vec(0,0,0),Vec(0,0,Lr)])
+cr.IsBar=True; cr.Section="IPE 200"; cr.Material="Steel S235"
+cr.BarStart=Vec(0,0,0); cr.BarEnd=Vec(0,0,Lr)
+dRC.addObject("Part::Feature","S").Restrain="111111"; dRC.Objects[-1].AtNode=Vec(0,0,0)
+C._sel_vertices=lambda: [Vec(0,0,Lr)]
+# a half-sine pulse (td=0.1) sampled at dt into a sheet, with a header row
+gm=dRC.addObject("Spreadsheet::Sheet","GroundMotion"); gm.Label="GroundMotion"
+gm.set("A1","t (s)"); gm.set("B1","accel"); tdp=0.1; tt=0.0; rr2=2
+while tt<=0.3+1e-9:
+    gm.set("A%d"%rr2, tt)
+    gm.set("B%d"%rr2, (_mr.sin(_mr.pi*tt/tdp) if tt<=tdp else 0.0)); rr2+=1; tt+=0.002
+base=dict(exc="Nodal force",dir="+X",amp=50000.0,freq=5.0,td=0.1,
+          recsheet="GroundMotion",recunit="g",dur=1.0,dt=0.002,zeta=0.05)
+def runth(func):
+    v=dict(base); v["func"]=func
+    C.form_dialog=lambda title,fields,_v=v:_v
+    g={}; C.info=lambda m,gg=g: gg.setdefault("msg",m)
+    C.TimeHistory().Activated()
+    return float(_re3.search(r"= ([\d.eE+-]+) mm",g["msg"]).group(1))
+pkA=runth("Half-sine pulse")
+pkB=runth("Record (spreadsheet)")
+print("  built-in half-sine peak=%.5g mm   record peak=%.5g mm   ratio=%.4f"
+      %(pkA,pkB,pkB/pkA))
+assert abs(pkB/pkA-1.0)<0.01, (pkA,pkB)
+# the reader skips the header and returns the series (first value ~0)
+rr=C._read_record(dRC,"GroundMotion")
+assert rr is not None and len(rr[0])>100 and abs(rr[1][0])<1e-9, (rr and len(rr[0]))
+# a missing sheet is reported, not crashed
+gmiss={}; C.info=lambda m,g=gmiss: g.setdefault("msg",m)
+C.form_dialog=lambda title,fields:dict(base,func="Record (spreadsheet)",recsheet="NOPE")
+C.TimeHistory().Activated()
+assert "not found" in gmiss.get("msg","").lower(), gmiss
+print("earthquake record OK")
+
 print("\nALL RUNTIME CHECKS PASSED")

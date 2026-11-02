@@ -57,6 +57,32 @@ current reference — follow it where it differs from the outline below.
 
 ---
 
+## 2a. No-coding setup when you already have blueCFD + OpenFOAM + ParaView (Windows)
+
+If the solver (blueCFD-Core / OpenFOAM) and ParaView are already installed, the
+only missing piece is the **CfdOF GUI** — it is what lets you run everything
+with dialogs and buttons, never a terminal or a dictionary file.
+
+1. **Install CfdOF**: FreeCAD → **Tools → Addon Manager** → search **CfdOF** →
+   **Install** → restart FreeCAD. Pick **CfdOF** in the workbench dropdown.
+2. **Point CfdOF at your installs**: **Edit → Preferences → CfdOF**.
+   - *OpenFOAM install directory* → your **blueCFD-Core** folder, typically
+     `C:\Program Files\blueCFD-Core-2024\` (the folder whose `OpenFOAM-...`
+     sub-folder holds `etc\bashrc`). CfdOF usually auto-detects blueCFD; set it
+     here if it doesn't.
+   - *ParaView executable* → your `...\ParaView\bin\paraview.exe`.
+   - Click **Install cfMesh** (and **Install HiSA** only if you need
+     compressible) — these download into blueCFD; no compiling by you.
+   - Click **Run dependency checker** → every line (OpenFOAM, cfMesh,
+     ParaView, Gmsh) must say OK. Fix the paths until it does. **This is the
+     only setup step; after it, CFD is all point-and-click.**
+
+Nothing above involves editing an OpenFOAM case by hand — CfdOF writes the
+`system/`, `constant/` and `0/` dictionaries from your dialog entries and runs
+the solver for you.
+
+---
+
 ## 3. The workflow (external wind around a building)
 
 1. **Geometry.** Make (or import) a **solid** of the building envelope — the

@@ -6203,17 +6203,22 @@ class MovingLoad:
         cs = [c[0] for c in _cases(doc)]
         vals = form_dialog("Moving Load Envelope (%d lane member(s))" % len(lane), [
             {"key": "_i", "kind": "info", "default":
-             "A point load is stepped along the selected lane and the model solved "
-             "at each position; the worst force at every section is kept (the "
-             "influence envelope). Member releases are not applied in this live-"
-             "load carrier model. The envelope forces are stored, so a following "
-             "Steel Code Check verifies against them."},
-            {"key": "P", "label": "Load magnitude P (N)", "kind": "float",
+             "A load pattern (one point load, or a train of equally-spaced axles) "
+             "is stepped along the selected lane and the model solved at each "
+             "position; the worst force at every section is kept (the influence "
+             "envelope). Set axles > 1 for a vehicle/train (load = per axle). "
+             "Member releases are not applied in this live-load carrier model. The "
+             "envelope forces are stored, so a following Steel Code Check uses them."},
+            {"key": "P", "label": "Load per axle P (N)", "kind": "float",
              "default": 100000.0},
             {"key": "dir", "label": "Direction", "kind": "combo",
              "options": list(self._DIRS.keys()), "default": "-Z (gravity)"},
-            {"key": "nsta", "label": "Positions along the lane", "kind": "int",
-             "default": 21, "min": 2, "max": 200},
+            {"key": "naxle", "label": "Number of axles", "kind": "int",
+             "default": 1, "min": 1, "max": 50},
+            {"key": "spacing", "label": "Axle spacing (mm)", "kind": "float",
+             "default": 1500.0},
+            {"key": "nsta", "label": "Positions (lead-axle steps)", "kind": "int",
+             "default": 41, "min": 2, "max": 400},
         ])
         if not vals:
             return
@@ -6221,6 +6226,7 @@ class MovingLoad:
         d = self._DIRS.get(vals["dir"], (0.0, 0.0, -1.0))
         Pvec = np.array(d, float) * Pmag
         NSTA = int(vals["nsta"])
+        naxle = max(1, int(vals["naxle"])); spacing = abs(float(vals["spacing"]))
 
         nodes, elems, K, fixed, sup = _frame_stiffness(doc)
         if not elems:
@@ -6260,8 +6266,8 @@ class MovingLoad:
             seq.append((el, proj(nodes[el["n1"]]) > proj(nodes[el["n2"]])))
         total = sum(el["L"] for el in ordered) or 1.0
 
-        def station(g):                 # global fraction 0..1 -> (element, a-from-n1)
-            target = g * total; cum = 0.0
+        def station_arc(arc):           # arc length along lane -> (element, a-from-n1)
+            target = max(0.0, min(total, arc)); cum = 0.0
             for (el, flip) in seq:
                 if target <= cum + el["L"] + 1e-9:
                     lp = max(0.0, min(1.0, (target - cum) / el["L"]))
@@ -6275,17 +6281,26 @@ class MovingLoad:
         sampabs = {id(el): {k: [0.0] * (NS + 1) for k in DIAG_KINDS} for el in elems}
         nrange = {id(el): [0.0, 0.0] for el in elems}      # [min N, max N] signed
         peak_my = 0.0; u_gov = np.zeros(ndof)
+        # sweep the lead axle so the whole train passes across the lane
+        sweep = total + (naxle - 1) * spacing
         for j in range(NSTA):
-            g = j / float(NSTA - 1) if NSTA > 1 else 0.0
-            lel, a = station(g)
-            R3 = lel["T"][0:3, 0:3]
-            Pl = R3 @ Pvec
-            fef = _fef_point_local(float(Pl[0]), float(Pl[1]), float(Pl[2]), lel["L"], a)
-            F = np.zeros(ndof)
-            F[lel["dofs"]] += lel["T"].T @ fef
+            lead = sweep * (j / float(NSTA - 1)) if NSTA > 1 else 0.0
+            F = np.zeros(ndof); member_pts = {}
+            for ax in range(naxle):
+                arc = lead - ax * spacing
+                if arc < -1e-6 or arc > total + 1e-6:
+                    continue                       # this axle is off the lane
+                el, a = station_arc(arc)
+                Pl = el["T"][0:3, 0:3] @ Pvec
+                plt = (float(Pl[0]), float(Pl[1]), float(Pl[2]), a)
+                F[el["dofs"]] += el["T"].T @ _fef_point_local(plt[0], plt[1], plt[2],
+                                                              el["L"], a)
+                member_pts.setdefault(id(el), []).append(plt)
+            if not member_pts:                     # no axle on the lane yet
+                continue
             u = np.zeros(ndof); u[free] = Kinv @ F[free]
             for el in elems:
-                ptl = [(float(Pl[0]), float(Pl[1]), float(Pl[2]), a)] if el is lel else []
+                ptl = member_pts.get(id(el), [])
                 samp, fend = _pt_samples(el, u, ptl, NS)
                 sa = sampabs[id(el)]
                 for k in DIAG_KINDS:
@@ -6336,9 +6351,11 @@ class MovingLoad:
                                      [(el["n1"], el["n2"]) for el in elems], 0.0)
         comp_max["Disp"] = maxoff
         dscale = (0.08 * msize / maxoff) if maxoff > 1e-9 else 1.0
+        train = ("%d axle(s) x %.0f N @ %.0f mm" % (naxle, Pmag, spacing)
+                 if naxle > 1 else "%.0f N" % Pmag)
         _store_analysis_state(doc, nodes, u_gov, elems, dscale, msize,
                               _tube_radius(msize),
-                              "Moving load %s %.0f N" % (vals["dir"], Pmag), comp_max)
+                              "Moving load %s %s" % (vals["dir"], train), comp_max)
         doc.commitTransaction()
         _render_result(doc, "My", scale_mult=1.0)
 
@@ -6347,8 +6364,8 @@ class MovingLoad:
             sh = doc.getObject("MovingEnvelope") or \
                 doc.addObject("Spreadsheet::Sheet", "MovingEnvelope")
             sh.Label = "MovingEnvelope"; sh.clearAll()
-            sh.set("A1", "MOVING LOAD ENVELOPE - P=%.0f N %s, %d positions"
-                   % (Pmag, vals["dir"], NSTA))
+            sh.set("A1", "MOVING LOAD ENVELOPE - %s %s, %d positions"
+                   % (train, vals["dir"], NSTA))
             for c, h in zip("ABCDEF", ["Member", "Section", "max|My| (N.mm)",
                                        "max|Mz| (N.mm)", "max|Vz| (N)", "N range (N)"]):
                 sh.set("%s2" % c, h)
@@ -6366,13 +6383,13 @@ class MovingLoad:
         except Exception as ex:
             FreeCAD.Console.PrintError("DynFrame: moving env table failed (%s)\n" % ex)
         doc.recompute()
-        info("Moving load envelope done: P=%.0f N %s stepped over %d positions on a "
+        info("Moving load envelope done: %s %s stepped over %d positions on a "
              "%d-member lane.\n\nPeak |My| anywhere = %.0f N.mm; showing the My "
              "envelope (worst moment at every section) with the deformed shape at "
              "the governing position. Per-member worst forces are in the "
              "'MovingEnvelope' table, and the envelope is stored so 'Steel Code "
              "Check' verifies against it."
-             % (Pmag, vals["dir"], NSTA, len(laneels), comp_max["My"]))
+             % (train, vals["dir"], NSTA, len(laneels), comp_max["My"]))
 
 
 def _auto_combos(doc):

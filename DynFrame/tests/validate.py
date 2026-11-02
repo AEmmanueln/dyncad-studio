@@ -1104,11 +1104,13 @@ bm.BarStart=Vec(0,0,0); bm.BarEnd=Vec(Lb,0,0)
 dM.addObject("Part::Feature","SA").Restrain="111101"; dM.Objects[-1].AtNode=Vec(0,0,0)
 dM.addObject("Part::Feature","SB").Restrain="011101"; dM.Objects[-1].AtNode=Vec(Lb,0,0)
 C.selected_elems=lambda: [bm]
-C.form_dialog=lambda title,fields:{"P":Pm,"dir":"-Z (gravity)","nsta":21}
+C.form_dialog=lambda title,fields:{"P":Pm,"dir":"-Z (gravity)","naxle":1,
+                                   "spacing":1500.0,"nsta":21}
 gotM={}; C.info=lambda m,g=gotM: g.setdefault("msg",m)
 C.MovingLoad().Activated()
 rmy=getattr(bm,"ResMy",0.0)
-print("  envelope max|My|=%.0f  (exact PL/4=%.0f)  ratio=%.4f"%(rmy,Pm*Lb/4,rmy/(Pm*Lb/4)))
+print("  single axle envelope max|My|=%.0f  (exact PL/4=%.0f)  ratio=%.4f"
+      %(rmy,Pm*Lb/4,rmy/(Pm*Lb/4)))
 assert abs(rmy-Pm*Lb/4)/(Pm*Lb/4)<0.02, (rmy,Pm*Lb/4)
 # max shear envelope approaches P (load next to a support)
 rvz=getattr(bm,"ResVz",0.0)
@@ -1127,6 +1129,22 @@ C.form_dialog=lambda title,fields:{"gm0":1.0,"gm1":1.0,"ky":1.0,"kz":1.0,
 C.info=lambda m: None
 C.CodeCheck().Activated()
 assert dM.getObject("CodeCheck") is not None
+# multi-axle: two axles a hair apart ~ one 2P load -> max My ~ (2P)L/4 = PL/2
+dM2=Doc(); FreeCAD.ActiveDocument=dM2
+b2=dM2.addObject("Part::Feature","Gird2"); b2.Shape=Shape(0,[Vec(0,0,0),Vec(Lb,0,0)])
+b2.IsBar=True; b2.Section="IPE 200"; b2.Material="Steel S235"
+b2.BarStart=Vec(0,0,0); b2.BarEnd=Vec(Lb,0,0)
+dM2.addObject("Part::Feature","SA").Restrain="111101"; dM2.Objects[-1].AtNode=Vec(0,0,0)
+dM2.addObject("Part::Feature","SB").Restrain="011101"; dM2.Objects[-1].AtNode=Vec(Lb,0,0)
+C.selected_elems=lambda: [b2]
+C.form_dialog=lambda title,fields:{"P":Pm,"dir":"-Z (gravity)","naxle":2,
+                                   "spacing":1.0,"nsta":81}
+C.info=lambda m: None
+C.MovingLoad().Activated()
+rmy2=getattr(b2,"ResMy",0.0)
+print("  two axles (spacing~0) max|My|=%.0f  (exact (2P)L/4=%.0f)  ratio=%.4f"
+      %(rmy2,2*Pm*Lb/4,rmy2/(2*Pm*Lb/4)))
+assert abs(rmy2-2*Pm*Lb/4)/(2*Pm*Lb/4)<0.02, (rmy2,2*Pm*Lb/4)
 print("moving load envelope OK")
 
 print("\n=== EC2 punching shear (hand calc + command) ===")

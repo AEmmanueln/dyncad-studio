@@ -1192,4 +1192,52 @@ print("  command: util=%.2f verdict=%r"%(util,verdict))
 assert abs(util-1.50)<0.03 and "reinf" in verdict.lower()
 print("EC2 punching shear OK")
 
+print("\n=== Time-history (Newmark-beta): step DAF~2 + period ~ T1 ===")
+import re as _re2, math as _mh
+C._section_props_from_name=lambda name:(2000.0,1.0e6,1.0e6,2.0e6,100.0)
+dTH=Doc(); FreeCAD.ActiveDocument=dTH
+Lc=3000.
+cc=dTH.addObject("Part::Feature","Col"); cc.Shape=Shape(0,[Vec(0,0,0),Vec(0,0,Lc)])
+cc.IsBar=True; cc.Section="IPE 200"; cc.Material="Steel S235"
+cc.BarStart=Vec(0,0,0); cc.BarEnd=Vec(0,0,Lc)
+dTH.addObject("Part::Feature","S").Restrain="111111"; dTH.Objects[-1].AtNode=Vec(0,0,0)
+C._sel_vertices=lambda: [Vec(0,0,Lc)]
+C.form_dialog=lambda title,fields:{"exc":"Nodal force","dir":"+X","amp":50000.0,
+  "func":"Step","freq":5.0,"td":0.1,"dur":0.6,"dt":0.002,"zeta":0.0}
+gotT={}; C.info=lambda m,g=gotT: g.setdefault("msg",m)
+C.TimeHistory().Activated()
+msg=gotT["msg"]
+daf=float(_re2.search(r"amplification\s*([\d.]+)",msg).group(1))
+f1=float(_re2.search(r"f1 = ([\d.]+) Hz",msg).group(1))
+print("  undamped step: f1=%.3f Hz  DAF=%.3f (expect ~2.0)"%(f1,daf))
+assert 1.9<daf<2.2, daf
+# period from the response history: first peak at ~T1/2
+rh=dTH.getObject("ResponseHistory"); th=[]; r=3
+while ("A%d"%r) in rh._cells:
+    th.append((float(rh._cells["A%d"%r]), abs(float(rh._cells["B%d"%r])))); r+=1
+# first local peak of |u| (the step response peaks at t ~ T1/2); undamped peaks
+# all tie, so take the FIRST turning point rather than the global max
+tpk=th[-1][0]
+for i in range(1, len(th)):
+    if th[i][1] < th[i - 1][1] - 1e-9:
+        tpk = th[i - 1][0]; break
+Tmeas=2*tpk; T1=1.0/f1
+print("  measured period=%.4f s  T1=1/f1=%.4f s  ratio=%.3f"%(Tmeas,T1,Tmeas/T1))
+assert abs(Tmeas/T1-1.0)<0.08, (Tmeas,T1)
+# f1 vs the analytical cantilever (1.875^2/2pi) sqrt(EI/rho A L^4)
+rho=7.85e-9; A=2000.; I=1e6; E=210000.
+f1ex=(1.875104**2)/(2*_mh.pi)*_mh.sqrt(E*I/(rho*A*Lc**4))
+print("  f1=%.3f Hz  analytical=%.3f Hz  ratio=%.3f"%(f1,f1ex,f1/f1ex))
+assert abs(f1/f1ex-1.0)<0.05, (f1,f1ex)
+assert "base shear" in msg.lower()
+# heavy damping -> quasi-static, little overshoot
+C.form_dialog=lambda title,fields:{"exc":"Nodal force","dir":"+X","amp":50000.0,
+  "func":"Step","freq":5.0,"td":0.1,"dur":0.6,"dt":0.002,"zeta":0.7}
+gotT2={}; C.info=lambda m,g=gotT2: g.setdefault("msg",m)
+C.TimeHistory().Activated()
+daf2=float(_re2.search(r"amplification\s*([\d.]+)",gotT2["msg"]).group(1))
+print("  heavy damping (zeta=0.7): DAF=%.3f (expect ~1.0, <1.3)"%daf2)
+assert 0.8<daf2<1.3, daf2
+print("time-history OK")
+
 print("\nALL RUNTIME CHECKS PASSED")

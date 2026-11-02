@@ -5175,7 +5175,7 @@ class ClearAnalysis:
         res_sheets = ("Reactions", "Displacements", "BarForces",
                       "ModalFrequencies", "CodeCheck", "Envelope", "Seismic",
                       "PlateForces", "PlateReinforcement", "PlateSteel",
-                      "PunchingShear", "MovingEnvelope")
+                      "PunchingShear", "MovingEnvelope", "ResponseHistory")
         all_sheets = res_sheets + ("LoadCases", "Combinations", "AnalysisResults")
         to_del = []
         for o in list(doc.Objects):
@@ -6141,6 +6141,74 @@ def _frame_stiffness(doc):
     return nodes, elems, K, fixed, sup
 
 
+def _frame_fine_MK(doc, nsub=4):
+    """Assemble the frame's global stiffness K and consistent mass M on a mesh
+    that subdivides each bar into `nsub` sub-elements (the coarse support nodes
+    keep their indices), for modal / time-history dynamics. Returns
+    (coarse_nodes, fine_nodes, K, M, fixed, sup). Mass density is converted to
+    tonne/mm^3 (N-mm-tonne-s), so frequencies come out in Hz."""
+    import numpy as np
+    objs, _k = _analysis_objs(doc)
+    nodes = []
+
+    def nid(p, make=True):
+        for i, q in enumerate(nodes):
+            if q.distanceToPoint(p) <= 1.0:
+                return i
+        if not make:
+            return -1
+        nodes.append(FreeCAD.Vector(p)); return len(nodes) - 1
+
+    bars = []
+    for o in objs:
+        sp = _section_props_from_name(_elem_section(o))
+        if sp is None:
+            continue
+        A, Iy, Iz, J, c = sp
+        s, e = _elem_ends(o)
+        n1, n2 = nid(s), nid(e)
+        if n1 == n2:
+            continue
+        E, G, Fy, rho = _material(_elem_material(o))
+        bars.append({"n1": n1, "n2": n2, "A": A, "Iy": Iy, "Iz": Iz, "J": J,
+                     "E": E, "G": G, "rho": rho})
+    fixed = set(); sup = []
+    for o in doc.Objects:
+        r = getattr(o, "Restrain", None); at = getattr(o, "AtNode", None)
+        if r and at is not None:
+            i = nid(FreeCAD.Vector(at), make=False)
+            if i >= 0:
+                sup.append(i)
+                for k, ch in enumerate(str(r)):
+                    if ch == "1":
+                        fixed.add(6 * i + k)
+    fine = [FreeCAD.Vector(p) for p in nodes]
+
+    def fid(p):
+        for i, q in enumerate(fine):
+            if q.distanceToPoint(p) <= 0.5:
+                return i
+        fine.append(FreeCAD.Vector(p)); return len(fine) - 1
+
+    subel = []
+    for b in bars:
+        p1 = nodes[b["n1"]]; p2 = nodes[b["n2"]]; prev = b["n1"]
+        for s in range(1, nsub + 1):
+            pt = p1 + vscale(p2 - p1, s / float(nsub))
+            cur = b["n2"] if s == nsub else fid(pt)
+            subel.append((prev, cur, b)); prev = cur
+    ndof = 6 * len(fine)
+    K = np.zeros((ndof, ndof)); M = np.zeros((ndof, ndof))
+    for (a, bidx, b) in subel:
+        T, L = _beam_T(fine[a], fine[bidx])
+        kl = _beam_k_local(b["E"], b["G"], b["A"], b["Iy"], b["Iz"], b["J"], L)
+        ml = _beam_mass_local(b["rho"] * 1e-3, b["A"], b["J"], L)   # kg->tonne
+        dofs = [6 * a + i for i in range(6)] + [6 * bidx + i for i in range(6)]
+        ix = np.ix_(dofs, dofs)
+        K[ix] += T.T @ kl @ T; M[ix] += T.T @ ml @ T
+    return nodes, fine, K, M, fixed, sup
+
+
 def _pt_samples(el, u, pts_local, NS=10):
     """Member force samples (N, Vy, Vz, Mx, My, Mz, Stress) along `el` under a
     set of point loads (local components, distance a from node i), from the
@@ -6406,6 +6474,253 @@ class MovingLoad:
              "'MovingEnvelope' table, and the envelope is stored so 'Steel Code "
              "Check' verifies against it."
              % (train, vals["dir"], NSTA, len(laneels), comp_max["My"]))
+
+
+class TimeHistory:
+    _DIRS = {"+X": (1.0, 0.0, 0.0, 0), "-X": (-1.0, 0.0, 0.0, 0),
+             "+Y": (0.0, 1.0, 0.0, 1), "-Y": (0.0, -1.0, 0.0, 1),
+             "+Z": (0.0, 0.0, 1.0, 2), "-Z": (0.0, 0.0, -1.0, 2)}
+
+    def GetResources(self):
+        return {"Pixmap": _icon("timehist"), "MenuText": "Time-History (dynamic)",
+                "ToolTip": "Transient dynamic response by Newmark-beta direct "
+                           "integration: a nodal force or a ground acceleration "
+                           "(seismic) with a step / harmonic / pulse time function, "
+                           "Rayleigh damping. Reports the peak response, base shear "
+                           "and the monitored-node time history.", "Accel": "A, H"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        import numpy as np
+        doc = FreeCAD.ActiveDocument
+        sel_pts = _sel_vertices()
+        coarse, fine, K, M, fixed, sup = _frame_fine_MK(doc)
+        if not fine or 6 * len(fine) == 0:
+            info("No frame model found - build bars and supports first."); return
+        if not fixed:
+            err("No supports defined. Add supports, then run the time-history."); return
+        ncoarse = len(coarse); ndof = 6 * len(fine)
+        free = [i for i in range(ndof) if i not in fixed]
+        Mf = M[np.ix_(free, free)]; Kf = K[np.ix_(free, free)]
+        # natural frequencies (first two) for the Rayleigh damping anchors
+        try:
+            Lc = np.linalg.cholesky(Mf); Lci = np.linalg.inv(Lc)
+            w2, _Y = np.linalg.eigh(0.5 * (Lci @ Kf @ Lci.T + (Lci @ Kf @ Lci.T).T))
+            ws = sorted(float(x) ** 0.5 for x in w2 if x > 1e-9)
+        except Exception:
+            err("Dynamic solve failed - the structure may be a mechanism."); return
+        if not ws:
+            err("No positive vibration modes - check supports/mass."); return
+        w1 = ws[0]; w2a = ws[1] if len(ws) > 1 else ws[0] * 3.0
+        f1 = w1 / (2 * np.pi)
+        vals = form_dialog("Time-History Analysis (Newmark-beta)", [
+            {"key": "_i", "kind": "info", "default":
+             "Transient response by Newmark-beta (average acceleration, "
+             "unconditionally stable). First natural frequency f1 = %.3f Hz "
+             "(T1 = %.4f s). Choose a nodal force (needs selected node vertices) "
+             "or a ground acceleration, a time function, duration and time step."
+             % (f1, 1.0 / f1 if f1 > 0 else 0.0)},
+            {"key": "exc", "label": "Excitation", "kind": "combo",
+             "options": ["Nodal force", "Ground acceleration (seismic)"],
+             "default": "Nodal force"},
+            {"key": "dir", "label": "Direction", "kind": "combo",
+             "options": list(self._DIRS.keys()), "default": "+X"},
+            {"key": "amp", "label": "Amplitude (force N, or accel in g)",
+             "kind": "float", "default": 100000.0},
+            {"key": "func", "label": "Time function", "kind": "combo",
+             "options": ["Step", "Harmonic", "Half-sine pulse"], "default": "Step"},
+            {"key": "freq", "label": "Harmonic frequency (Hz)", "kind": "float",
+             "default": max(0.1, f1)},
+            {"key": "td", "label": "Pulse duration (s)", "kind": "float", "default": 0.1},
+            {"key": "dur", "label": "Total duration (s)", "kind": "float",
+             "default": max(1.0, 6.0 / f1 if f1 > 0 else 2.0)},
+            {"key": "dt", "label": "Time step dt (s)", "kind": "float",
+             "default": max(1e-4, 1.0 / (40.0 * max(f1, 0.5))), "decimals": 5},
+            {"key": "zeta", "label": "Damping ratio zeta", "kind": "float",
+             "default": 0.05, "decimals": 4},
+        ])
+        if not vals:
+            return
+        dv = self._DIRS.get(vals["dir"], (1.0, 0.0, 0.0, 0))
+        dvec = np.array(dv[:3], float); dirdof = dv[3]
+        amp = float(vals["amp"]); seismic = vals["exc"].startswith("Ground")
+        func = vals["func"]; fh = float(vals["freq"]); td = float(vals["td"])
+        dur = float(vals["dur"]); dt = max(1e-5, float(vals["dt"]))
+        zeta = max(0.0, float(vals["zeta"]))
+
+        # load pattern p (full) and scalar time function g(t)
+        p = np.zeros(ndof)
+        if seismic:
+            r = np.zeros(ndof)
+            for i in range(len(fine)):
+                r[6 * i + dirdof] = 1.0
+            p = -(M @ r)                 # effective seismic force = -M r a_g(t)
+            scale = amp * 9810.0         # g -> mm/s^2
+        else:
+            if not sel_pts:
+                info("Select the node vertices to load (nodal force), then run."); return
+            hit = 0
+            for q in sel_pts:
+                idx = next((i for i in range(len(fine))
+                            if fine[i].distanceToPoint(FreeCAD.Vector(q)) <= 1.0), -1)
+                if idx >= 0:
+                    for a in range(3):
+                        p[6 * idx + a] += dvec[a]
+                    hit += 1
+            if hit == 0:
+                info("The selected vertices are not frame nodes."); return
+            scale = amp
+
+        def gfun(t):
+            if func == "Harmonic":
+                return np.sin(2 * np.pi * fh * t)
+            if func.startswith("Half"):
+                return np.sin(np.pi * t / td) if 0.0 <= t <= td else 0.0
+            return 1.0                    # Step
+
+        # Rayleigh damping C = a*M + b*K anchored at the first two frequencies
+        if w2a > w1 + 1e-9:
+            a_ray = 2 * zeta * w1 * w2a / (w1 + w2a); b_ray = 2 * zeta / (w1 + w2a)
+        else:
+            a_ray = 2 * zeta * w1; b_ray = 0.0
+        Cf = a_ray * Mf + b_ray * Kf
+        pf = p[free]
+
+        # pseudo-static response to pick the monitored (most responsive) node
+        try:
+            ust = np.linalg.solve(Kf, pf * scale)     # pseudo-static response
+        except Exception:
+            ust = np.zeros(len(free))
+        ust_full = np.zeros(ndof); ust_full[free] = ust
+        mon = max(range(ncoarse),
+                  key=lambda i: abs(ust_full[6 * i + dirdof]))
+        ust_mon = ust_full[6 * mon + dirdof]
+
+        # Newmark-beta constants (average acceleration: beta=1/4, gamma=1/2)
+        beta = 0.25; gamma = 0.5
+        a0 = 1.0 / (beta * dt * dt); a1 = gamma / (beta * dt); a2 = 1.0 / (beta * dt)
+        a3 = 1.0 / (2 * beta) - 1.0; a4 = gamma / beta - 1.0
+        a5 = dt * (gamma / (2 * beta) - 1.0)
+        Khat = Kf + a0 * Mf + a1 * Cf
+        try:
+            Khat_inv = np.linalg.inv(Khat); Minv = np.linalg.inv(Mf)
+        except Exception:
+            err("Newmark factorisation failed (singular system)."); return
+
+        nstep = max(1, int(round(dur / dt)))
+        u = np.zeros(len(free)); v = np.zeros(len(free))
+        F0 = pf * scale * gfun(0.0)
+        acc = Minv @ (F0 - Cf @ v - Kf @ u)
+        # coarse-element force envelope (reuse _frame_stiffness elements)
+        _cn, celems, _Kc, _fx, _sp = _frame_stiffness(doc)
+        sampabs = {id(el): {k: [0.0] * 11 for k in DIAG_KINDS} for el in celems}
+        hist = [(0.0, 0.0)]; peak_abs = 0.0; u_peak = np.zeros(ndof)
+        peak_shear = 0.0
+        fullu = np.zeros(ndof); fullv = np.zeros(ndof); fulla = np.zeros(ndof)
+        for i in range(nstep):
+            t1 = (i + 1) * dt
+            F1 = pf * scale * gfun(t1)
+            phat = F1 + Mf @ (a0 * u + a2 * v + a3 * acc) \
+                + Cf @ (a1 * u + a4 * v + a5 * acc)
+            u1 = Khat_inv @ phat
+            acc1 = a0 * (u1 - u) - a2 * v - a3 * acc
+            v1 = v + dt * ((1 - gamma) * acc + gamma * acc1)
+            u, v, acc = u1, v1, acc1
+            fullu[free] = u; fullv[free] = v; fulla[free] = acc
+            dmon = fullu[6 * mon + dirdof]
+            hist.append((t1, float(dmon)))
+            # peak resultant displacement over coarse nodes -> deformed shape
+            res = max((fullu[6 * j] ** 2 + fullu[6 * j + 1] ** 2
+                       + fullu[6 * j + 2] ** 2) for j in range(ncoarse)) ** 0.5
+            if res > peak_abs:
+                peak_abs = res; u_peak = fullu.copy()
+            # base shear = sum of support reactions in the excitation direction
+            R = K @ fullu + M @ fulla - p * scale * gfun(t1)   # C term ~0 on supports
+            vb = sum(R[6 * s + dirdof] for s in sup)
+            if abs(vb) > peak_shear:
+                peak_shear = abs(vb)
+            # member-force envelope from the coarse-node displacements
+            uc = fullu[:6 * ncoarse]
+            for el in celems:
+                samp, _fend = _pt_samples(el, uc, [], 10)
+                sa = sampabs[id(el)]
+                for k in DIAG_KINDS:
+                    row = samp[k]
+                    for sidx in range(11):
+                        av = abs(row[sidx])
+                        if av > sa[k][sidx]:
+                            sa[k][sidx] = av
+
+        peak_mon = max(abs(h[1]) for h in hist)
+        daf = (peak_mon / abs(ust_mon)) if abs(ust_mon) > 1e-12 else 0.0
+
+        # store the peak deformed state + member envelope, render the shape
+        comp_max = {k: 0.0 for k in DIAG_KINDS}
+        for el in celems:
+            el["samp"] = {k: list(sampabs[id(el)][k]) for k in DIAG_KINDS}
+            for k in DIAG_KINDS:
+                comp_max[k] = max(comp_max[k], max(el["samp"][k]))
+            try:
+                o = el["o"]
+                _set(o, "App::PropertyFloat", "ResMy", float(max(el["samp"]["My"])))
+                _set(o, "App::PropertyFloat", "ResMz", float(max(el["samp"]["Mz"])))
+                _set(o, "App::PropertyFloat", "ResVy", float(max(el["samp"]["Vy"])))
+                _set(o, "App::PropertyFloat", "ResVz", float(max(el["samp"]["Vz"])))
+                _set(o, "App::PropertyFloat", "ResN",
+                     float(max(el["samp"]["N"], key=abs) if el["samp"]["N"] else 0.0))
+            except Exception:
+                pass
+        doc.openTransaction("DynFrame: time-history")
+        for o in list(doc.Objects):
+            if getattr(o, "DiagKind", None) is not None \
+                    or o.Name.startswith(("Diagram_", "Result_", "DeformedShape",
+                                          "Legend", "ResultPeak")):
+                try:
+                    doc.removeObject(o.Name)
+                except Exception:
+                    pass
+        rg = _grp(doc, RES_GROUP)
+        msize = _model_size([el["o"] for el in celems]) if celems else 1000.0
+        upc = u_peak[:6 * ncoarse]
+        _, maxoff = _deformed_points(coarse, upc,
+                                     [(el["n1"], el["n2"]) for el in celems], 0.0)
+        comp_max["Disp"] = maxoff
+        dscale = (0.08 * msize / maxoff) if maxoff > 1e-9 else 1.0
+        _store_analysis_state(doc, coarse, upc, celems, dscale, msize,
+                              _tube_radius(msize),
+                              "Time-history %s %s" % (vals["dir"], vals["func"]),
+                              comp_max)
+        doc.commitTransaction()
+        _render_result(doc, "Disp", scale_mult=1.0)
+
+        # monitored-node response-history table (subsampled to <= 500 rows)
+        try:
+            sh = doc.getObject("ResponseHistory") or \
+                doc.addObject("Spreadsheet::Sheet", "ResponseHistory")
+            sh.Label = "ResponseHistory"; sh.clearAll()
+            sh.set("A1", "TIME-HISTORY - node N%d, %s disp (mm); f1=%.3f Hz, zeta=%.3f"
+                   % (mon + 1, vals["dir"], f1, zeta))
+            sh.set("A2", "t (s)"); sh.set("B2", "u (mm)")
+            step = max(1, len(hist) // 500); r = 3
+            for (tt, uu) in hist[::step]:
+                sh.set("A%d" % r, "%.5g" % tt); sh.set("B%d" % r, "%.6g" % uu); r += 1
+            if rg is not None and sh not in rg.Group:
+                rg.addObject(sh)
+        except Exception as ex:
+            FreeCAD.Console.PrintError("DynFrame: response table failed (%s)\n" % ex)
+        doc.recompute()
+        exc = ("ground accel %.3g g" % amp if seismic else "nodal force %.0f N" % amp)
+        info("Time-history complete (Newmark-beta): %s, %s %s over %.3g s "
+             "(dt=%.4g s, %d steps).\n\nf1 = %.3f Hz (T1 = %.4f s), Rayleigh "
+             "zeta = %.3f.\nPeak response at node N%d = %.4g mm (dyn. amplification "
+             "%.2f x the static).\nPeak base shear = %.0f N.\n\nShowing the deformed "
+             "shape at peak response; the monitored-node time history is in the "
+             "'ResponseHistory' table and the member-force envelope is stored for "
+             "the code check." % (exc, vals["func"], vals["dir"], dur, dt, nstep,
+                                  f1, 1.0 / f1 if f1 > 0 else 0.0, zeta, mon + 1,
+                                  peak_mon, daf, peak_shear))
 
 
 def _auto_combos(doc):
@@ -7969,6 +8284,7 @@ _add("DynFrame_BucklingAnalysis", BucklingAnalysis)
 _add("DynFrame_ResponseSpectrum", ResponseSpectrum)
 _add("DynFrame_Envelope", Envelope)
 _add("DynFrame_MovingLoad", MovingLoad)
+_add("DynFrame_TimeHistory", TimeHistory)
 _add("DynFrame_CodeCheck", CodeCheck)
 _add("DynFrame_ShowDiagram", ShowDiagram)
 _add("DynFrame_ResultsViewer", ResultsViewer)

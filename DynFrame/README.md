@@ -198,6 +198,18 @@ model is what you analyse. Commands are on the toolbars/menus
   include geometric nonlinearity: the solve iterates with the geometric
   stiffness until it converges, amplifying the displacements and moments
   from the axial forces (the stability effect in slender frames).
+- **Time-History (dynamic)** — transient response by **Newmark-β direct
+  integration** (average-acceleration, unconditionally stable). Excite the
+  frame with a **nodal force** (on selected nodes) or a **ground acceleration**
+  (seismic base motion), with a **step / harmonic / half-sine-pulse** time
+  function and **Rayleigh damping** (ζ anchored at the first two natural
+  frequencies, found internally). It reports the peak response, the dynamic
+  amplification, the peak base shear, a monitored-node **`ResponseHistory`**
+  table, the deformed shape at peak, and a member-force envelope stored for the
+  code check. (Validated: a cantilever under a suddenly-applied step force
+  gives the exact SDOF dynamic amplification factor of 2.0, the response
+  oscillates at its natural period T₁, f₁ matches the analytical cantilever,
+  and heavy damping collapses the response to the static value.)
 - **Seismic (Response Spectrum)** — EN 1998-1 (EC8) response-spectrum
   analysis built on the modal results: pick the direction, ground
   acceleration aₘ, ground type (A–E) and behaviour factor q; it reports
@@ -320,6 +332,9 @@ rely on. The checks it runs:
 > U = 0.73) and reproduces the LTB reduction (χ_LT ≈ 0.52 for a long
 > unrestrained span); **P-Δ** reproduces the 1/(1−P/Pcr) amplification;
 > **seismic** effective modal masses sum to 100 % of the total mass; the
+> **time-history** (Newmark-β) reproduces the exact step-load dynamic
+> amplification factor of 2.0, oscillates at the natural period T₁, and
+> collapses to the static response under heavy damping; the
 > **plate/shell** element converges to the exact simply-supported-plate
 > deflection (w_c = 0.00406 q a⁴/D, ratio ≈ 0.996), its recovered
 > **bending moment** matches the Timoshenko centre value (Mₓ = M_y =
@@ -345,8 +360,9 @@ rely on. The checks it runs:
 > **moving-load envelope** returns the absolute-maximum moment PL/4 on a
 > simply-supported span (ratio 1.000) with the shear envelope reaching P at a
 > support. It covers **static, P-Δ, modal, buckling, seismic
-> (response-spectrum), moving-load influence, plates/shells, wind and a full
-> EN 1993-1-1 / EN 1992-1-1 design check**.
+> (response-spectrum), time-history (Newmark-β), moving-load influence,
+> plates/shells, wind and a full EN 1993-1-1 / EN 1992-1-1 design check
+> (members, slab reinforcement and punching)**.
 > FreeCAD is not Robot — this reproduces Robot's *workflow and core
 > engineering* on its kernel.
 

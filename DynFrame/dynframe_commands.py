@@ -5936,6 +5936,309 @@ class Envelope:
              % (len(combos), worst, wn))
 
 
+def _frame_stiffness(doc):
+    """Assemble the bare frame (bars only - no loads) into its global stiffness
+    K plus the element data and fixed-DOF set, for repeated solves at many load
+    positions (moving-load / influence analysis). Member releases, plates,
+    springs and settlement are not included here - this is the clean live-load
+    carrier model."""
+    import numpy as np
+    objs, _k = _analysis_objs(doc)
+    nodes = []
+
+    def nid(p, make=True):
+        for i, q in enumerate(nodes):
+            if q.distanceToPoint(p) <= 1.0:
+                return i
+        if not make:
+            return -1
+        nodes.append(FreeCAD.Vector(p)); return len(nodes) - 1
+
+    elems = []
+    for o in objs:
+        sp = _section_props_from_name(_elem_section(o))
+        if sp is None:
+            continue
+        A, Iy, Iz, J, c = sp
+        s, e = _elem_ends(o)
+        n1, n2 = nid(s), nid(e)
+        if n1 == n2:
+            continue
+        E, G, Fy, rho = _material(_elem_material(o))
+        T, L = _beam_T(nodes[n1], nodes[n2])
+        kl = _beam_k_local(E, G, A, Iy, Iz, J, L)
+        dofs = [6 * n1 + i for i in range(6)] + [6 * n2 + i for i in range(6)]
+        elems.append({"o": o, "n1": n1, "n2": n2, "A": A, "Iy": Iy, "Iz": Iz,
+                      "J": J, "c": c, "E": E, "G": G, "Fy": Fy,
+                      "sec": _elem_section(o), "T": T, "L": L, "kl": kl,
+                      "dofs": dofs})
+    ndof = 6 * len(nodes)
+    K = np.zeros((ndof, ndof))
+    for el in elems:
+        K[np.ix_(el["dofs"], el["dofs"])] += el["T"].T @ el["kl"] @ el["T"]
+    fixed = set(); sup = []
+    for o in doc.Objects:
+        r = getattr(o, "Restrain", None); at = getattr(o, "AtNode", None)
+        if r and at is not None:
+            i = nid(FreeCAD.Vector(at), make=False)
+            if i >= 0:
+                sup.append(i)
+                for k, ch in enumerate(str(r)):
+                    if ch == "1":
+                        fixed.add(6 * i + k)
+    return nodes, elems, K, fixed, sup
+
+
+def _pt_samples(el, u, pts_local, NS=10):
+    """Member force samples (N, Vy, Vz, Mx, My, Mz, Stress) along `el` under a
+    set of point loads (local components, distance a from node i), from the
+    nodal displacements u. Same free-body recovery as the main solver, point
+    loads only. Returns (dict kind -> list[NS+1], end-force vector)."""
+    import numpy as np
+    L = el["L"]; dloc = el["T"] @ u[el["dofs"]]
+    fef = np.zeros(12)
+    for (px, py, pz, a) in pts_local:
+        fef = fef + _fef_point_local(px, py, pz, L, a)
+    fend = el["kl"] @ dloc - fef
+    A = el["A"]; c = el["c"]; Imin = min(el["Iy"], el["Iz"])
+
+    def crossed(ci, x):
+        return sum((px, py, pz)[ci] * (1.0 if x >= a else 0.0)
+                   for (px, py, pz, a) in pts_local)
+
+    def free_m(ci, x):
+        m = 0.0
+        for (px, py, pz, a) in pts_local:
+            P = (px, py, pz)[ci]
+            m += P * ((L - a) * x / L if x <= a else a * (L - x) / L)
+        return m
+
+    out = {}
+    for kind in DIAG_KINDS:
+        vals = []
+        for sidx in range(NS + 1):
+            x = L * sidx / NS
+            if kind == "N":
+                v = -(fend[0] + crossed(0, x))
+            elif kind == "Vy":
+                v = fend[1] + crossed(1, x)
+            elif kind == "Vz":
+                v = fend[2] + crossed(2, x)
+            elif kind == "Mx":
+                v = -fend[3]
+            elif kind == "My":
+                v = fend[4] * (1 - x / L) - fend[10] * (x / L) - free_m(2, x)
+            elif kind == "Mz":
+                v = -fend[5] * (1 - x / L) + fend[11] * (x / L) - free_m(1, x)
+            else:
+                myx = fend[4] * (1 - x / L) - fend[10] * (x / L) - free_m(2, x)
+                mzx = -fend[5] * (1 - x / L) + fend[11] * (x / L) - free_m(1, x)
+                nx = -(fend[0] + crossed(0, x))
+                mm = (myx * myx + mzx * mzx) ** 0.5
+                v = abs(nx) / A + (mm * c / Imin if Imin > 1e-9 else 0.0)
+            vals.append(v)
+        out[kind] = vals
+    return out, fend
+
+
+class MovingLoad:
+    _DIRS = {"-Z (gravity)": (0.0, 0.0, -1.0), "+Z": (0.0, 0.0, 1.0),
+             "+X": (1.0, 0.0, 0.0), "-X": (-1.0, 0.0, 0.0),
+             "+Y": (0.0, 1.0, 0.0), "-Y": (0.0, -1.0, 0.0)}
+
+    def GetResources(self):
+        return {"Pixmap": _icon("moving"), "MenuText": "Moving Load Envelope",
+                "ToolTip": "Step a point load along the selected lane members and "
+                           "envelope the worst member forces at every position - a "
+                           "bridge/crane influence analysis. Stores the envelope so "
+                           "the Steel Code Check runs against it.", "Accel": "A, L"}
+
+    def IsActive(self):
+        return bool(selected_elems())
+
+    def Activated(self):
+        import numpy as np
+        lane = [m for m in selected_elems() if is_bar(m)]
+        if not lane:
+            info("Select the lane members - the path the moving load travels "
+                 "along (e.g. a bridge girder or crane runway) - then run it.")
+            return
+        doc = FreeCAD.ActiveDocument
+        cs = [c[0] for c in _cases(doc)]
+        vals = form_dialog("Moving Load Envelope (%d lane member(s))" % len(lane), [
+            {"key": "_i", "kind": "info", "default":
+             "A point load is stepped along the selected lane and the model solved "
+             "at each position; the worst force at every section is kept (the "
+             "influence envelope). Member releases are not applied in this live-"
+             "load carrier model. The envelope forces are stored, so a following "
+             "Steel Code Check verifies against them."},
+            {"key": "P", "label": "Load magnitude P (N)", "kind": "float",
+             "default": 100000.0},
+            {"key": "dir", "label": "Direction", "kind": "combo",
+             "options": list(self._DIRS.keys()), "default": "-Z (gravity)"},
+            {"key": "nsta", "label": "Positions along the lane", "kind": "int",
+             "default": 21, "min": 2, "max": 200},
+        ])
+        if not vals:
+            return
+        Pmag = abs(float(vals["P"]))
+        d = self._DIRS.get(vals["dir"], (0.0, 0.0, -1.0))
+        Pvec = np.array(d, float) * Pmag
+        NSTA = int(vals["nsta"])
+
+        nodes, elems, K, fixed, sup = _frame_stiffness(doc)
+        if not elems:
+            info("Could not build a frame model (check bar sections)."); return
+        if not fixed:
+            err("No supports defined. Add supports, then run the moving load."); return
+        ndof = 6 * len(nodes); free = [i for i in range(ndof) if i not in fixed]
+        try:
+            Kinv = np.linalg.inv(K[np.ix_(free, free)])
+        except Exception:
+            err("The structure is unstable (a mechanism) with the supports given.")
+            return
+        by_name = {el["o"].Name: el for el in elems}
+        laneels = [by_name[m.Name] for m in lane if m.Name in by_name]
+        if not laneels:
+            info("The selected lane members are not part of the analysis model."); return
+
+        # order the lane along its dominant axis; record each member's start point
+        pts = []
+        for el in laneels:
+            pts += [nodes[el["n1"]], nodes[el["n2"]]]
+        far1 = pts[0]; far2 = pts[0]; best = -1.0
+        for a in pts:
+            for b in pts:
+                dd = a.distanceToPoint(b)
+                if dd > best:
+                    best = dd; far1, far2 = a, b
+        axis = far2 - far1
+        axis = unit(axis) if axis.Length > 1e-9 else FreeCAD.Vector(1, 0, 0)
+
+        def proj(p):
+            return (p - far1).x * axis.x + (p - far1).y * axis.y + (p - far1).z * axis.z
+        ordered = sorted(laneels, key=lambda el: 0.5 * (proj(nodes[el["n1"]])
+                                                        + proj(nodes[el["n2"]])))
+        seq = []   # (element, flip) flip=True means lane runs n2->n1
+        for el in ordered:
+            seq.append((el, proj(nodes[el["n1"]]) > proj(nodes[el["n2"]])))
+        total = sum(el["L"] for el in ordered) or 1.0
+
+        def station(g):                 # global fraction 0..1 -> (element, a-from-n1)
+            target = g * total; cum = 0.0
+            for (el, flip) in seq:
+                if target <= cum + el["L"] + 1e-9:
+                    lp = max(0.0, min(1.0, (target - cum) / el["L"]))
+                    a = (1.0 - lp) * el["L"] if flip else lp * el["L"]
+                    return el, a
+                cum += el["L"]
+            el, flip = seq[-1]
+            return el, (0.0 if flip else el["L"])
+
+        NS = 10
+        sampabs = {id(el): {k: [0.0] * (NS + 1) for k in DIAG_KINDS} for el in elems}
+        nrange = {id(el): [0.0, 0.0] for el in elems}      # [min N, max N] signed
+        peak_my = 0.0; u_gov = np.zeros(ndof)
+        for j in range(NSTA):
+            g = j / float(NSTA - 1) if NSTA > 1 else 0.0
+            lel, a = station(g)
+            R3 = lel["T"][0:3, 0:3]
+            Pl = R3 @ Pvec
+            fef = _fef_point_local(float(Pl[0]), float(Pl[1]), float(Pl[2]), lel["L"], a)
+            F = np.zeros(ndof)
+            F[lel["dofs"]] += lel["T"].T @ fef
+            u = np.zeros(ndof); u[free] = Kinv @ F[free]
+            for el in elems:
+                ptl = [(float(Pl[0]), float(Pl[1]), float(Pl[2]), a)] if el is lel else []
+                samp, fend = _pt_samples(el, u, ptl, NS)
+                sa = sampabs[id(el)]
+                for k in DIAG_KINDS:
+                    row = samp[k]
+                    for sidx in range(NS + 1):
+                        av = abs(row[sidx])
+                        if av > sa[k][sidx]:
+                            sa[k][sidx] = av
+                nn = -fend[0]
+                nr = nrange[id(el)]
+                nr[0] = min(nr[0], nn); nr[1] = max(nr[1], nn)
+                mymax = max(abs(v) for v in samp["My"])
+                if mymax > peak_my:
+                    peak_my = mymax; u_gov = u.copy()
+
+        # assemble the envelope result (abs-max per station) + peaks, store Res*
+        comp_max = {k: 0.0 for k in DIAG_KINDS}
+        for el in elems:
+            el["samp"] = {k: list(sampabs[id(el)][k]) for k in DIAG_KINDS}
+            for k in DIAG_KINDS:
+                comp_max[k] = max(comp_max[k], max(el["samp"][k]))
+            o = el["o"]; nr = nrange[id(el)]
+            ngov = nr[0] if abs(nr[0]) >= abs(nr[1]) else nr[1]
+            try:
+                _set(o, "App::PropertyFloat", "ResN", float(ngov))
+                _set(o, "App::PropertyFloat", "ResMy", float(max(el["samp"]["My"])))
+                _set(o, "App::PropertyFloat", "ResMz", float(max(el["samp"]["Mz"])))
+                _set(o, "App::PropertyFloat", "ResVy", float(max(el["samp"]["Vy"])))
+                _set(o, "App::PropertyFloat", "ResVz", float(max(el["samp"]["Vz"])))
+                _set(o, "App::PropertyFloat", "ResUtil",
+                     float(max(el["samp"]["Stress"]) / el["Fy"]) if el["Fy"] > 0 else 0.0)
+            except Exception:
+                pass
+
+        # render the moment envelope through the normal results path
+        doc.openTransaction("DynFrame: moving load")
+        for o in list(doc.Objects):
+            if getattr(o, "DiagKind", None) is not None \
+                    or o.Name.startswith(("Diagram_", "Result_", "DeformedShape",
+                                          "Legend", "ResultPeak")):
+                try:
+                    doc.removeObject(o.Name)
+                except Exception:
+                    pass
+        rg = _grp(doc, RES_GROUP)
+        msize = _model_size([el["o"] for el in elems])
+        _, maxoff = _deformed_points(nodes, u_gov,
+                                     [(el["n1"], el["n2"]) for el in elems], 0.0)
+        comp_max["Disp"] = maxoff
+        dscale = (0.08 * msize / maxoff) if maxoff > 1e-9 else 1.0
+        _store_analysis_state(doc, nodes, u_gov, elems, dscale, msize,
+                              _tube_radius(msize),
+                              "Moving load %s %.0f N" % (vals["dir"], Pmag), comp_max)
+        doc.commitTransaction()
+        _render_result(doc, "My", scale_mult=1.0)
+
+        # envelope table
+        try:
+            sh = doc.getObject("MovingEnvelope") or \
+                doc.addObject("Spreadsheet::Sheet", "MovingEnvelope")
+            sh.Label = "MovingEnvelope"; sh.clearAll()
+            sh.set("A1", "MOVING LOAD ENVELOPE - P=%.0f N %s, %d positions"
+                   % (Pmag, vals["dir"], NSTA))
+            for c, h in zip("ABCDEF", ["Member", "Section", "max|My| (N.mm)",
+                                       "max|Mz| (N.mm)", "max|Vz| (N)", "N range (N)"]):
+                sh.set("%s2" % c, h)
+            r = 3
+            for el in elems:
+                o = el["o"]; nr = nrange[id(el)]
+                row = [str(o.Label), el["sec"], "%.0f" % max(el["samp"]["My"]),
+                       "%.0f" % max(el["samp"]["Mz"]), "%.0f" % max(el["samp"]["Vz"]),
+                       "%.0f .. %.0f" % (nr[0], nr[1])]
+                for c, v in zip("ABCDEF", row):
+                    sh.set("%s%d" % (c, r), v)
+                r += 1
+            if rg is not None and sh not in rg.Group:
+                rg.addObject(sh)
+        except Exception as ex:
+            FreeCAD.Console.PrintError("DynFrame: moving env table failed (%s)\n" % ex)
+        doc.recompute()
+        info("Moving load envelope done: P=%.0f N %s stepped over %d positions on a "
+             "%d-member lane.\n\nPeak |My| anywhere = %.0f N.mm; showing the My "
+             "envelope (worst moment at every section) with the deformed shape at "
+             "the governing position. Per-member worst forces are in the "
+             "'MovingEnvelope' table, and the envelope is stored so 'Steel Code "
+             "Check' verifies against it."
+             % (Pmag, vals["dir"], NSTA, len(laneels), comp_max["My"]))
+
+
 def _auto_combos(doc):
     cases = _cases(doc)
     dead = [n for n, nat in cases if nat == "Dead"]
@@ -7441,6 +7744,7 @@ _add("DynFrame_ModalAnalysis", ModalAnalysis)
 _add("DynFrame_BucklingAnalysis", BucklingAnalysis)
 _add("DynFrame_ResponseSpectrum", ResponseSpectrum)
 _add("DynFrame_Envelope", Envelope)
+_add("DynFrame_MovingLoad", MovingLoad)
 _add("DynFrame_CodeCheck", CodeCheck)
 _add("DynFrame_ShowDiagram", ShowDiagram)
 _add("DynFrame_ResultsViewer", ResultsViewer)

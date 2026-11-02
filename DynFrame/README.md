@@ -141,6 +141,16 @@ model is what you analyse. Commands are on the toolbars/menus
   worst axial / My / Mz / utilisation per member (the design envelope),
   colours members by it, and stores the governing forces so the code check
   runs against the envelope.
+- **Moving Load Envelope** — a bridge/crane **influence analysis**: select the
+  lane members (the path the load travels), and a point load is stepped along
+  them while the model is re-solved at every position; the **worst force at
+  every section** is kept (the influence envelope). It reuses the beam solver
+  on a dedicated bars-only carrier model (one factorisation, many positions),
+  renders the moment envelope with the deformed shape at the governing
+  position, writes a `MovingEnvelope` table, and stores the envelope forces so
+  the **Steel Code Check** verifies against them. (Validated: a simply-supported
+  span gives the absolute-maximum moment PL/4 to the digit, and the shear
+  envelope reaches P next to a support.)
 - **Plate Reinforcement (EC2)** — required slab steel to EN 1992-1-1 from the
   Wood–Armer design moments: the **area of reinforcement A_s (mm²/m)** for the
   bottom (sagging) and top (hogging) face in X and Y, for each plate, as a
@@ -311,9 +321,12 @@ rely on. The checks it runs:
 > **EN 1991-1-4 wind** pressure q_p(10 m, terrain II, v_b = 26 m/s) ≈ 0.99 kPa
 > (c_e ≈ 2.35, matching the exposure chart) with the applied base shear equal
 > to the pressure integral; and the **EC3 sway imperfection** gives φ =
-> (1/200)α_h α_m with the notional force φ·N applied exactly. It
-> covers **static, P-Δ, modal, buckling, seismic (response-spectrum),
-> plates/shells, wind and a full EN 1993-1-1 / EN 1992-1-1 design check**.
+> (1/200)α_h α_m with the notional force φ·N applied exactly; and the
+> **moving-load envelope** returns the absolute-maximum moment PL/4 on a
+> simply-supported span (ratio 1.000) with the shear envelope reaching P at a
+> support. It covers **static, P-Δ, modal, buckling, seismic
+> (response-spectrum), moving-load influence, plates/shells, wind and a full
+> EN 1993-1-1 / EN 1992-1-1 design check**.
 > FreeCAD is not Robot — this reproduces Robot's *workflow and core
 > engineering* on its kernel.
 

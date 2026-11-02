@@ -1093,4 +1093,40 @@ assert abs(H.x-phiP)/phiP<0.01 and abs(H.y)<1e-9 and abs(H.z)<1e-9, (H.x,phiP)
 assert abs(FreeCAD.Vector(ehf[0].AtNode).z-Hc)<1.0   # applied at the column top
 print("EC3 sway imperfection OK")
 
+print("\n=== Moving load envelope: SS beam, max My = PL/4 ===")
+C._section_props_from_name=lambda name:(2000.0,1.0e6,1.0e6,2.0e6,100.0)
+dM=Doc(); FreeCAD.ActiveDocument=dM
+Lb=6000.; Pm=100000.
+bm=dM.addObject("Part::Feature","Gird"); bm.Shape=Shape(0,[Vec(0,0,0),Vec(Lb,0,0)])
+bm.IsBar=True; bm.Section="IPE 200"; bm.Material="Steel S235"
+bm.BarStart=Vec(0,0,0); bm.BarEnd=Vec(Lb,0,0)
+# simply supported for in-plane (X-Z) bending: dz fixed both ends, ry free
+dM.addObject("Part::Feature","SA").Restrain="111101"; dM.Objects[-1].AtNode=Vec(0,0,0)
+dM.addObject("Part::Feature","SB").Restrain="011101"; dM.Objects[-1].AtNode=Vec(Lb,0,0)
+C.selected_elems=lambda: [bm]
+C.form_dialog=lambda title,fields:{"P":Pm,"dir":"-Z (gravity)","nsta":21}
+gotM={}; C.info=lambda m,g=gotM: g.setdefault("msg",m)
+C.MovingLoad().Activated()
+rmy=getattr(bm,"ResMy",0.0)
+print("  envelope max|My|=%.0f  (exact PL/4=%.0f)  ratio=%.4f"%(rmy,Pm*Lb/4,rmy/(Pm*Lb/4)))
+assert abs(rmy-Pm*Lb/4)/(Pm*Lb/4)<0.02, (rmy,Pm*Lb/4)
+# max shear envelope approaches P (load next to a support)
+rvz=getattr(bm,"ResVz",0.0)
+print("  envelope max|Vz|=%.0f  (expect ~P=%.0f near support)"%(rvz,Pm))
+assert 0.85*Pm < rvz <= 1.05*Pm, rvz
+# envelope stored + rendered as a My contour, and the table exists
+me=dM.getObject("MovingEnvelope")
+assert me is not None and me._cells.get("C2","").startswith("max|My|") and "C3" in me._cells
+assert [o for o in dM.Objects if str(getattr(o,"DiagKind",""))=="My"], "My envelope rendered"
+stM=dM.getObject("AnalysisState"); assert stM is not None and hasattr(stM,"StU")
+assert "envelope" in gotM["msg"].lower(), gotM["msg"]
+# the stored envelope lets the EC3 code check run against it
+C._material=lambda name:(210000.0,80769.0,235.0,7.85e-6)
+C.form_dialog=lambda title,fields:{"gm0":1.0,"gm1":1.0,"ky":1.0,"kz":1.0,
+                                    "klt":1.0,"shape":"Uniform (conservative)"}
+C.info=lambda m: None
+C.CodeCheck().Activated()
+assert dM.getObject("CodeCheck") is not None
+print("moving load envelope OK")
+
 print("\nALL RUNTIME CHECKS PASSED")

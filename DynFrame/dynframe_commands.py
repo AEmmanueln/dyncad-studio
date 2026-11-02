@@ -2900,6 +2900,45 @@ def _thermal_mat(name):
     return THERMAL_MATERIALS.get(name, THERMAL_MATERIALS[DEFAULT_THERMAL])
 
 
+def _cond_tri(p, k):
+    """3x3 conduction (Laplace) element matrix for a linear triangle with
+    conductivity k: Ke[i,j] = k/(4A) (bi bj + ci cj). Returns (Ke, area)."""
+    import numpy as np
+    (x1, y1), (x2, y2), (x3, y3) = p
+    A = 0.5 * abs((x2 - x1) * (y3 - y1) - (x3 - x1) * (y2 - y1))
+    if A < 1e-15:
+        return np.zeros((3, 3)), 0.0
+    b = [y2 - y3, y3 - y1, y1 - y2]
+    c = [x3 - x2, x1 - x3, x2 - x1]
+    Ke = np.zeros((3, 3))
+    for i in range(3):
+        for j in range(3):
+            Ke[i, j] = k / (4.0 * A) * (b[i] * b[j] + c[i] * c[j])
+    return Ke, A
+
+
+def _run_conduction(nodes, tris, ktri, robin):
+    """Solve 2-D steady heat conduction div(k grad T)=0 by linear-triangle FE.
+    nodes = [(x,y)...] (metres), tris = [(i,j,l)...], ktri[t] the conductivity,
+    robin = [(i,j,h,Ta)...] convective boundary edges (film coeff h=1/Rs,
+    ambient Ta). Returns the nodal temperatures (numpy array)."""
+    import numpy as np
+    n = len(nodes)
+    K = np.zeros((n, n)); F = np.zeros(n)
+    for t, tri in enumerate(tris):
+        Ke, _A = _cond_tri([nodes[i] for i in tri], ktri[t])
+        for a in range(3):
+            for b in range(3):
+                K[tri[a], tri[b]] += Ke[a, b]
+    for (i, j, h, Ta) in robin:
+        (xi, yi) = nodes[i]; (xj, yj) = nodes[j]
+        Le = ((xi - xj) ** 2 + (yi - yj) ** 2) ** 0.5
+        K[i, i] += h * Le / 3.0; K[j, j] += h * Le / 3.0
+        K[i, j] += h * Le / 6.0; K[j, i] += h * Le / 6.0
+        F[i] += h * Le * Ta / 2.0; F[j] += h * Le * Ta / 2.0
+    return np.linalg.solve(K, F)
+
+
 def _sat_vapour_pressure(theta):
     """Saturation water-vapour pressure (Pa) at temperature theta (deg C), per
     EN ISO 13788 (separate fits above/below 0 C). p_sat(0)=610.5, p_sat(20)~2337."""
@@ -5344,7 +5383,8 @@ class ClearAnalysis:
                       "ModalFrequencies", "CodeCheck", "Envelope", "Seismic",
                       "PlateForces", "PlateReinforcement", "PlateSteel",
                       "PunchingShear", "MovingEnvelope", "ResponseHistory",
-                      "StoreyDrift", "GMSpectrum", "WallThermal")
+                      "StoreyDrift", "GMSpectrum", "WallThermal",
+                      "ThermalBridge")
         all_sheets = res_sheets + ("LoadCases", "Combinations", "AnalysisResults")
         to_del = []
         for o in list(doc.Objects):
@@ -6273,6 +6313,201 @@ class WallThermal:
               "  - MOULD RISK (f_Rsi < 0.70)" if mould else "",
               "RISK - vapour reaches saturation inside the build-up"
               if r["condensation"] else "none predicted"))
+
+
+class ThermalBridge2D:
+    _NLAYER = 5
+
+    def GetResources(self):
+        return {"Pixmap": _icon("bridge2d"), "MenuText": "Thermal Bridge (2D)",
+                "ToolTip": "2-D steady heat-conduction FE (EN ISO 10211) through a "
+                           "wall with a repeating conductive element bridging the "
+                           "insulation (steel/timber stud, concrete rib): the "
+                           "temperature field, the bridged U-value and the surface "
+                           "temperature factor f_Rsi (mould/condensation risk).",
+                "Accel": "A, B"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        import numpy as np
+        doc = FreeCAD.ActiveDocument
+        mats = ["(none)"] + list(THERMAL_MATERIALS.keys())
+        defmat = ["Plasterboard", "Mineral wool", "Brick (fired clay)",
+                  "(none)", "(none)"]
+        defthk = [12.5, 140.0, 100.0, 0.0, 0.0]
+        fields = [{"key": "_i", "kind": "info", "default":
+                   "2-D conduction through the wall (inside->outside layers) with a "
+                   "repeating bridge of the given material/width at the given "
+                   "spacing, placed across the insulation (lowest-conductivity) "
+                   "layer. Solves the temperature field and the bridged U-value."}]
+        for i in range(self._NLAYER):
+            fields.append({"key": "m%d" % i, "label": "Layer %d material" % (i + 1),
+                           "kind": "combo", "options": mats, "default": defmat[i]})
+            fields.append({"key": "d%d" % i, "label": "Layer %d thickness (mm)" % (i + 1),
+                           "kind": "float", "default": defthk[i]})
+        fields += [
+            {"key": "bmat", "label": "Bridge material", "kind": "combo",
+             "options": list(THERMAL_MATERIALS.keys()), "default": "Timber (softwood)"},
+            {"key": "bw", "label": "Bridge width (mm)", "kind": "float", "default": 48.0},
+            {"key": "bs", "label": "Bridge spacing (mm)", "kind": "float", "default": 600.0},
+            {"key": "Ti", "label": "Inside air temp (C)", "kind": "float", "default": 20.0},
+            {"key": "Te", "label": "Outside air temp (C)", "kind": "float", "default": -5.0},
+            {"key": "rsi", "label": "Rsi (m2K/W)", "kind": "float", "default": 0.13, "decimals": 3},
+            {"key": "rse", "label": "Rse (m2K/W)", "kind": "float", "default": 0.04, "decimals": 3},
+        ]
+        vals = form_dialog("Thermal Bridge (2D conduction)", fields)
+        if not vals:
+            return
+        layers = []
+        for i in range(self._NLAYER):
+            nm = vals["m%d" % i]; d = float(vals["d%d" % i])
+            if nm == "(none)" or d <= 0.0:
+                continue
+            k, mu, fR = _thermal_mat(nm)
+            layers.append((nm, d / 1000.0, k))      # (name, thickness_m, k)
+        if not layers:
+            info("Add at least one layer."); return
+        Ti = float(vals["Ti"]); Te = float(vals["Te"])
+        rsi = float(vals["rsi"]); rse = float(vals["rse"])
+        kb = _thermal_mat(vals["bmat"])[0]
+        Wb = max(1e-4, float(vals["bw"]) / 1000.0)
+        Wsp = max(Wb + 1e-4, float(vals["bs"]) / 1000.0)
+        bridged = min(range(len(layers)), key=lambda i: layers[i][2])   # insulation
+        # layer x-boundaries and the bridged layer's x-range
+        xb = [0.0]
+        for (_n, d, _k) in layers:
+            xb.append(xb[-1] + d)
+        Xtot = xb[-1]
+        bx0, bx1 = xb[bridged], xb[bridged + 1]
+        # x node coords aligned to layer interfaces, subdivided
+        target = Xtot / 35.0
+        xs = [0.0]
+        for i in range(len(layers)):
+            d = layers[i][1]; n = max(2, int(round(d / target)))
+            for s in range(1, n + 1):
+                xs.append(xb[i] + d * s / n)
+        # y node coords: 0..Wsp with a node at the bridge edge Wb
+        NY = 26
+        ys = sorted(set([Wsp * j / NY for j in range(NY + 1)] + [Wb]))
+        nx = len(xs); ny = len(ys)
+
+        def nid(ix, iy):
+            return iy * nx + ix
+        nodes = [(xs[ix], ys[iy]) for iy in range(ny) for ix in range(nx)]
+        tris = []; ktri = []
+
+        def kat(xc, yc):
+            lay = 0
+            for i in range(len(layers)):
+                if xb[i] <= xc <= xb[i + 1] + 1e-12:
+                    lay = i; break
+            if lay == bridged and yc <= Wb:
+                return kb
+            return layers[lay][2]
+        for iy in range(ny - 1):
+            for ix in range(nx - 1):
+                a = nid(ix, iy); b = nid(ix + 1, iy)
+                c = nid(ix + 1, iy + 1); d = nid(ix, iy + 1)
+                xc = 0.5 * (xs[ix] + xs[ix + 1]); yc = 0.5 * (ys[iy] + ys[iy + 1])
+                kc = kat(xc, yc)
+                tris.append((a, b, c)); ktri.append(kc)
+                tris.append((a, c, d)); ktri.append(kc)
+        # convective boundary edges: inside face x=0 (ix=0), outside x=Xtot (ix=nx-1)
+        robin = []
+        hi = 1.0 / rsi if rsi > 1e-9 else 1e6
+        he = 1.0 / rse if rse > 1e-9 else 1e6
+        for iy in range(ny - 1):
+            robin.append((nid(0, iy), nid(0, iy + 1), hi, Ti))
+            robin.append((nid(nx - 1, iy), nid(nx - 1, iy + 1), he, Te))
+        try:
+            T = _run_conduction(nodes, tris, ktri, robin)
+        except Exception as e:
+            err("Conduction solve failed: %s" % e); return
+        # heat flow in through the inside face -> 2-D U-value over the spacing
+        Qin = 0.0; tsurf = []
+        for iy in range(ny - 1):
+            i = nid(0, iy); j = nid(0, iy + 1)
+            Le = abs(ys[iy + 1] - ys[iy])
+            Qin += hi * Le * (Ti - 0.5 * (T[i] + T[j]))
+        for iy in range(ny):
+            tsurf.append(T[nid(0, iy)])
+        U2d = Qin / (Wsp * (Ti - Te)) if abs(Ti - Te) > 1e-9 else 0.0
+        U1d, R1d, _p = _wall_uvalue([(n, d * 1000.0, k, 1, None) for (n, d, k) in layers],
+                                    rsi, rse)
+        Tsi_min = min(tsurf)
+        fRsi = (Tsi_min - Te) / (Ti - Te) if abs(Ti - Te) > 1e-9 else 1.0
+
+        doc.openTransaction("DynFrame: thermal bridge")
+        self._contour(doc, nodes, tris, T, Te, Ti)
+        try:
+            sh = doc.getObject("ThermalBridge") or \
+                doc.addObject("Spreadsheet::Sheet", "ThermalBridge")
+            sh.Label = "ThermalBridge"; sh.clearAll()
+            sh.set("A1", "THERMAL BRIDGE (EN ISO 10211, 2D conduction)")
+            rows = [("U 1-D plain wall (W/m2K)", "%.3f" % U1d),
+                    ("U 2-D with bridge (W/m2K)", "%.3f" % U2d),
+                    ("Increase from bridge", "%.0f %%" % (100.0 * (U2d / U1d - 1.0)
+                                                          if U1d > 1e-9 else 0.0)),
+                    ("Min internal surface T (C)", "%.2f" % Tsi_min),
+                    ("Temperature factor f_Rsi", "%.3f" % fRsi),
+                    ("Mould risk (f_Rsi < 0.70)", "YES" if fRsi < 0.70 else "no"),
+                    ("Bridge", "%s %.0f mm @ %.0f mm" % (vals["bmat"],
+                                                         Wb * 1000, Wsp * 1000))]
+            for n, (a, b) in enumerate(rows):
+                sh.set("A%d" % (n + 3), a); sh.set("B%d" % (n + 3), b)
+            _grp(doc, RES_GROUP).addObject(sh)
+            doc.commitTransaction(); doc.recompute()
+        except Exception as e:
+            doc.abortTransaction(); err("Thermal bridge table failed: %s" % e); return
+        try:
+            FreeCADGui.SendMsgToActiveView("ViewFit")
+        except Exception:
+            pass
+        info("Thermal bridge (EN ISO 10211) solved on a %dx%d node 2-D section.\n\n"
+             "U plain wall = %.3f, U with the %s bridge = %.3f W/m2K "
+             "(+%.0f%%).\nMin internal surface temp = %.2f C, f_Rsi = %.3f%s.\n\n"
+             "Showing the temperature field; see the 'ThermalBridge' table. "
+             "(f_Rsi < 0.70 means mould/condensation risk at the bridge.)" %
+             (nx, ny, U1d, vals["bmat"], U2d, 100.0 * (U2d / U1d - 1.0) if U1d > 1e-9
+              else 0.0, Tsi_min, fRsi,
+              " - MOULD RISK" if fRsi < 0.70 else ""))
+
+    def _contour(self, doc, nodes, tris, T, Tmin, Tmax):
+        for o in list(doc.Objects):
+            if o.Name.startswith("ThermMap"):
+                try:
+                    doc.removeObject(o.Name)
+                except Exception:
+                    pass
+        span = (Tmax - Tmin) or 1.0; NB = 16
+        bands = [[] for _ in range(NB)]
+        for t, tri in enumerate(tris):
+            try:
+                pts = [FreeCAD.Vector(nodes[i][0] * 1000.0, nodes[i][1] * 1000.0, 0.0)
+                       for i in tri]
+                f = Part.Face(Part.makePolygon(pts + [pts[0]]))
+            except Exception:
+                continue
+            tav = (T[tri[0]] + T[tri[1]] + T[tri[2]]) / 3.0
+            bands[min(NB - 1, max(0, int((tav - Tmin) / span * NB)))].append(f)
+        grp = _grp(doc, DIA_GROUP)
+        for b, fs in enumerate(bands):
+            if not fs:
+                continue
+            ob = doc.addObject("Part::Feature", "ThermMap_b%d" % b)
+            ob.Shape = Part.makeCompound(fs)
+            ob.Label = "Temperature (C)"
+            _set(ob, "App::PropertyString", "DiagKind", "_thermal")
+            _set(ob, "App::PropertyFloat", "CompMax", float(Tmax))
+            _set(ob, "App::PropertyFloat", "CompMin", float(Tmin))
+            col = _ramp((b + 0.5) / NB)
+            try:
+                ob.ViewObject.ShapeColor = col; ob.ViewObject.LineColor = col
+            except Exception:
+                pass
+            grp.addObject(ob)
 
 
 class Envelope:
@@ -8930,6 +9165,7 @@ _add("DynFrame_MemberType", MemberType)
 _add("DynFrame_PlateReinfEC2", PlateReinfEC2)
 _add("DynFrame_PunchingEC2", PunchingEC2)
 _add("DynFrame_WallThermal", WallThermal)
+_add("DynFrame_ThermalBridge2D", ThermalBridge2D)
 _add("DynFrame_RunAnalysis", RunAnalysis)
 _add("DynFrame_ModalAnalysis", ModalAnalysis)
 _add("DynFrame_BucklingAnalysis", BucklingAnalysis)

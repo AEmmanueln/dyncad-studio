@@ -1449,4 +1449,32 @@ assert "U-value" in gWT["msg"], gWT["msg"]
 print("  command: %s"%wt._cells["A1"][:70])
 print("wall thermal OK")
 
+print("\n=== 2D thermal bridge (EN ISO 10211 conduction FE) ===")
+_wallbridge=lambda bmat:{"m0":"Plasterboard","d0":12.5,"m1":"Mineral wool",
+  "d1":140.0,"m2":"Brick (fired clay)","d2":100.0,"m3":"(none)","d3":0.0,
+  "m4":"(none)","d4":0.0,"bmat":bmat,"bw":48.0,"bs":600.0,
+  "Ti":20.0,"Te":-5.0,"rsi":0.13,"rse":0.04}
+# invariant: a bridge of the SAME material as the insulation is a plain wall,
+# so the 2-D conduction U must equal the 1-D U-value (validates the FE engine)
+dTB=Doc(); FreeCAD.ActiveDocument=dTB
+C.form_dialog=lambda title,fields:_wallbridge("Mineral wool")
+gTB={}; C.info=lambda m,g=gTB: g.setdefault("msg",m)
+C.ThermalBridge2D().Activated()
+tb=dTB.getObject("ThermalBridge")
+U1=float(tb._cells["B3"]); U2=float(tb._cells["B4"]); f0=float(tb._cells["B7"])
+print("  no bridge: U_1D=%.4f  U_2D=%.4f  f_Rsi=%.3f  (U_2D must match U_1D)"%(U1,U2,f0))
+assert abs(U2-U1)/U1<0.02, (U1,U2)
+# a steel stud through the insulation: U rises and the surface gets colder
+dTB2=Doc(); FreeCAD.ActiveDocument=dTB2
+C.form_dialog=lambda title,fields:_wallbridge("Steel")
+gTB2={}; C.info=lambda m,g=gTB2: g.setdefault("msg",m)
+C.ThermalBridge2D().Activated()
+tb2=dTB2.getObject("ThermalBridge")
+U2b=float(tb2._cells["B4"]); f2=float(tb2._cells["B7"])
+tm=[o for o in dTB2.Objects if str(getattr(o,"DiagKind",""))=="_thermal"]
+print("  steel bridge: U_2D=%.4f (plain %.4f)  f_Rsi=%.3f (plain %.3f)  map objs=%d"
+      %(U2b,U1,f2,f0,len(tm)))
+assert U2b>1.3*U1 and f2<f0 and len(tm)>=2, (U2b,U1,f2,f0,len(tm))
+print("2D thermal bridge OK")
+
 print("\nALL RUNTIME CHECKS PASSED")

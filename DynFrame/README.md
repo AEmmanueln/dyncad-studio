@@ -196,6 +196,18 @@ spreadsheets at the root.
   wrong‑side (internal) insulation and none for external insulation.) This is
   the standards method for insulation performance — CFD is only needed for
   2D/3D thermal bridges (see the conduction solver).
+- **Thermal Bridge (2D conduction)** — a **steady heat‑conduction finite‑element
+  solver** (EN ISO 10211) for a wall whose insulation is **bridged by a
+  repeating conductive element** (steel/timber stud, concrete rib): it meshes
+  the 2D cross‑section, solves ∇·(k∇T)=0 with **convective surface boundaries**
+  (Rsi/Rse), and reports the **temperature field** (coloured contour), the
+  **bridged U‑value** vs the plain‑wall U, and the **surface temperature factor
+  f_Rsi** (mould/condensation risk at the cold spot). This is the "conduction
+  side of conjugate heat transfer" that OpenFOAM does — now native in DynFrame,
+  no CFD needed. (Validated: with a bridge of the *same* material as the
+  insulation the 2D solver reproduces the 1D U‑value to the digit; a steel stud
+  through 140 mm mineral wool raises U from 0.23 to 0.60 W/m²K and drops f_Rsi
+  from 0.97 to 0.57 — a severe bridge, as expected.)
 - **Steel Code Check (EC3)** — a full EN 1993-1-1 member verification, the
   way Robot does it: each member is **classified** (Class 1–4) from its own
   flange/web slenderness under the actual axial force and moment; the bending

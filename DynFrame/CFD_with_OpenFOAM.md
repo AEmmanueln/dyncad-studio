@@ -81,6 +81,21 @@ Nothing above involves editing an OpenFOAM case by hand — CfdOF writes the
 `system/`, `constant/` and `0/` dictionaries from your dialog entries and runs
 the solver for you.
 
+**Shortcut for steps 2–the checker:** run the helper script once in the FreeCAD
+Python console (View → Panels → Python console):
+
+```python
+exec(open(FreeCAD.getUserAppDataDir()+"/Mod/DynFrame/tools/cfdof_setup.py").read())
+```
+
+It auto-detects blueCFD and ParaView under *Program Files*, writes CfdOF's
+OpenFOAM / ParaView / Gmsh paths, runs the dependency checker and prints the
+report, then opens the CfdOF preferences so you click **Install cfMesh** and
+**Install HiSA** (these download-and-compile, so there is no stable way to
+script them — CfdOF builds them for you from those two buttons). If auto-detect
+misses your install, edit `OPENFOAM_DIR` / `PARAVIEW` at the top of
+`DynFrame/tools/cfdof_setup.py` and run it again.
+
 ---
 
 ## 3. The workflow (external wind around a building)

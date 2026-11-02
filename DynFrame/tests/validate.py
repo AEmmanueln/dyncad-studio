@@ -1411,4 +1411,42 @@ assert any(getattr(x,"TypeId","")=="Spreadsheet::Sheet" for x in res.Group), \
     "result spreadsheets live under DynFrame/Results"
 print("supports-on-bodies + single DynFrame group OK")
 
+print("\n=== Wall thermal: U-value (EN ISO 6946) + Glaser condensation (13788) ===")
+# saturation vapour pressure anchors
+assert abs(C._sat_vapour_pressure(0.0)-610.5)<1.0 and abs(C._sat_vapour_pressure(20.0)-2337)<6
+assert abs(C._sat_vapour_pressure(10.0)-1227)<6, C._sat_vapour_pressure(10.0)
+def _lyr(name,d):
+    k,mu,fR=C._thermal_mat(name); return (name,d,k,mu,fR)
+# U-value: 200 mm dense concrete (k=2.0) + 100 mm EPS (k=0.035)
+L=[_lyr("Concrete (dense)",200.0), _lyr("EPS insulation",100.0)]
+U,R,perR=C._wall_uvalue(L,0.13,0.04)
+print("  U=%.4f W/m2K  R=%.3f  (expect U~0.320, R~3.127)"%(U,R))
+assert abs(R-3.1271)<0.01 and abs(U-0.31978)<0.002, (U,R)
+r=C._wall_thermal(L,20.0,60.0,0.0,90.0,0.13,0.04)
+assert abs(r["q"]-U*20.0)<1e-6 and abs(r["nodeT"][0]-(20.0-r["q"]*0.13))<1e-6
+assert 0.9<r["fRsi"]<1.0
+print("  q=%.1f W/m2  Tsi=%.2f C  f_Rsi=%.3f"%(r["q"],r["nodeT"][0],r["fRsi"]))
+# Glaser direction: insulation on the WRONG (warm/inside) side condenses behind
+# it; the same insulation outside keeps the structure warm and stays dry
+bad=C._wall_thermal([_lyr("EPS insulation",60.0),_lyr("Concrete (dense)",200.0)],
+                    20.0,60.0,-10.0,80.0)
+good=C._wall_thermal([_lyr("Concrete (dense)",200.0),_lyr("EPS insulation",60.0)],
+                     20.0,60.0,-10.0,80.0)
+print("  insulation inside -> condensation=%s ; insulation outside -> %s"
+      %(bad["condensation"],good["condensation"]))
+assert bad["condensation"] is True and good["condensation"] is False
+# command end-to-end writes the WallThermal table
+dWT=Doc(); FreeCAD.ActiveDocument=dWT
+C.form_dialog=lambda title,fields:{"m0":"Plasterboard","d0":12.5,"m1":"Mineral wool",
+  "d1":120.0,"m2":"Brick (fired clay)","d2":100.0,"m3":"(none)","d3":0.0,
+  "m4":"(none)","d4":0.0,"m5":"(none)","d5":0.0,"Ti":20.0,"RHi":60.0,"Te":-5.0,
+  "RHe":90.0,"rsi":0.13,"rse":0.04}
+gWT={}; C.info=lambda m,g=gWT: g.setdefault("msg",m)
+C.WallThermal().Activated()
+wt=dWT.getObject("WallThermal")
+assert wt is not None and wt._cells.get("A1","").startswith("WALL THERMAL")
+assert "U-value" in gWT["msg"], gWT["msg"]
+print("  command: %s"%wt._cells["A1"][:70])
+print("wall thermal OK")
+
 print("\nALL RUNTIME CHECKS PASSED")

@@ -182,6 +182,20 @@ spreadsheets at the root.
   thicker slab/drop panel). Validated: a 400×400 internal column, d=200, C30/37,
   ρ_l=0.01, V_Ed=800 kN → u₁=4113 mm, v_Rd,c=0.746 MPa, v_Ed=1.118 MPa,
   utilisation 1.50 — matching the hand calc.
+- **Wall U-value & Condensation (building physics)** — **Wall U-value &
+  Condensation** analyses a layered wall/roof: the **U-value** (thermal
+  transmittance) to EN ISO 6946 (R-values in series + surface resistances),
+  and **interstitial condensation / mould risk** by the **Glaser** method
+  (EN ISO 13788) — the temperature, vapour‑pressure and saturation profiles
+  through the build‑up, flagging any interface where vapour reaches saturation
+  and the internal‑surface temperature factor f_Rsi (mould). Pick the layers
+  (a small thermal‑material library with conductivity λ and vapour‑resistance μ)
+  from inside to outside and the inside/outside temperature and humidity;
+  results go to the `WallThermal` table. (Validated: 200 mm concrete + 100 mm
+  EPS → U = 0.320 W/m²K; Glaser correctly predicts condensation for
+  wrong‑side (internal) insulation and none for external insulation.) This is
+  the standards method for insulation performance — CFD is only needed for
+  2D/3D thermal bridges (see the conduction solver).
 - **Steel Code Check (EC3)** — a full EN 1993-1-1 member verification, the
   way Robot does it: each member is **classified** (Class 1–4) from its own
   flange/web slenderness under the actual axial force and moment; the bending

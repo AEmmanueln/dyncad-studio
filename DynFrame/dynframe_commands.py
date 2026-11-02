@@ -2865,6 +2865,91 @@ def _material(name):
     return MATERIALS.get(name, MATERIALS[DEFAULT_MAT])
 
 
+# Building thermal materials: name -> (lambda k [W/mK], mu vapour-resistance
+# factor [-], fixed R [m2K/W] or None). Air gaps use a fixed R (EN ISO 6946),
+# membranes use a very high mu. Used by the Wall Thermal (U-value/condensation)
+# and 2D conduction tools.
+THERMAL_MATERIALS = {
+    "Concrete (dense)":      (2.00, 120, None),
+    "Concrete (lightweight)": (0.38, 60, None),
+    "Reinforced concrete":   (2.30, 130, None),
+    "Brick (fired clay)":    (0.77, 10, None),
+    "AAC block (aircrete)":  (0.15, 8, None),
+    "Natural stone":         (3.50, 150, None),
+    "EPS insulation":        (0.035, 40, None),
+    "XPS insulation":        (0.034, 100, None),
+    "Mineral wool":          (0.035, 1, None),
+    "PIR / PUR board":       (0.022, 60, None),
+    "Wood fibre board":      (0.040, 5, None),
+    "Timber (softwood)":     (0.13, 50, None),
+    "Plywood / OSB":         (0.13, 150, None),
+    "Plasterboard":          (0.25, 8, None),
+    "Gypsum plaster":        (0.57, 10, None),
+    "Cement render":         (1.00, 25, None),
+    "Lime plaster":          (0.80, 10, None),
+    "Glass":                 (1.00, 1e6, None),
+    "Steel":                 (50.0, 1e6, None),
+    "Vapour barrier (PE)":   (0.33, 100000, None),
+    "Air gap (unventilated)": (1.00, 1, 0.18),
+}
+DEFAULT_THERMAL = "Mineral wool"
+
+
+def _thermal_mat(name):
+    """(k, mu, fixedR) for a thermal material name."""
+    return THERMAL_MATERIALS.get(name, THERMAL_MATERIALS[DEFAULT_THERMAL])
+
+
+def _sat_vapour_pressure(theta):
+    """Saturation water-vapour pressure (Pa) at temperature theta (deg C), per
+    EN ISO 13788 (separate fits above/below 0 C). p_sat(0)=610.5, p_sat(20)~2337."""
+    import math
+    if theta >= 0.0:
+        return 610.5 * math.exp(17.269 * theta / (237.3 + theta))
+    return 610.5 * math.exp(21.875 * theta / (265.5 + theta))
+
+
+def _wall_uvalue(layers, rsi, rse):
+    """Thermal transmittance of a layered element (EN ISO 6946).
+    layers = [(name, thickness_mm, k, mu, fixedR), ...] from inside to outside.
+    Returns (U [W/m2K], R_total [m2K/W], per-layer R list)."""
+    rtot = rsi + rse; perR = []
+    for (_nm, d_mm, k, _mu, fixedR) in layers:
+        Ri = fixedR if fixedR is not None else ((d_mm / 1000.0) / k if k > 1e-9 else 0.0)
+        perR.append(Ri); rtot += Ri
+    U = 1.0 / rtot if rtot > 1e-9 else 0.0
+    return U, rtot, perR
+
+
+def _wall_thermal(layers, Ti, RHi, Te, RHe, rsi=0.13, rse=0.04):
+    """Steady 1-D heat + Glaser vapour-diffusion analysis of a layered wall
+    (EN ISO 6946 + EN ISO 13788). layers inside->outside. Returns a dict with
+    the U-value, the heat flux, the temperature / vapour-pressure / saturation
+    profiles at each interface (internal surface -> external surface), the
+    condensation flag per interface, the internal-surface temperature factor
+    f_Rsi (mould check) and whether interstitial condensation occurs."""
+    U, rtot, perR = _wall_uvalue(layers, rsi, rse)
+    q = U * (Ti - Te)                      # heat flux W/m2 (inside->outside +)
+    # temperatures at interfaces (node 0 = internal surface ... last = external)
+    nodeT = [Ti - q * rsi]; cumR = rsi
+    for Ri in perR:
+        cumR += Ri; nodeT.append(Ti - q * cumR)
+    # vapour-pressure diffusion resistance (equivalent air-layer thickness sd)
+    sd = [mu * (d_mm / 1000.0) for (_n, d_mm, _k, mu, _fR) in layers]
+    sd_tot = sum(sd) or 1e-9
+    pi = max(0.0, min(1.0, RHi / 100.0)) * _sat_vapour_pressure(Ti)
+    pe = max(0.0, min(1.0, RHe / 100.0)) * _sat_vapour_pressure(Te)
+    nodeP = [pi]; cumsd = 0.0
+    for s in sd:
+        cumsd += s; nodeP.append(pi - (pi - pe) * (cumsd / sd_tot))
+    nodePsat = [_sat_vapour_pressure(T) for T in nodeT]
+    cond = [nodeP[i] >= nodePsat[i] - 1e-6 for i in range(len(nodeT))]
+    fRsi = (nodeT[0] - Te) / (Ti - Te) if abs(Ti - Te) > 1e-9 else 1.0
+    return {"U": U, "R": rtot, "q": q, "nodeT": nodeT, "nodeP": nodeP,
+            "nodePsat": nodePsat, "cond": cond, "fRsi": fRsi,
+            "condensation": any(cond[1:-1]) if len(cond) > 2 else any(cond)}
+
+
 # coefficient of thermal expansion (per deg C)
 MAT_ALPHA = {"Steel S235": 1.2e-5, "Steel S275": 1.2e-5, "Steel S355": 1.2e-5,
              "Stainless 304": 1.6e-5, "Aluminium 6061-T6": 2.3e-5,
@@ -5259,7 +5344,7 @@ class ClearAnalysis:
                       "ModalFrequencies", "CodeCheck", "Envelope", "Seismic",
                       "PlateForces", "PlateReinforcement", "PlateSteel",
                       "PunchingShear", "MovingEnvelope", "ResponseHistory",
-                      "StoreyDrift", "GMSpectrum")
+                      "StoreyDrift", "GMSpectrum", "WallThermal")
         all_sheets = res_sheets + ("LoadCases", "Combinations", "AnalysisResults")
         to_del = []
         for o in list(doc.Objects):
@@ -6090,6 +6175,104 @@ class PunchingEC2:
             return L > 1e-6 and abs(e.z - s.z) / L > 0.7
         except Exception:
             return False
+
+
+class WallThermal:
+    _NLAYER = 6
+
+    def GetResources(self):
+        return {"Pixmap": _icon("thermal"), "MenuText": "Wall U-value & Condensation",
+                "ToolTip": "Thermal performance of a layered wall/roof: U-value "
+                           "(EN ISO 6946) and interstitial-condensation / mould "
+                           "risk by the Glaser method (EN ISO 13788) - temperature "
+                           "and vapour-pressure profile through the build-up.",
+                "Accel": "A, U"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        doc = FreeCAD.ActiveDocument
+        mats = ["(none)"] + list(THERMAL_MATERIALS.keys())
+        defmat = ["Plasterboard", "Mineral wool", "Brick (fired clay)",
+                  "(none)", "(none)", "(none)"]
+        defthk = [12.5, 120.0, 100.0, 0.0, 0.0, 0.0]
+        fields = [
+            {"key": "_i", "kind": "info", "default":
+             "Layers from INSIDE (warm) to OUTSIDE (cold). U-value per EN ISO "
+             "6946, interstitial condensation / mould by the Glaser method (EN "
+             "ISO 13788). Leave a layer '(none)' to skip it."}]
+        for i in range(self._NLAYER):
+            fields.append({"key": "m%d" % i, "label": "Layer %d material" % (i + 1),
+                           "kind": "combo", "options": mats, "default": defmat[i]})
+            fields.append({"key": "d%d" % i, "label": "Layer %d thickness (mm)" % (i + 1),
+                           "kind": "float", "default": defthk[i]})
+        fields += [
+            {"key": "Ti", "label": "Inside air temp (C)", "kind": "float", "default": 20.0},
+            {"key": "RHi", "label": "Inside RH (%)", "kind": "float", "default": 60.0},
+            {"key": "Te", "label": "Outside air temp (C)", "kind": "float", "default": -5.0},
+            {"key": "RHe", "label": "Outside RH (%)", "kind": "float", "default": 90.0},
+            {"key": "rsi", "label": "Rsi inside surface (m2K/W)", "kind": "float",
+             "default": 0.13, "decimals": 3},
+            {"key": "rse", "label": "Rse outside surface (m2K/W)", "kind": "float",
+             "default": 0.04, "decimals": 3},
+        ]
+        vals = form_dialog("Wall U-value & Condensation", fields)
+        if not vals:
+            return
+        layers = []
+        for i in range(self._NLAYER):
+            nm = vals["m%d" % i]; d = float(vals["d%d" % i])
+            if nm == "(none)" or d <= 0.0:
+                continue
+            k, mu, fR = _thermal_mat(nm)
+            layers.append((nm, d, k, mu, fR))
+        if not layers:
+            info("Add at least one layer (material + thickness)."); return
+        r = _wall_thermal(layers, float(vals["Ti"]), float(vals["RHi"]),
+                          float(vals["Te"]), float(vals["RHe"]),
+                          float(vals["rsi"]), float(vals["rse"]))
+        doc.openTransaction("DynFrame: wall thermal")
+        try:
+            sh = doc.getObject("WallThermal") or \
+                doc.addObject("Spreadsheet::Sheet", "WallThermal")
+            sh.Label = "WallThermal"; sh.clearAll()
+            sh.set("A1", "WALL THERMAL - U=%.3f W/m2K, R=%.3f m2K/W, q=%.1f W/m2, "
+                   "f_Rsi=%.3f%s" % (r["U"], r["R"], r["q"], r["fRsi"],
+                                     "  CONDENSATION RISK" if r["condensation"] else ""))
+            for c, h in zip("ABCDEF", ["Interface", "T (C)", "p_vapour (Pa)",
+                                       "p_sat (Pa)", "RH (%)", "Condensation?"]):
+                sh.set("%s2" % c, h)
+            names = ["Internal surface"] + [L[0] + "/next" for L in layers[:-1]] \
+                + ["External surface"]
+            row = 3
+            for i in range(len(r["nodeT"])):
+                T = r["nodeT"][i]; p = r["nodeP"][i]; ps = r["nodePsat"][i]
+                nm = names[i] if i < len(names) else "node %d" % i
+                vals_row = [nm, "%.2f" % T, "%.0f" % p, "%.0f" % ps,
+                            "%.0f" % (100.0 * p / ps if ps > 1e-6 else 0.0),
+                            "YES" if r["cond"][i] else "-"]
+                for c, v in zip("ABCDEF", vals_row):
+                    sh.set("%s%d" % (c, row), v)
+                row += 1
+            _grp(doc, RES_GROUP).addObject(sh)
+            doc.commitTransaction(); doc.recompute()
+        except Exception as e:
+            doc.abortTransaction(); err("Wall thermal failed: %s" % e); return
+        mould = r["fRsi"] < 0.70
+        info("Wall thermal (EN ISO 6946 / 13788) - %d layer(s).\n\n"
+             "U-value = %.3f W/m2K   (R = %.3f m2K/W)\n"
+             "Heat flux = %.1f W/m2 at %g/%g C.\n"
+             "Internal surface temp = %.1f C, f_Rsi = %.3f%s\n"
+             "Interstitial condensation: %s\n\n"
+             "See the 'WallThermal' table for the temperature / vapour / "
+             "saturation profile through the build-up. (Condensation where the "
+             "vapour pressure reaches saturation; mould risk if f_Rsi < 0.70.)" %
+             (len(layers), r["U"], r["R"], r["q"], float(vals["Ti"]),
+              float(vals["Te"]), r["nodeT"][0], r["fRsi"],
+              "  - MOULD RISK (f_Rsi < 0.70)" if mould else "",
+              "RISK - vapour reaches saturation inside the build-up"
+              if r["condensation"] else "none predicted"))
 
 
 class Envelope:
@@ -8746,6 +8929,7 @@ _add("DynFrame_MemberReleases", MemberReleases)
 _add("DynFrame_MemberType", MemberType)
 _add("DynFrame_PlateReinfEC2", PlateReinfEC2)
 _add("DynFrame_PunchingEC2", PunchingEC2)
+_add("DynFrame_WallThermal", WallThermal)
 _add("DynFrame_RunAnalysis", RunAnalysis)
 _add("DynFrame_ModalAnalysis", ModalAnalysis)
 _add("DynFrame_BucklingAnalysis", BucklingAnalysis)

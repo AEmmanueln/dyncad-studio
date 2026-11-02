@@ -1201,7 +1201,7 @@ cc=dTH.addObject("Part::Feature","Col"); cc.Shape=Shape(0,[Vec(0,0,0),Vec(0,0,Lc
 cc.IsBar=True; cc.Section="IPE 200"; cc.Material="Steel S235"
 cc.BarStart=Vec(0,0,0); cc.BarEnd=Vec(0,0,Lc)
 dTH.addObject("Part::Feature","S").Restrain="111111"; dTH.Objects[-1].AtNode=Vec(0,0,0)
-C._sel_vertices=lambda: [Vec(0,0,Lc)]
+C._sel_support_points=lambda doc: [Vec(0,0,Lc)]
 C.form_dialog=lambda title,fields:{"exc":"Nodal force","dir":"+X","amp":50000.0,
   "func":"Step","freq":5.0,"td":0.1,"dur":0.6,"dt":0.002,"zeta":0.0}
 gotT={}; C.info=lambda m,g=gotT: g.setdefault("msg",m)
@@ -1257,7 +1257,7 @@ cr=dRC.addObject("Part::Feature","Col"); cr.Shape=Shape(0,[Vec(0,0,0),Vec(0,0,Lr
 cr.IsBar=True; cr.Section="IPE 200"; cr.Material="Steel S235"
 cr.BarStart=Vec(0,0,0); cr.BarEnd=Vec(0,0,Lr)
 dRC.addObject("Part::Feature","S").Restrain="111111"; dRC.Objects[-1].AtNode=Vec(0,0,0)
-C._sel_vertices=lambda: [Vec(0,0,Lr)]
+C._sel_support_points=lambda doc: [Vec(0,0,Lr)]
 # a half-sine pulse (td=0.1) sampled at dt into a sheet, with a header row
 gm=dRC.addObject("Spreadsheet::Sheet","GroundMotion"); gm.Label="GroundMotion"
 gm.set("A1","t (s)"); gm.set("B1","accel"); tdp=0.1; tt=0.0; rr2=2
@@ -1328,7 +1328,7 @@ for (za,zb) in ((0,3000),(3000,6000)):
     b.IsBar=True; b.Section="IPE 200"; b.Material="Steel S235"
     b.BarStart=Vec(0,0,za); b.BarEnd=Vec(0,0,zb)
 dSD.addObject("Part::Feature","S").Restrain="111111"; dSD.Objects[-1].AtNode=Vec(0,0,0)
-C._sel_vertices=lambda: [Vec(0,0,6000)]
+C._sel_support_points=lambda doc: [Vec(0,0,6000)]
 C.form_dialog=lambda title,fields:{"exc":"Nodal force","dir":"+X","amp":20000.0,
   "func":"Step","freq":5.0,"td":0.1,"recsheet":"GroundMotion","recunit":"g",
   "dur":0.5,"dt":0.002,"zeta":0.05,"method":"Direct (Newmark)","nmodes":6}
@@ -1368,5 +1368,47 @@ pkT=float(_re4.search(r"at T = ([\d.]+) s",gGS["msg"]).group(1))
 print("  GMSpectrum command: peak Sa at T=%.3f s (expect ~0.5)"%pkT)
 assert abs(pkT-0.5)<0.08, pkT
 print("storey drift + response spectrum OK")
+
+print("\n=== Supports on solid bodies (snap) + single DynFrame group ===")
+C._section_props_from_name=lambda name:(2000.0,1.0e6,1.0e6,2.0e6,100.0)
+dB=Doc(); FreeCAD.ActiveDocument=dB
+# a SOLID member (body), not a line bar: has MemberProfile + skeleton endpoints
+mm=dB.addObject("Part::Feature","Col"); mm.MemberProfile="IPE 200"
+mm.MemberStart=Vec(0,0,0); mm.MemberEnd=Vec(0,0,3000); mm.Material="Steel S235"
+assert C.is_member(mm) and not C.is_bar(mm)
+nds=C._analysis_node_pts(dB)
+assert len(nds)==2 and any((q-Vec(0,0,0)).Length<1e-6 for q in nds), nds
+# a clicked section CORNER vertex is off the centreline -> must snap to the node
+snapped,nsnap=C._snap_to_nodes([Vec(150,100,0.0), Vec(150,-100,3000.0)], dB)
+print("  corners snapped to %s (nsnap=%d)"
+      %([(round(p.x),round(p.y),round(p.z)) for p in snapped],nsnap))
+assert nsnap==2 and len(snapped)==2
+assert any((p-Vec(0,0,0)).Length<1e-6 for p in snapped)
+assert any((p-Vec(0,0,3000)).Length<1e-6 for p in snapped)
+# end-to-end: a support at the snapped base node makes the BODY model solve
+C._apply_support(dB,"Fixed (all 6)",[Vec(0,0,0)])
+P=1000.0; Lc2=3000.
+nl=dB.addObject("Part::Feature","NL"); nl.LoadType="Nodal"; nl.LoadCase="DL1"
+nl.LoadVec=Vec(P,0,0); nl.AtNode=Vec(0,0,3000)   # lateral tip load
+gotB={}; C.info=lambda m2,g=gotB: g.setdefault("msg",m2)
+C.get_item=lambda t,l,items,cur=0:("All loads",True)
+C.RunAnalysis().Activated(run_pick="All loads", include_sw=False, second_order=False)
+assert "complete" in gotB.get("msg","").lower(), gotB.get("msg")
+md=float(__import__("re").search(r"Max displacement:\s*([\d.]+)",gotB["msg"]).group(1))
+dex=P*Lc2**3/(3*210000.*1.0e6)
+print("  body cantilever solved: max disp=%.3f mm (exact PL^3/3EI=%.3f)"%(md,dex))
+assert abs(md/dex-1.0)<0.02, (md,dex)
+# everything DynFrame made sits under ONE 'DynFrame' root group (not scattered)
+root=[o for o in dB.Objects if getattr(o,"TypeId","")=="App::DocumentObjectGroup"
+      and o.Label=="DynFrame"]
+assert len(root)==1, "expected one DynFrame root group"
+subs={g.Label for g in root[0].Group
+      if getattr(g,"TypeId","")=="App::DocumentObjectGroup"}
+print("  DynFrame root holds:", sorted(subs))
+assert {"Results","Supports"}<=subs, subs
+res=[g for g in root[0].Group if g.Label=="Results"][0]
+assert any(getattr(x,"TypeId","")=="Spreadsheet::Sheet" for x in res.Group), \
+    "result spreadsheets live under DynFrame/Results"
+print("supports-on-bodies + single DynFrame group OK")
 
 print("\nALL RUNTIME CHECKS PASSED")

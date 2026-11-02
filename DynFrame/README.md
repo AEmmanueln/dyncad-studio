@@ -96,7 +96,11 @@ model is what you analyse. Commands are on the toolbars/menus
 *Loads (DynFrame · Loads):*
 4. **New Load Case** — a named case with a nature (Dead / Live / Wind /
    Snow / Other). Loads belong to a case.
-5. **Define Support** — select node vertices → Fixed / Pinned / Roller.
+5. **Define Support** — select node vertices → Fixed / Pinned / Roller. Works
+   on **solid-body members** as well as line members: the pick snaps to the
+   nearest structural node, so clicking a corner vertex (or the base face) of a
+   solid column lands the support on that column's centreline node. Nodal
+   loads and settlements snap the same way.
 6. **Add Nodal Load** (on selected node vertices) / **Add Bar Load** (on
    selected bars/lines) — one dialog each, assigned to a load case. A bar load
    can be **uniform (UDL)**, a **concentrated point load** at any position
@@ -128,6 +132,12 @@ model is what you analyse. Commands are on the toolbars/menus
     summary, deformation scaling and animation.
 11. **Clear Results** — remove results only, or everything (supports, loads,
     combinations).
+
+Everything the analysis creates — supports, loads, the setup, the result
+tables and the force diagrams — is collected under **one `DynFrame` group** in
+the model tree (sub-groups *Supports / Loads / Analysis Setup / Results /
+Force Diagrams*), so the document stays tidy instead of scattering loose
+spreadsheets at the root.
 
 *Design & dynamics (DynFrame · Loads / Results):*
 - **Member Releases** — free member end DOFs: moment releases for a pinned

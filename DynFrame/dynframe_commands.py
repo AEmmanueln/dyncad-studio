@@ -2943,6 +2943,10 @@ RES_GROUP = "Results"
 DIA_GROUP = "Force Diagrams"
 STR_GROUP = "Structure"
 META_NAME = "DynFrameAnalysis"
+ROOT_GROUP = "DynFrame"          # one container for every analysis sub-group
+# the sub-groups that live under the single DynFrame root (keeps the tree tidy)
+_SUBGROUPS = (SUP_GROUP, LOAD_GROUP, RES_GROUP, DIA_GROUP, STR_GROUP,
+              "Analysis Setup")
 DIAG_KINDS = ["N", "Vy", "Vz", "Mx", "My", "Mz", "Stress"]
 
 
@@ -3011,12 +3015,29 @@ def _fef_udl_local(wx, wy, wz, L):
     return f
 
 
+def _root(doc):
+    """The single top-level 'DynFrame' group that holds every analysis
+    sub-group (Supports, Loads, Results, ...), so nothing is scattered loose
+    in the document tree."""
+    for o in doc.Objects:
+        if o.TypeId == "App::DocumentObjectGroup" and o.Label == ROOT_GROUP:
+            return o
+    g = doc.addObject("App::DocumentObjectGroup", "DynFrameRoot")
+    g.Label = ROOT_GROUP
+    return g
+
+
 def _grp(doc, label):
     for o in doc.Objects:
         if o.TypeId == "App::DocumentObjectGroup" and o.Label == label:
             return o
     g = doc.addObject("App::DocumentObjectGroup", label.replace(" ", ""))
     g.Label = label
+    if label in _SUBGROUPS:          # nest the analysis sub-groups under DynFrame
+        try:
+            _root(doc).addObject(g)
+        except Exception:
+            pass
     return g
 
 
@@ -3025,6 +3046,10 @@ def _meta(doc):
     if o is None:
         o = doc.addObject("App::DocumentObjectGroup", META_NAME)
         o.Label = "Analysis Setup"
+        try:
+            _root(doc).addObject(o)          # keep setup under the DynFrame root
+        except Exception:
+            pass
     for p in ("CaseNames", "CaseNatures", "ComboNames", "ComboDefs"):
         if not hasattr(o, p):
             o.addProperty("App::PropertyStringList", p, "DynFrame", p)
@@ -3182,6 +3207,60 @@ def _sel_vertices():
             if getattr(sub, "ShapeType", "") == "Vertex":
                 pts.append(FreeCAD.Vector(sub.Point))
     return pts
+
+
+def _analysis_node_pts(doc):
+    """All distinct analysis node points (member/bar centreline ends)."""
+    objs, _k = _analysis_objs(doc)
+    uniq = []
+    for o in objs:
+        try:
+            s, e = _elem_ends(o)
+        except Exception:
+            continue
+        for p in (s, e):
+            if not any((q - p).Length <= 1.0 for q in uniq):
+                uniq.append(FreeCAD.Vector(p))
+    return uniq
+
+
+def _snap_to_nodes(pts, doc):
+    """Snap each selected point to the nearest analysis node (centreline end).
+    This makes supports/loads work when the user clicks a vertex (or face) of a
+    SOLID body member - whose corners sit off the centreline - not only a line
+    member's end. Points are deduplicated; returns (snapped_pts, n_snapped)."""
+    nodes = _analysis_node_pts(doc)
+    if not nodes:
+        return list(pts), 0
+    out = []; nsnap = 0
+    for p in pts:
+        p = FreeCAD.Vector(p)
+        best = min(nodes, key=lambda q: (q - p).Length)
+        if (best - p).Length > 1e-6:
+            nsnap += 1
+        if not any((q - best).Length <= 1.0 for q in out):
+            out.append(best)
+    return out, nsnap
+
+
+def _sel_support_points(doc):
+    """Node points for a support/load from the current selection: picks selected
+    vertices, and the vertices of any selected edge/face, then snaps them to the
+    nearest analysis node. So clicking a corner vertex or the base face of a
+    solid column lands the support on that column's centreline node."""
+    raw = []
+    for so in FreeCADGui.Selection.getSelectionEx():
+        for sub in getattr(so, "SubObjects", []) or []:
+            st = getattr(sub, "ShapeType", "")
+            if st == "Vertex":
+                raw.append(FreeCAD.Vector(sub.Point))
+            elif st in ("Edge", "Face"):
+                for v in getattr(sub, "Vertexes", []) or []:
+                    raw.append(FreeCAD.Vector(v.Point))
+    if not raw:
+        return []
+    snapped, _n = _snap_to_nodes(raw, doc)
+    return snapped
 
 
 def _pick_case(doc, title):
@@ -3776,16 +3855,17 @@ class DefineSupport:
         return FreeCAD.ActiveDocument is not None
 
     def Activated(self):
-        pts = _sel_vertices()
+        doc = FreeCAD.ActiveDocument
+        pts = _sel_support_points(doc)
         if not pts:
-            info("Select one or more joint vertices (a bar end point), then run "
-                 "Define Support.")
+            info("Select one or more joint vertices (or the end/base face of a "
+                 "solid member), then run Define Support. The pick snaps to the "
+                 "nearest structural node, so it works on solid bodies too.")
             return
         opts = list(SUPPORT_TYPES.keys()) + ["Elastic (spring)…"]
         t, ok = get_item("Define Support", "Support type:", opts, 0)
         if not ok:
             return
-        doc = FreeCAD.ActiveDocument
         if t.startswith("Elastic"):
             vals = form_dialog("Elastic (spring) support", [
                 {"key": "_i", "kind": "info", "default":
@@ -3827,11 +3907,13 @@ class AddNodalLoad:
         return FreeCAD.ActiveDocument is not None
 
     def Activated(self):
-        pts = _sel_vertices()
-        if not pts:
-            info("Select one or more joint vertices, then add a nodal load.")
-            return
         doc = FreeCAD.ActiveDocument
+        pts = _sel_support_points(doc)
+        if not pts:
+            info("Select one or more joint vertices (or a solid member's end "
+                 "face), then add a nodal load. The pick snaps to the nearest "
+                 "structural node.")
+            return
         cs = [c[0] for c in _cases(doc)]
         vals = form_dialog("Add Nodal Load (%d node(s))" % len(pts), [
             {"key": "case", "label": "Load case", "kind": "combo",
@@ -3869,11 +3951,12 @@ class AddSettlement:
         return FreeCAD.ActiveDocument is not None
 
     def Activated(self):
-        pts = _sel_vertices()
-        if not pts:
-            info("Select one or more supported node vertices, then add a settlement.")
-            return
         doc = FreeCAD.ActiveDocument
+        pts = _sel_support_points(doc)
+        if not pts:
+            info("Select one or more supported node vertices (or a solid "
+                 "member's end face), then add a settlement.")
+            return
         cs = [c[0] for c in _cases(doc)]
         vals = form_dialog("Support Settlement (%d node(s))" % len(pts), [
             {"key": "case", "label": "Load case", "kind": "combo",
@@ -6771,7 +6854,7 @@ class TimeHistory:
     def Activated(self):
         import numpy as np
         doc = FreeCAD.ActiveDocument
-        sel_pts = _sel_vertices()
+        sel_pts = _sel_support_points(doc)
         coarse, fine, K, M, fixed, sup = _frame_fine_MK(doc)
         if not fine or 6 * len(fine) == 0:
             info("No frame model found - build bars and supports first."); return
@@ -7898,9 +7981,10 @@ def _panel_class():
             NewLoadCase().Activated(); self._refresh()
 
         def _support(self):
-            doc = self._doc(); pts = _sel_vertices()
+            doc = self._doc(); pts = _sel_support_points(doc)
             if not pts:
-                info("Select one or more node vertices in the 3D view first."); return
+                info("Select one or more node vertices (or a solid member's end "
+                     "face) in the 3D view first."); return
             doc.openTransaction("DynFrame: support")
             _apply_support(doc, self.sup.currentText(), pts)
             doc.commitTransaction(); doc.recompute(); self._refresh()
@@ -7908,9 +7992,10 @@ def _panel_class():
         def _load(self):
             doc = self._doc(); case = self.case.currentText() or "DL1"
             if self.ltype.currentIndex() == 0:
-                pts = _sel_vertices()
+                pts = _sel_support_points(doc)
                 if not pts:
-                    info("Select node vertices in the 3D view first."); return
+                    info("Select node vertices (or a solid member's end face) "
+                         "in the 3D view first."); return
                 fvec = FreeCAD.Vector(self.fx.value(), self.fy.value(), self.fz.value())
                 if fvec.Length < 1e-9:
                     info("Load is zero."); return

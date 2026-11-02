@@ -160,6 +160,16 @@ model is what you analyse. Commands are on the toolbars/menus
   would need compression steel is flagged. Results go to the `PlateSteel`
   table. (Validated: a 200 mm slab at 50 kN·m/m → ≈757 mm²/m, matching the
   hand calc; minimum-steel and over-moment cases flagged correctly.)
+- **Punching Shear (EC2)** — EN 1992-1-1 (6.4) punching check at slab–column
+  junctions: the design column load β·V_Ed over the control perimeter u₁ at 2d
+  (v_Ed) against v_Rd,c = C_Rd,c·k·(100ρ_l f_ck)^⅓ ≥ v_min, plus the column-face
+  check v_Ed,0 against the crushing limit v_Rd,max = 0.5·ν·f_cd. Select the
+  columns (it reads their axial load N_Ed from the analysis) and pick position
+  (internal/edge/corner → β), column size, slab d, grade and ρ_l; results and a
+  pass/fail go to the `PunchingShear` table (util > 1 ⇒ needs links/studs or a
+  thicker slab/drop panel). Validated: a 400×400 internal column, d=200, C30/37,
+  ρ_l=0.01, V_Ed=800 kN → u₁=4113 mm, v_Rd,c=0.746 MPa, v_Ed=1.118 MPa,
+  utilisation 1.50 — matching the hand calc.
 - **Steel Code Check (EC3)** — a full EN 1993-1-1 member verification, the
   way Robot does it: each member is **classified** (Class 1–4) from its own
   flange/web slenderness under the actual axial force and moment; the bending
@@ -318,6 +328,9 @@ rely on. The checks it runs:
 > axial force (active-set), matching the spring-parallel closed form; the
 > **EC2 slab reinforcement** matches the hand calc (200 mm C30/37 slab at
 > 50 kN·m/m → ≈757 mm²/m, min-steel and over-moment cases flagged); the
+> **EC2 punching shear** matches its hand calc (400×400 internal column,
+> d = 200, C30/37, V_Ed = 800 kN → u₁ = 4113 mm, v_Rd,c = 0.746 MPa,
+> utilisation 1.50); the
 > **EN 1991-1-4 wind** pressure q_p(10 m, terrain II, v_b = 26 m/s) ≈ 0.99 kPa
 > (c_e ≈ 2.35, matching the exposure chart) with the applied base shear equal
 > to the pressure integral; and the **EC3 sway imperfection** gives φ =

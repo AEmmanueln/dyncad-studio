@@ -2240,6 +2240,39 @@ def _ec2_slab_as(med, h, cover, dia, layer, fck, fyk,
     return as_m, d, note
 
 
+# punching-shear position factor beta (EN 1992-1-1 6.4.3(6), braced frames)
+PUNCH_BETA = {"Internal": 1.15, "Edge": 1.4, "Corner": 1.5}
+
+
+def _punching(ved, c1, c2, d, fck, rhol, beta, gc=1.5, acc=0.85):
+    """EN 1992-1-1 (6.4) punching-shear check at a slab-column junction.
+    ved = design column load (N), c1 x c2 = column size (mm), d = slab mean
+    effective depth (mm), rhol = tension-reinforcement ratio, beta = position
+    eccentricity factor. Returns a dict with the control perimeters, the shear
+    resistance without links v_Rd,c, the applied shear v_Ed at the 2d perimeter,
+    the column-face check v_Ed,0 vs the crushing limit v_Rd,max, and the
+    utilisation (needs punching reinforcement when > 1)."""
+    import math
+    ved = abs(float(ved))
+    u0 = 2.0 * (c1 + c2)                      # column-face perimeter
+    u1 = 2.0 * (c1 + c2) + 4.0 * math.pi * d  # basic control perimeter at 2d
+    k = min(2.0, 1.0 + math.sqrt(200.0 / d)) if d > 0 else 1.0
+    rl = min(0.02, max(0.0, rhol))
+    crdc = 0.18 / gc
+    vrdc = crdc * k * (100.0 * rl * fck) ** (1.0 / 3.0)
+    vmin = 0.035 * (k ** 1.5) * math.sqrt(fck)
+    vrdc = max(vrdc, vmin)
+    ved1 = beta * ved / (u1 * d) if (u1 * d) > 0 else 0.0
+    ved0 = beta * ved / (u0 * d) if (u0 * d) > 0 else 0.0
+    nu = 0.6 * (1.0 - fck / 250.0)
+    fcd = acc * fck / gc
+    vrdmax = 0.5 * nu * fcd
+    return {"u0": u0, "u1": u1, "k": k, "vRdc": vrdc, "vmin": vmin, "vEd": ved1,
+            "vEd0": ved0, "vRdmax": vrdmax,
+            "util": (ved1 / vrdc if vrdc > 0 else 0.0),
+            "crush": (ved0 / vrdmax if vrdmax > 0 else 0.0)}
+
+
 def _tri_normal_area(pts):
     """Unit normal (FreeCAD.Vector) and area of a 3D triangle."""
     import numpy as np
@@ -5125,7 +5158,8 @@ class ClearAnalysis:
         doc.openTransaction("DynFrame: clear")
         res_sheets = ("Reactions", "Displacements", "BarForces",
                       "ModalFrequencies", "CodeCheck", "Envelope", "Seismic",
-                      "PlateForces", "PlateReinforcement", "PlateSteel")
+                      "PlateForces", "PlateReinforcement", "PlateSteel",
+                      "PunchingShear", "MovingEnvelope")
         all_sheets = res_sheets + ("LoadCases", "Combinations", "AnalysisResults")
         to_del = []
         for o in list(doc.Objects):
@@ -5854,6 +5888,108 @@ class PlateReinfEC2:
         except Exception as e:
             doc.abortTransaction()
             err("Reinforcement design failed: %s" % e)
+
+
+class PunchingEC2:
+    def GetResources(self):
+        return {"Pixmap": _icon("punch"), "MenuText": "Punching Shear (EC2)",
+                "ToolTip": "EN 1992-1-1 punching-shear check at slab-column "
+                           "junctions: the design column load over the 2d control "
+                           "perimeter vs v_Rd,c (and the column face vs the crushing "
+                           "limit). Select the columns and run Calculate first so it "
+                           "reads their axial loads.", "Accel": "A, P"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        doc = FreeCAD.ActiveDocument
+        sel = [m for m in selected_elems() if is_bar(m) and hasattr(m, "ResN")]
+        if not sel:
+            sel = [o for o in doc.Objects if is_analysis_elem(o) and hasattr(o, "ResN")
+                   and self._vertical(o)]
+        if not sel:
+            info("Select the column(s) supporting the slab (or run a gravity "
+                 "Calculate first). Punching uses each column's axial load N_Ed.")
+            return
+        grades = list(CONCRETE_GRADES.keys())
+        vals = form_dialog("Punching Shear (EN 1992-1-1) - %d column(s)" % len(sel), [
+            {"key": "_i", "kind": "info", "default":
+             "Checks each selected column's axial load as the punching force over "
+             "the control perimeter at 2d from the column face. Needs punching "
+             "reinforcement when v_Ed > v_Rd,c; the column face is also checked "
+             "against the crushing limit v_Rd,max. Column load = |N| from the "
+             "analysis (override below if you prefer)."},
+            {"key": "pos", "label": "Column position", "kind": "combo",
+             "options": list(PUNCH_BETA.keys()), "default": "Internal"},
+            {"key": "c1", "label": "Column size c1 (mm)", "kind": "float", "default": 400.0},
+            {"key": "c2", "label": "Column size c2 (mm)", "kind": "float", "default": 400.0},
+            {"key": "d", "label": "Slab effective depth d (mm)", "kind": "float", "default": 200.0},
+            {"key": "grade", "label": "Concrete grade", "kind": "combo",
+             "options": grades, "default": "C30/37"},
+            {"key": "rhol", "label": "Reinf. ratio rho_l (0..0.02)", "kind": "float",
+             "default": 0.01, "decimals": 4},
+            {"key": "ved", "label": "V_Ed override (N, 0 = use column N)",
+             "kind": "float", "default": 0.0},
+        ])
+        if not vals:
+            return
+        beta = PUNCH_BETA.get(vals["pos"], 1.15)
+        fck = CONCRETE_GRADES.get(vals["grade"], 30.0)
+        c1 = float(vals["c1"]); c2 = float(vals["c2"]); d = float(vals["d"])
+        rhol = float(vals["rhol"]); override = float(vals["ved"])
+        doc.openTransaction("DynFrame: punching shear (EC2)")
+        try:
+            sh = (doc.getObject("PunchingShear")
+                  or doc.addObject("Spreadsheet::Sheet", "PunchingShear"))
+            sh.Label = "PunchingShear"; sh.clearAll()
+            sh.set("A1", "PUNCHING SHEAR (EN 1992-1-1) - %s, %s, d=%g, c=%gx%g, "
+                   "rho_l=%.4f" % (vals["pos"], vals["grade"], d, c1, c2, rhol))
+            for c, h in zip("ABCDEFGH",
+                            ["Column", "V_Ed (kN)", "u1 (mm)", "v_Ed (MPa)",
+                             "v_Rd,c (MPa)", "Util", "Face v/v_Rd,max", "Verdict"]):
+                sh.set("%s2" % c, h)
+            r = 3; worst = 0.0; wn = "-"
+            for o in sel:
+                ved = override if override > 0 else abs(float(getattr(o, "ResN", 0.0)))
+                res = _punching(ved, c1, c2, d, fck, rhol, beta)
+                verdict = ("OK" if res["util"] <= 1.0 and res["crush"] <= 1.0
+                           else ("CRUSHING" if res["crush"] > 1.0
+                                 else "needs punching reinf."))
+                row = [str(o.Label), "%.1f" % (ved / 1000.0), "%.0f" % res["u1"],
+                       "%.3f" % res["vEd"], "%.3f" % res["vRdc"],
+                       "%.2f" % res["util"], "%.2f" % res["crush"], verdict]
+                for c, v in zip("ABCDEFGH", row):
+                    sh.set("%s%d" % (c, r), v)
+                r += 1
+                if res["util"] > worst:
+                    worst = res["util"]; wn = str(o.Label)
+            rg = _grp(doc, RES_GROUP)
+            if rg is not None and sh not in rg.Group:
+                rg.addObject(sh)
+            doc.commitTransaction(); doc.recompute()
+            info("Punching shear (EN 1992-1-1) checked on %d column(s), %s.\n\n"
+                 "Grade %s, d = %g mm, column %g x %g mm, rho_l = %.4f.\n"
+                 "Worst utilisation v_Ed/v_Rd,c = %.2f (column '%s').\n\n%s\n\nSee "
+                 "the 'PunchingShear' table. Where util > 1 the slab needs punching "
+                 "reinforcement (links/studs) or a thicker slab / drop panel; where "
+                 "the face ratio > 1 the section is crushing - enlarge the column or "
+                 "slab." % (len(sel), vals["pos"], vals["grade"], d, c1, c2, rhol,
+                            worst, wn,
+                            "All columns OK." if worst <= 1.0
+                            else "Some columns need punching reinforcement."))
+        except Exception as e:
+            doc.abortTransaction()
+            err("Punching check failed: %s" % e)
+
+    @staticmethod
+    def _vertical(o):
+        try:
+            s, e = _elem_ends(o)
+            L = s.distanceToPoint(e)
+            return L > 1e-6 and abs(e.z - s.z) / L > 0.7
+        except Exception:
+            return False
 
 
 class Envelope:
@@ -7739,6 +7875,7 @@ _add("DynFrame_Combinations", Combinations)
 _add("DynFrame_MemberReleases", MemberReleases)
 _add("DynFrame_MemberType", MemberType)
 _add("DynFrame_PlateReinfEC2", PlateReinfEC2)
+_add("DynFrame_PunchingEC2", PunchingEC2)
 _add("DynFrame_RunAnalysis", RunAnalysis)
 _add("DynFrame_ModalAnalysis", ModalAnalysis)
 _add("DynFrame_BucklingAnalysis", BucklingAnalysis)

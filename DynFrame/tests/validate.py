@@ -1129,4 +1129,37 @@ C.CodeCheck().Activated()
 assert dM.getObject("CodeCheck") is not None
 print("moving load envelope OK")
 
+print("\n=== EC2 punching shear (hand calc + command) ===")
+# internal 400x400 column, d=200, C30/37, rho_l=0.01, V_Ed=800 kN, beta=1.15
+pr=C._punching(800000.0, 400.0,400.0, 200.0, 30.0, 0.01, 1.15)
+import math as _mp
+u1ex=2*(400+400)+4*_mp.pi*200
+print("  u1=%.1f (exp %.1f)  k=%.2f  v_Rd,c=%.3f  v_Ed=%.3f  util=%.3f  crush=%.3f"
+      %(pr["u1"],u1ex,pr["k"],pr["vRdc"],pr["vEd"],pr["util"],pr["crush"]))
+assert abs(pr["u1"]-u1ex)<0.5 and abs(pr["k"]-2.0)<1e-6
+assert abs(pr["vRdc"]-0.7457)<0.005, pr["vRdc"]
+assert abs(pr["vEd"]-1.1184)<0.01, pr["vEd"]
+assert abs(pr["util"]-1.500)<0.02 and pr["util"]>1.0   # needs punching reinforcement
+assert pr["crush"]<1.0 and abs(pr["vRdmax"]-4.488)<0.02, (pr["crush"],pr["vRdmax"])
+# v_min floor governs a lightly-loaded thin check
+pr2=C._punching(50000.0, 300.,300., 150., 25., 0.002, 1.15)
+assert pr2["vRdc"]>=pr2["vmin"]-1e-9
+# command end-to-end: a column carrying 800 kN -> PunchingShear table, util~1.5
+C._section_props_from_name=lambda name:(2000.0,1.0e6,1.0e6,2.0e6,100.0)
+dPn=Doc(); FreeCAD.ActiveDocument=dPn
+col=dPn.addObject("Part::Feature","C1"); col.Shape=Shape(0,[Vec(0,0,0),Vec(0,0,3000)])
+col.IsBar=True; col.Section="IPE 200"; col.Material="Steel S235"
+col.BarStart=Vec(0,0,0); col.BarEnd=Vec(0,0,3000); col.ResN=-800000.0
+C.selected_elems=lambda: [col]
+C.form_dialog=lambda title,fields:{"pos":"Internal","c1":400.0,"c2":400.0,
+  "d":200.0,"grade":"C30/37","rhol":0.01,"ved":0.0}
+gotP={}; C.info=lambda m,g=gotP: g.setdefault("msg",m)
+C.PunchingEC2().Activated()
+pt=dPn.getObject("PunchingShear")
+assert pt is not None and pt._cells.get("E2","").startswith("v_Rd,c") and "F3" in pt._cells
+util=float(pt._cells.get("F3")); verdict=pt._cells.get("H3")
+print("  command: util=%.2f verdict=%r"%(util,verdict))
+assert abs(util-1.50)<0.03 and "reinf" in verdict.lower()
+print("EC2 punching shear OK")
+
 print("\nALL RUNTIME CHECKS PASSED")

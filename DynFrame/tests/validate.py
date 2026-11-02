@@ -1238,6 +1238,15 @@ C.TimeHistory().Activated()
 daf2=float(_re2.search(r"amplification\s*([\d.]+)",gotT2["msg"]).group(1))
 print("  heavy damping (zeta=0.7): DAF=%.3f (expect ~1.0, <1.3)"%daf2)
 assert 0.8<daf2<1.3, daf2
+# modal superposition reproduces the direct result
+C.form_dialog=lambda title,fields:{"exc":"Nodal force","dir":"+X","amp":50000.0,
+  "func":"Step","freq":5.0,"td":0.1,"recsheet":"GroundMotion","recunit":"g",
+  "dur":0.6,"dt":0.002,"zeta":0.0,"method":"Modal superposition","nmodes":6}
+gotM3={}; C.info=lambda m,g=gotM3: g.setdefault("msg",m)
+C.TimeHistory().Activated()
+dafm=float(_re2.search(r"amplification\s*([\d.]+)",gotM3["msg"]).group(1))
+print("  modal (6 modes) step DAF=%.3f  (direct DAF=%.3f)  ratio=%.4f"%(dafm,daf,dafm/daf))
+assert abs(dafm-daf)/daf<0.03, (dafm,daf)
 print("time-history OK")
 
 print("\n=== Earthquake record (spreadsheet) vs built-in half-sine ===")

@@ -207,7 +207,12 @@ model is what you analyse. Commands are on the toolbars/menus
   internally). A record is read from a FreeCAD **spreadsheet** — column A =
   time (s), column B = acceleration (g, m/s² or mm/s²); name the sheet and
   pick it in the dialog (a header row is skipped, and the analysis runs on
-  past the record for the free-vibration decay). It reports the peak response, the dynamic
+  past the record for the free-vibration decay). Two solution methods:
+  **direct** Newmark integration of the full system, or **modal
+  superposition** (project onto the lowest N modes, integrate the decoupled
+  modal SDOFs, reconstruct) — faster for large models and closer to how the
+  code idealises the response. (Validated: 6-mode superposition reproduces the
+  direct step-load DAF to 0.5 %.) It reports the peak response, the dynamic
   amplification, the peak base shear, a monitored-node **`ResponseHistory`**
   table, the deformed shape at peak, and a member-force envelope stored for the
   code check. (Validated: a cantilever under a suddenly-applied step force

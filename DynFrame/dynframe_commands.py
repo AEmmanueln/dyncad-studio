@@ -6580,9 +6580,16 @@ class TimeHistory:
              "default": max(1e-4, 1.0 / (40.0 * max(f1, 0.5))), "decimals": 5},
             {"key": "zeta", "label": "Damping ratio zeta", "kind": "float",
              "default": 0.05, "decimals": 4},
+            {"key": "method", "label": "Method", "kind": "combo",
+             "options": ["Direct (Newmark)", "Modal superposition"],
+             "default": "Direct (Newmark)"},
+            {"key": "nmodes", "label": "Modes (modal method)", "kind": "int",
+             "default": 6, "min": 1, "max": 100},
         ])
         if not vals:
             return
+        modal = str(vals.get("method", "")).startswith("Modal")
+        nmodes = max(1, int(vals.get("nmodes", 6)))
         dv = self._DIRS.get(vals["dir"], (1.0, 0.0, 0.0, 0))
         dvec = np.array(dv[:3], float); dirdof = dv[3]
         amp = float(vals["amp"]); seismic = vals["exc"].startswith("Ground")
@@ -6660,7 +6667,7 @@ class TimeHistory:
         a5 = dt * (gamma / (2 * beta) - 1.0)
         Khat = Kf + a0 * Mf + a1 * Cf
         try:
-            Khat_inv = np.linalg.inv(Khat); Minv = np.linalg.inv(Mf)
+            Khat_inv = np.linalg.inv(Khat)
         except Exception:
             err("Newmark factorisation failed (singular system)."); return
 
@@ -6671,39 +6678,24 @@ class TimeHistory:
                                 left=0.0, right=0.0)
         else:
             gseries = np.array([gfun(float(t)) for t in tgrid])
-        u = np.zeros(len(free)); v = np.zeros(len(free))
-        F0 = pf * scale * float(gseries[0])
-        acc = Minv @ (F0 - Cf @ v - Kf @ u)
         # coarse-element force envelope (reuse _frame_stiffness elements)
         _cn, celems, _Kc, _fx, _sp = _frame_stiffness(doc)
         sampabs = {id(el): {k: [0.0] * 11 for k in DIAG_KINDS} for el in celems}
-        hist = [(0.0, 0.0)]; peak_abs = 0.0; u_peak = np.zeros(ndof)
-        peak_shear = 0.0
-        fullu = np.zeros(ndof); fullv = np.zeros(ndof); fulla = np.zeros(ndof)
-        for i in range(nstep):
-            t1 = (i + 1) * dt
-            gi = float(gseries[i + 1])
-            F1 = pf * scale * gi
-            phat = F1 + Mf @ (a0 * u + a2 * v + a3 * acc) \
-                + Cf @ (a1 * u + a4 * v + a5 * acc)
-            u1 = Khat_inv @ phat
-            acc1 = a0 * (u1 - u) - a2 * v - a3 * acc
-            v1 = v + dt * ((1 - gamma) * acc + gamma * acc1)
-            u, v, acc = u1, v1, acc1
-            fullu[free] = u; fullv[free] = v; fulla[free] = acc
-            dmon = fullu[6 * mon + dirdof]
-            hist.append((t1, float(dmon)))
-            # peak resultant displacement over coarse nodes -> deformed shape
+        hist = [(0.0, 0.0)]; peak_abs = [0.0]; u_peak = [np.zeros(ndof)]
+        peak_shear = [0.0]
+        fullu = np.zeros(ndof); fulla = np.zeros(ndof)
+
+        def record_step(t1, uf, af, gi):
+            fullu[free] = uf; fulla[free] = af
+            hist.append((t1, float(fullu[6 * mon + dirdof])))
             res = max((fullu[6 * j] ** 2 + fullu[6 * j + 1] ** 2
                        + fullu[6 * j + 2] ** 2) for j in range(ncoarse)) ** 0.5
-            if res > peak_abs:
-                peak_abs = res; u_peak = fullu.copy()
-            # base shear = sum of support reactions in the excitation direction
-            R = K @ fullu + M @ fulla - p * scale * gi         # C term ~0 on supports
+            if res > peak_abs[0]:
+                peak_abs[0] = res; u_peak[0] = fullu.copy()
+            R = K @ fullu + M @ fulla - p * scale * gi         # support reactions
             vb = sum(R[6 * s + dirdof] for s in sup)
-            if abs(vb) > peak_shear:
-                peak_shear = abs(vb)
-            # member-force envelope from the coarse-node displacements
+            if abs(vb) > peak_shear[0]:
+                peak_shear[0] = abs(vb)
             uc = fullu[:6 * ncoarse]
             for el in celems:
                 samp, _fend = _pt_samples(el, uc, [], 10)
@@ -6715,6 +6707,44 @@ class TimeHistory:
                         if av > sa[k][sidx]:
                             sa[k][sidx] = av
 
+        if modal:
+            # mode-superposition: project onto the lowest `nmodes` modes, integrate
+            # each decoupled modal SDOF, and reconstruct the response each step
+            A = Lci @ Kf @ Lci.T; A = 0.5 * (A + A.T)
+            w2m, Ym = np.linalg.eigh(A)
+            idx = [i for i in np.argsort(w2m) if w2m[i] > 1e-9][:nmodes]
+            Phi = np.column_stack([Lci.T @ Ym[:, i] for i in idx])   # M-normalised
+            wm = np.array([float(w2m[i]) ** 0.5 for i in idx])
+            zm = a_ray / (2.0 * wm) + b_ray * wm / 2.0               # Rayleigh modal
+            cm = 2.0 * zm * wm; km = wm * wm
+            Lmod = Phi.T @ pf                                        # modal loads
+            khat = km + a0 * 1.0 + a1 * cm
+            q = np.zeros(len(idx)); qd = np.zeros(len(idx))
+            qdd = Lmod * scale * float(gseries[0])                   # modal mass = 1
+            for i in range(nstep):
+                gi = float(gseries[i + 1])
+                phat = Lmod * scale * gi + (a0 * q + a2 * qd + a3 * qdd) \
+                    + cm * (a1 * q + a4 * qd + a5 * qdd)
+                q1 = phat / khat
+                qdd1 = a0 * (q1 - q) - a2 * qd - a3 * qdd
+                qd1 = qd + dt * ((1 - gamma) * qdd + gamma * qdd1)
+                q, qd, qdd = q1, qd1, qdd1
+                record_step((i + 1) * dt, Phi @ q, Phi @ qdd, gi)
+        else:
+            Minv = np.linalg.inv(Mf)
+            u = np.zeros(len(free)); v = np.zeros(len(free))
+            acc = Minv @ (pf * scale * float(gseries[0]) - Cf @ v - Kf @ u)
+            for i in range(nstep):
+                gi = float(gseries[i + 1])
+                phat = pf * scale * gi + Mf @ (a0 * u + a2 * v + a3 * acc) \
+                    + Cf @ (a1 * u + a4 * v + a5 * acc)
+                u1 = Khat_inv @ phat
+                acc1 = a0 * (u1 - u) - a2 * v - a3 * acc
+                v1 = v + dt * ((1 - gamma) * acc + gamma * acc1)
+                u, v, acc = u1, v1, acc1
+                record_step((i + 1) * dt, u, acc, gi)
+
+        u_peak = u_peak[0]; peak_shear = peak_shear[0]
         peak_mon = max(abs(h[1]) for h in hist)
         daf = (peak_mon / abs(ust_mon)) if abs(ust_mon) > 1e-12 else 0.0
 

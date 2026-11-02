@@ -867,6 +867,18 @@ prt=dP.getObject("PlateReinforcement")
 assert prt and prt._cells.get("B2","").startswith("Mxd bottom") and "B3" in prt._cells
 assert "Wood-Armer" in C._result_summary(dP), C._result_summary(dP)
 print("  extra contours: M1/M2 + Wood-Armer(4) present & listed; PlateReinforcement table OK")
+# principal-moment trajectories: angle helper + the two wire objects
+import math as _mt
+assert abs(C._principal_angle(100.,0.,0.))<1e-9                      # uniaxial Mx -> 0
+assert abs(C._principal_angle(0.,0.,50.)-_mt.pi/4)<1e-9              # pure twist -> 45
+assert abs(abs(C._principal_angle(0.,100.,0.))-_mt.pi/2)<1e-9       # My>Mx -> 90
+rkeys=[k for (lab,k,knd) in C._result_list(dP)]
+for dk in ("_plateT1","_plateT2"):
+    tj=[o for o in dP.Objects if str(getattr(o,"DiagKind",""))==dk]
+    assert len(tj)==1, (dk,len(tj))                    # one wire family object
+    assert dk in rkeys, (dk,rkeys)                     # selectable in the viewer
+    assert tuple(round(c,2) for c in tj[0].ViewObject.LineColor) != (0.0,0.0,0.0)
+print("  principal-moment trajectories: angle helper + M1/M2 wire families OK")
 pk=lambda a: getattr(pl,a,0.0)
 print("  moment contours built: Mx/My/Mxy band objs=%d/%d/%d; plate peaks |Mx|=%.0f |My|=%.0f |Mxy|=%.0f"
       %(len([o for o in dP.Objects if getattr(o,"DiagKind","")=="_plateMx"]),

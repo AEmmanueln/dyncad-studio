@@ -2161,6 +2161,13 @@ def _shell_moments(pts, E, nu, t, u_glob18, En, Ex, Ey):
     return mxx, myy, mxy, avg + rad, avg - rad
 
 
+def _principal_angle(mxx, myy, mxy):
+    """Angle (rad) of the major principal moment axis relative to the plate Ex
+    axis: theta = 0.5*atan2(2 Mxy, Mxx - Myy). The minor axis is at theta+90."""
+    import math
+    return 0.5 * math.atan2(2.0 * mxy, mxx - myy)
+
+
 def _wood_armer(mx, my, mxy):
     """Wood-Armer design moments for orthogonal (x, y) slab reinforcement
     (Wood 1968 / Armer). Returns (mxb, myb, mxt, myt): the bottom-face design
@@ -4883,6 +4890,7 @@ class RunAnalysis:
         mom_peak = {c: 0.0 for c in mcomps}
         for sh in shells:
             En, Ex, Ey = _plate_frame([pts for (ni, pts) in sh["tris"]])
+            sh["Ex"] = Ex; sh["Ey"] = Ey; sh["traj"] = []
             pervm = []; per = {c: [] for c in mcomps}
             for (ni, pts) in sh["tris"]:
                 ug = []
@@ -4896,6 +4904,10 @@ class RunAnalysis:
                 per["M1"].append(m1); per["M2"].append(m2)
                 per["WAxb"].append(mxb); per["WAyb"].append(myb)
                 per["WAxt"].append(mxt); per["WAyt"].append(myt)
+                cen = vscale(FreeCAD.Vector(pts[0]) + FreeCAD.Vector(pts[1])
+                             + FreeCAD.Vector(pts[2]), 1.0 / 3.0)
+                _n, area = _tri_normal_area(pts)
+                sh["traj"].append((cen, mxx, myy, mxy, m1, m2, (2.0 * area) ** 0.5))
             sh["pervm"] = pervm
             for c in per:
                 sh["per" + c] = per[c]
@@ -4944,6 +4956,8 @@ class RunAnalysis:
                                 visible=(not elems))
             # moments, principal moments and Wood-Armer reinforcement contours
             _build_plate_fields(doc, dg, shells, mom_peak, visible=False)
+            _build_plate_trajectories(doc, dg, shells, mom_peak["M1"],
+                                      mom_peak["M2"], visible=False)
             self._plate_table(doc, shells, rg)
             self._plate_reinf_table(doc, shells, rg)
         self._tables(doc, nodes, sup_nodes, Rreac, u, elems, run_name, rg, "Disp")
@@ -5104,7 +5118,9 @@ RESULT_LABELS = {"Disp": "Displacement (mm)", "N": "N - axial force (N)",
                  "_plateWAxb": "Plate Wood-Armer bottom X (N.mm/mm)",
                  "_plateWAyb": "Plate Wood-Armer bottom Y (N.mm/mm)",
                  "_plateWAxt": "Plate Wood-Armer top X (N.mm/mm)",
-                 "_plateWAyt": "Plate Wood-Armer top Y (N.mm/mm)"}
+                 "_plateWAyt": "Plate Wood-Armer top Y (N.mm/mm)",
+                 "_plateT1": "Plate M1 trajectories (N.mm/mm)",
+                 "_plateT2": "Plate M2 trajectories (N.mm/mm)"}
 RESULT_ORDER = ["Disp", "N", "Vy", "Vz", "Mx", "My", "Mz", "Stress"]
 
 
@@ -7787,6 +7803,60 @@ PLATE_FIELDS = [
     ("WAxt", False, "Plate Wood-Armer top X (N.mm/mm)"),
     ("WAyt", False, "Plate Wood-Armer top Y (N.mm/mm)"),
 ]
+
+
+def _build_plate_trajectories(doc, grp, shells, peak1, peak2, visible=False):
+    """Principal-moment trajectory plots: at each plate triangle a short line
+    along the major (M1) and minor (M2) principal moment directions, length
+    scaled by the moment magnitude. Two wire objects (M1 red, M2 blue) - the
+    'flow of forces' in a slab, which bottom/top reinforcement should follow."""
+    import math
+    import numpy as np
+    for (fam, dk, comp, col, peak) in (
+            (1, "_plateT1", "M1", (0.85, 0.15, 0.1), peak1),
+            (2, "_plateT2", "M2", (0.1, 0.3, 0.85), peak2)):
+        for o in list(doc.Objects):
+            if o.Name.startswith("PlateTraj%d" % fam):
+                try:
+                    doc.removeObject(o.Name)
+                except Exception:
+                    pass
+        segs = []
+        for sh in shells:
+            Ex = sh.get("Ex"); Ey = sh.get("Ey")
+            if Ex is None:
+                continue
+            for (cen, mxx, myy, mxy, m1, m2, clen) in sh.get("traj", []):
+                th = _principal_angle(mxx, myy, mxy) + (math.pi / 2 if fam == 2 else 0.0)
+                dire = math.cos(th) * Ex + math.sin(th) * Ey
+                mag = abs(m1 if fam == 1 else m2)
+                frac = (mag / peak) if peak > 1e-12 else 0.0
+                half = 0.45 * clen * max(0.12, min(1.0, 0.15 + 0.85 * frac))
+                dv = FreeCAD.Vector(float(dire[0]), float(dire[1]), float(dire[2]))
+                try:
+                    segs.append(Part.makeLine(FreeCAD.Vector(cen - vscale(dv, half)),
+                                              FreeCAD.Vector(cen + vscale(dv, half))))
+                except Exception:
+                    pass
+        if not segs:
+            continue
+        ob = doc.addObject("Part::Feature", "PlateTraj%d" % fam)
+        try:
+            ob.Shape = Part.makeCompound(segs)
+        except Exception:
+            continue
+        ob.Label = "Plate %s trajectories (N.mm/mm)" % comp
+        _set(ob, "App::PropertyString", "DiagKind", dk)
+        _set(ob, "App::PropertyFloat", "CompMax", float(peak))
+        _set(ob, "App::PropertyFloat", "CompMin", 0.0)
+        try:
+            ob.ViewObject.Visibility = bool(visible)
+            ob.ViewObject.LineColor = col
+            ob.ViewObject.LineWidth = 3
+        except Exception:
+            pass
+        if grp is not None:
+            grp.addObject(ob)
 
 
 def _build_plate_fields(doc, grp, shells, mom_peak, visible=False):

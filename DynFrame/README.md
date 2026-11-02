@@ -275,7 +275,10 @@ model is what you analyse. Commands are on the toolbars/menus
   Wood–Armer design moments per plate), plus the plate nodes' deflections in
   `Displacements`. Pick any of **Plate stress / Mx / My / Mxy / M1 / M2 /
   Wood–Armer (bottom & top, X & Y)** in the Results Viewer to switch the
-  contour; the colour bar re-ranges to match.
+  contour; the colour bar re-ranges to match. There are also **principal-moment
+  trajectory plots** (M1 red, M2 blue) — a short line at each element along the
+  principal moment directions, scaled by magnitude: the "flow of forces" a
+  slab's reinforcement ideally follows.
 
 **Materials:** Steel S235 / S275 / S355, Stainless 304, Aluminium 6061-T6,
 and Concrete C25/30 / C30/37 / C35/45 (E_cm and ν = 0.2 per EN 1992-1-1, for
@@ -324,7 +327,9 @@ rely on. The checks it runs:
 > **Wood–Armer** design moments reproduce the closed-form corner cases (pure
 > sagging → bottom steel one way, pure twist → equal steel all four faces,
 > combined → the corrected design moments), and are always sign-correct
-> (bottom ≥ 0, top ≤ 0, enveloping the raw field);
+> (bottom ≥ 0, top ≤ 0, enveloping the raw field); the **principal-moment
+> direction** is exact for the textbook cases (uniaxial → 0°, pure twist → 45°,
+> M_y > M_x → 90°);
 > **support settlement** matches 3EIδ/L² and 3EIδ/L³ for a settling prop;
 > **tension-only / compression-only** members drop out under the wrong-sign
 > axial force (active-set), matching the spring-parallel closed form; the

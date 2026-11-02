@@ -206,6 +206,111 @@ Then confirm trustworthiness independently of any product:
   internal one. Match the benchmark and you have shown *your* setup is right,
   which is the only thing a brand name would have been standing in for.
 
+## 3c. Worked example — HVAC room ventilation (internal, buoyant, snappyHexMesh)
+
+A complete no‑coding HVAC case: a supply diffuser blows cool air into an office,
+a return grille extracts it, and floor heat gains drive a warm thermal plume.
+You get the air **velocity** (draft risk) and **temperature** (stratification,
+comfort) fields. Uses **snappyHexMesh** — no cfMesh/HiSA needed. Internal,
+incompressible with **buoyancy** (Boussinesq) and heat.
+
+> FreeCAD models in **mm**; CfdOF exports to **metres** for OpenFOAM. So a
+> 5000 mm box is a 5 m room. Flow values (velocities, temperatures) are SI.
+> Exact dialog labels vary a little by CfdOF version — the intent is what
+> matters.
+
+### The case (office, mixing ventilation)
+
+| Item | Value |
+|---|---|
+| Room | 5 × 4 × 3 m (L×W×H) |
+| Supply diffuser | 0.4 × 0.4 m, high on one wall; **U = 1.0 m/s into the room**, **T = 289 K** (16 °C). ≈0.16 m³/s ≈ 9–10 air changes/h |
+| Return grille | 0.4 × 0.4 m, high on the opposite wall; **pressure outlet, 0 Pa** |
+| Floor | no‑slip wall, **fixed T = 300 K** (27 °C) — stands in for occupant/solar gains |
+| Other walls + ceiling | no‑slip wall, **adiabatic** (zero heat flux) |
+| Air (Boussinesq) | ρ = 1.2, ν = 1.5e‑5 m²/s, Pr = 0.71, Prt = 0.85, β = 3.4e‑3 1/K, T_ref = 293 K, Cp = 1005 |
+| Gravity | (0, 0, −9.81) |
+| Turbulence / time | k‑ω SST, **steady** |
+| Solver (auto) | `buoyantBoussinesqSimpleFoam` |
+
+### 1. Geometry (Part workbench, in mm)
+
+Build the **air volume** as one solid — the room plus two little nozzle stubs
+whose outer faces become the diffuser and grille:
+
+1. `Part → Primitives → Box` **Room**: Length 5000, Width 4000, Height 3000, at
+   (0, 0, 0).
+2. Box **Supply**: 200 × 400 × 400 at placement (−200, 1800, 2400) — it abuts
+   the x = 0 wall, centred in width, up near the ceiling. Its −x face is the
+   diffuser.
+3. Box **Return**: 200 × 400 × 400 at (5000, 1800, 2400) — abuts the x = 5000
+   wall. Its +x face is the grille.
+4. Select all three → `Part → Boolean → Union`. One solid "Fusion" = the air
+   domain with two stubs. (If a stub ends up fully inside/outside, nudge its x
+   so it just overlaps the wall plane.)
+
+### 2. CfdOF set‑up (all dialogs, no files)
+
+5. Switch to **CfdOF** → **Analysis container** (select the Fusion first).
+6. **Physics model**: *Steady*; Flow *Incompressible*; **turn on Heat transfer
+   / Energy**; **turn on Gravity** (0, 0, −9.81) → this makes it buoyant
+   (Boussinesq); Turbulence **k‑ω SST**.
+7. **Fluid properties** (Air, from the table): density 1.2, kinematic viscosity
+   1.5e‑5, thermal expansion 3.4e‑3, reference T 293, Prandtl 0.71 (turbulent
+   0.85), Cp 1005.
+8. **Mesh** (select the Fusion → *CFD mesh*): **Mesher = snappyHexMesh**; *Base
+   element size* **100 mm**; internal flow (mesh the inside). Add a **Mesh
+   refinement**: select the two stub end faces and the floor → relative size
+   ~0.5 (finer there); add **boundary layers** (2–3 layers) on the walls.
+   **Write mesh** → **Run mesher**. Expect ~0.1–0.4 M cells; check *Check mesh*.
+9. **Boundary conditions** (CfdOF *Fluid boundary*, one each — select the faces
+   in the 3D view, then set the type):
+   - **Supply** (the −x stub face): *Velocity inlet*, U = (1, 0, 0) m/s;
+     Thermal → *fixed temperature* 289 K.
+   - **Return** (the +x stub face): *Pressure outlet*, 0 Pa; Thermal *outflow /
+     zero gradient*.
+   - **Floor** (room z = 0 face): *Wall*, no‑slip; Thermal *fixed temperature*
+     300 K.
+   - **Walls** (every other face — the 3 remaining room walls, ceiling and the
+     stub sides): *Wall*, no‑slip; Thermal *adiabatic* (zero heat flux).
+10. **Initialise** the internal field: U ≈ 0, T = 293 K, p = 0 (CfdOF fills k, ω
+    from a turbulence‑intensity guess — leave the defaults).
+
+### 3. Run and read it
+
+11. **Run** → CfdOF runs `buoyantBoussinesqSimpleFoam` and plots residuals. Let
+    Ux/Uy/Uz, p, T, k, ω fall a few orders and a monitor settle (≈500–2000
+    iterations; a few minutes). Buoyant runs like strong under‑relaxation —
+    CfdOF's defaults are fine; if it wobbles, lower the momentum relaxation a
+    touch.
+12. **ParaView** button → open the case. Useful views:
+    - **Slice** at y = 2.0 m (mid‑room): colour by **T** (stratification,
+      comfort band ~295–299 K / 22–26 °C) and by **U magnitude** (occupied zone
+      0.1–1.8 m should stay **< ~0.25 m/s** or it feels draughty).
+    - **Streamlines** from the supply face: does fresh air reach the occupied
+      zone, or **short‑circuit** straight to the return? (A classic HVAC check.)
+    - **Glyphs** (vectors) to see the supply jet throw and the floor plume.
+
+### 4. Make it trustworthy (same discipline as Ansys/SimScale)
+
+- **Mesh independence**: re‑run at base 70 mm; the occupied‑zone mean T and
+  speed should move < a couple %. If they keep changing, refine more.
+- **Convergence**: residuals flat *and* the return‑grille temperature steady.
+- **Sanity**: energy in ≈ energy out — the return temperature should sit between
+  289 K (supply) and 300 K (floor); the plume should rise, not sink.
+- Once you trust it, change one thing at a time (supply angle, flow rate,
+  diffuser position) and compare — that's HVAC design by CFD.
+
+### Variations (one change each)
+
+- **Displacement ventilation**: move the supply to the floor (low, slow, cool)
+  and the return to the ceiling — compare stratification.
+- **A person/equipment hot box**: model a small box on the floor, `Part →
+  Boolean → Cut` it from the air, and set its faces to a *fixed temperature*
+  (e.g. 308 K) — a localised plume instead of a warm floor.
+- **Transient**: switch Physics to *Transient* for how fast the room reaches
+  steady comfort after start‑up (uses `buoyantBoussinesqPimpleFoam`).
+
 ## 4. Feeding CFD results back into DynFrame
 
 CFD gives you **pressure coefficients** on the real geometry; DynFrame turns

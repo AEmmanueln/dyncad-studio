@@ -311,6 +311,27 @@ whose outer faces become the diffuser and grille:
 - **Transient**: switch Physics to *Transient* for how fast the room reaches
   steady comfort after start‑up (uses `buoyantBoussinesqPimpleFoam`).
 
+## 3d. Troubleshooting (blueCFD on Windows)
+
+- **"Trying to use the dummy Pstream library… cannot be used in parallel mode",
+  `mpiexec.exe … path not found`** → blueCFD's OpenFOAM is built **without MPI**,
+  so it can only run **serial**. In the **Analysis control** panel untick
+  **"Solve in Parallel"** (1 core) → **Write** → **Run**. This clears every
+  FOAM FATAL ERROR of that kind.
+- **"No part of the boundary 'wall' matched any part of the geometry … being
+  meshed"** → that boundary has **no faces** (it points at the wrong solid, or
+  its face list is stale). Keep **one** analysis, **one** mesh on **one** solid;
+  double‑click each boundary, clear it, and re‑select the correct faces so
+  **every** face of the meshed solid belongs to exactly one boundary.
+- **Two `CfdAnalysis` / two meshes / stray geometry in the tree** → delete the
+  extras; a tangled tree is the usual cause of the boundary mismatch above.
+- **"Placement selection error" / a tilted, wrong‑shaped mesh** → the solid got
+  mis‑placed or rotated. Rebuild it **axis‑aligned at the origin** (no
+  rotation), then add the stubs.
+- **First run strategy**: prove the pipeline with an **isothermal incompressible**
+  run (no heat/buoyancy) first; once it completes, enable Heat transfer +
+  Gravity for the thermal/HVAC result.
+
 ## 4. Feeding CFD results back into DynFrame
 
 CFD gives you **pressure coefficients** on the real geometry; DynFrame turns

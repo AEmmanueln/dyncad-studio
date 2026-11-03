@@ -373,5 +373,117 @@ structural model hides exactly the modelling decisions an engineer must own.)
   or you need the flow field →** OpenFOAM + CfdOF, then bring c_p back into
   DynFrame as above.
 
+---
+
+## 7. Advanced physics — adapt an OpenFOAM‑12 tutorial (no dictionary writing)
+
+CfdOF's GUI stops at flow + heat. For the advanced solvers (conjugate heat
+transfer, combustion, multiphase, species) the reliable *no‑code* route is to
+**reuse OpenFOAM's own validated tutorial** for that physics and change only a
+few parameters — you never write a case from scratch.
+
+**Important — OpenFOAM 12 (your blueCFD) reorganised solvers into modules run by
+`foamRun` / `foamMultiRun`, and moved the tutorials.** So don't trust a fixed
+path: locate the case on *your* machine first. Open the blueCFD terminal (Start
+menu → *blueCFD‑Core‑2024* → the mingw terminal, or run
+`blueCFD‑Core_MSys2_mingw64.bat`) and:
+
+```
+echo $FOAM_TUTORIALS
+find $FOAM_TUTORIALS -maxdepth 2 -type d        # browse what's there
+```
+
+General loop for every recipe below:
+
+1. `find` the tutorial (commands given per physics).
+2. `cp -r <tutorialDir> ~/myCase && cd ~/myCase`.
+3. Change the handful of parameters listed (geometry, BCs, materials).
+4. **Run serial** (blueCFD has no MPI): run the case's `./Allrun`, or the solver
+   directly — `blockMesh` then `foamRun` (or `foamMultiRun` for multi‑region).
+   If an `Allrun` tries MPI, run the solver without `mpirun`.
+5. `paraFoam` or open `*.foam` in ParaView.
+
+These are **starting points to run and debug together** — if one fails on the
+first run, send me the error and we fix it, exactly like the HVAC case.
+
+### 7a. Conjugate heat transfer — flow + insulation + air (the CFD version of the Thermal Bridge tool)
+
+```
+find $FOAM_TUTORIALS -type d \( -iname "*ultiRegion*" -o -iname "*CHT*" \
+     -o -iname "*fluidSolid*" -o -iname "*heatExchanger*" \)
+```
+Pick a fluid+solid case (OF‑12 runs it with `foamMultiRun`; the solid is a
+`solid` region, the air a `fluid` region). Change:
+- **Solid conductivity** — each solid region's `constant/<region>/physicalProperties`
+  (or `thermophysicalProperties`): set `kappa`/conductivity to your material
+  (concrete 1.7, mineral wool 0.035, steel 50…).
+- **Fluid** — inlet velocity + temperature in `0/<fluidRegion>/U`, `T`; outlet
+  pressure.
+- **Interface** stays `coupled` (don't touch the mapped patches).
+- **Geometry** — the region meshes (keep the tutorial's to learn; replace via
+  snappyHexMesh for your own shape).
+Run `foamMultiRun` (serial). In ParaView: temperature across air **and** solid,
+and the heat flux at the wall surfaces — the full conjugate result the DynFrame
+2D tool approximates without the air side.
+
+### 7b. Combustion / fire
+
+```
+find $FOAM_TUTORIALS -type d \( -iname "*combustion*" -o -iname "*reacting*" \
+     -o -iname "*multicomponent*" -o -iname "*flame*" -o -iname "*fire*" \)
+```
+Non‑premixed combustion in OF‑12 is the `multicomponentFluid` solver (was
+`reactingFoam`); premixed is `XiFluid`. **Keep the tutorial's chemistry and
+thermo files** (`constant/reactions`, `thermo.*`, `combustionProperties`) — that
+is the hard, validated part. Change only:
+- **Inlets** — fuel and oxidiser species mass fractions and velocities/temperature
+  in `0/` (e.g. `Y`, `U`, `T`).
+- **Ignition** — an initial hot kernel via `system/setFieldsDict` (a high `T`
+  region) so it lights.
+- **Geometry** — `blockMeshDict` / your STL.
+Honest warning: combustion is the touchiest to converge — start from the
+tutorial unchanged, confirm it runs, then change one thing at a time. View
+temperature, the species (fuel, O₂, CO₂) and heat‑release rate. (For **building
+smoke/egress** specifically, NIST **FDS + PyroSim** is the better, purpose‑built
+tool — say the word and I'll give an FDS starter instead.)
+
+### 7c. Multiphase — water (rain, flooding, a tank/sloshing)
+
+```
+find $FOAM_TUTORIALS -type d \( -iname "*damBreak*" -o -iname "*interFoam*" \
+     -o -iname "*VoF*" -o -iname "*VOF*" \)
+```
+Free‑surface water is the `incompressibleVoF` solver (was `interFoam`); the
+`damBreak` case is the classic. Change:
+- **Geometry** — `system/blockMeshDict` (your tank/room/channel).
+- **Initial water** — `system/setFieldsDict` (the water block); run `setFields`
+  before the solver.
+- **Fluids** — `constant/physicalProperties`: the two phases (water/air) with
+  `nu`, `rho`, and surface tension `sigma`.
+- **Gravity** `constant/g`, and `endTime`/write interval in `controlDict`.
+Run `blockMesh` → `setFields` → `foamRun` (serial). In ParaView colour by
+**`alpha.water`** (the water fraction = the free surface) and velocity.
+
+### 7d. Species / contaminant dispersion (indoor air quality, CO₂, age‑of‑air)
+
+```
+find $FOAM_TUTORIALS -type d -iname "*scalarTransport*"
+```
+Transport a passive scalar (contaminant/CO₂) in a flow field. Two ways:
+- **On your HVAC run**: add a `scalarTransport` fvModel / function to the
+  ventilation case so a tracer is advected and diffused by the already‑solved
+  air flow — no second solver.
+- **Standalone**: solve the flow first (`incompressibleFluid`), then transport
+  the scalar in that `U` field.
+Change: the scalar's **diffusivity** `D`, a **source** (a patch or volume
+emitting the contaminant — e.g. a person/CO₂ source), inlet scalar = 0. View the
+concentration field — does fresh air dilute the source, or does it pool / escape
+straight to the return (short‑circuiting)? This is quantitative IAQ.
+
+---
+
 *This file is guidance, not a solver. DynFrame does not install or run
-OpenFOAM for you; CfdOF (via the FreeCAD Addon Manager) does.*
+OpenFOAM for you; CfdOF (via the FreeCAD Addon Manager) does. The section‑7
+recipes reuse OpenFOAM 12's own validated tutorial cases — confirm the exact
+folder and solver names on your install with the `find` commands, since the
+Foundation reorganised them for the `foamRun` modular architecture.*

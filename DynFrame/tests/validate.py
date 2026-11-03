@@ -1501,4 +1501,46 @@ print("  concrete penetration depth=%.4f m (known ~0.155)"%delta)
 assert abs(delta-0.1547)<0.003
 print("dynamic thermal OK")
 
+print("\n=== Fire resistance: transient conduction vs erf, ISO 834 curve ===")
+import math as _mf
+# ISO 834 standard fire gas temperature
+assert abs(C._iso834(30)-842)<2 and abs(C._iso834(60)-945)<3 and abs(C._iso834(0)-20)<1e-9
+print("  ISO834: 30min=%.0f C, 60min=%.0f C (expect ~842, ~945)"
+      %(C._iso834(30),C._iso834(60)))
+# transient conduction vs the semi-infinite erf solution: a deep concrete strip
+# with its face held at 500 C; interior at 50 mm after 1 h should match erf
+nx=101; ny=2; Lx=0.5; Ly=0.02
+xs=[Lx*i/(nx-1) for i in range(nx)]; ys=[0.0,Ly]
+_nid=lambda ix,iy: iy*nx+ix
+nds=[(xs[ix],ys[iy]) for iy in range(ny) for ix in range(nx)]
+kc=2.0; rhoc=2300.0; cpc=1000.0
+trisF=[]; ktriF=[]; capF=[0.0]*len(nds)
+for ix in range(nx-1):
+    a=_nid(ix,0); b=_nid(ix+1,0); c=_nid(ix+1,1); d=_nid(ix,1)
+    for tri in ((a,b,c),(a,c,d)):
+        _Ke,A=C._cond_tri([nds[i] for i in tri],kc)
+        trisF.append(tri); ktriF.append(kc)
+        for nn in tri: capF[nn]+=rhoc*cpc*A/3.0
+fixedF=set(_nid(0,iy) for iy in range(ny))         # face held at 500 C
+mon=_nid(10,0)                                      # x=0.05 m (dx=0.005)
+Tf,hist=C._transient_conduction(nds,trisF,ktriF,capF,fixedF,lambda t:500.0,
+                                20.0,5.0,720,[mon,_nid(nx-1,0)])
+Tmid=hist[-1][1][0]; Tfar=hist[-1][1][1]
+eta=0.05/(2*_mf.sqrt((kc/(rhoc*cpc))*3600.0)); Tex=500+(20-500)*_mf.erf(eta)
+print("  T at 50mm after 1h = %.1f C   erf exact = %.1f C   (far end %.0f C ~ ambient)"
+      %(Tmid,Tex,Tfar))
+assert abs(Tmid-Tex)/Tex<0.06 and Tfar<40.0, (Tmid,Tex,Tfar)
+# command end-to-end: a concrete column in the standard fire
+dFR=Doc(); FreeCAD.ActiveDocument=dFR
+C.form_dialog=lambda title,fields:{"mat":"Reinforced concrete","w":300.0,"h":300.0,
+  "exp":"All 4 sides (column)","cover":35.0,"dur":30.0,"dt":15.0,"ndiv":20}
+gFR={}; C.info=lambda m,g=gFR: g.setdefault("msg",m)
+C.FireThermal().Activated()
+ft=dFR.getObject("FireThermal")
+assert ft is not None and ft._cells.get("A1","").startswith("FIRE RESISTANCE")
+fm=[o for o in dFR.Objects if str(getattr(o,"DiagKind",""))=="_thermal"]
+assert len(fm)>=2 and "cover" in gFR["msg"].lower(), (len(fm),gFR["msg"][:60])
+print("  command: %s"%gFR["msg"].split(chr(10))[0])
+print("fire resistance OK")
+
 print("\nALL RUNTIME CHECKS PASSED")

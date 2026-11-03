@@ -212,6 +212,18 @@ spreadsheets at the root.
   insulation the 2D solver reproduces the 1D U‑value to the digit; a steel stud
   through 140 mm mineral wool raises U from 0.23 to 0.60 W/m²K and drops f_Rsi
   from 0.97 to 0.57 — a severe bridge, as expected.)
+- **Fire Resistance (transient thermal)** — **transient 2D heat‑conduction FE**
+  of a section in the **standard fire** (ISO 834 / EN 1991‑1‑2): the gas
+  temperature 20 + 345·log₁₀(8t+1) drives the exposed faces and the temperature
+  field is time‑stepped (implicit backward‑Euler with a lumped heat‑capacity
+  matrix). Reports the **temperature at the reinforcement cover depth and the
+  core over time** (for fire‑rating / reduced‑capacity checks — steel loses
+  ~50 % strength by ~550 °C). Pick the section, material, exposure (4 sides /
+  3 sides / underside / one face), cover and duration; results go to the
+  `FireThermal` table with a temperature contour. (Validated: the transient
+  solver matches the semi‑infinite `erf` solution to the digit — 273 °C at
+  50 mm after 1 h of a 500 °C face — and the ISO 834 curve gives 842 °C at
+  30 min, 945 °C at 60 min.)
 - **Steel Code Check (EC3)** — a full EN 1993-1-1 member verification, the
   way Robot does it: each member is **classified** (Class 1–4) from its own
   flange/web slenderness under the actual axial force and moment; the bending

@@ -2979,6 +2979,52 @@ def _run_conduction(nodes, tris, ktri, robin):
     return np.linalg.solve(K, F)
 
 
+def _iso834(t_min):
+    """Standard fire (ISO 834 / EN 1991-1-2) gas temperature (deg C) at time
+    t minutes: 20 + 345 log10(8t+1). ~842 C at 30 min, ~945 C at 60 min."""
+    import math
+    return 20.0 + 345.0 * math.log10(8.0 * max(0.0, t_min) + 1.0)
+
+
+def _transient_conduction(nodes, tris, ktri, cap, fixed, Tfunc, T0, dt, nsteps,
+                          monitors):
+    """Transient 2-D heat conduction by implicit (backward-Euler) time stepping:
+    (C/dt + K) T^{n+1} = C/dt T^n, with the exposed/`fixed` nodes driven to
+    Tfunc(t) (e.g. the fire curve). cap = lumped nodal heat capacity (rho cp
+    A/3). Returns (final nodal T, history [(t, [T at monitors]) ...])."""
+    import numpy as np
+    n = len(nodes)
+    K = np.zeros((n, n))
+    for t, tri in enumerate(tris):
+        Ke, _A = _cond_tri([nodes[i] for i in tri], ktri[t])
+        for a in range(3):
+            for b in range(3):
+                K[tri[a], tri[b]] += Ke[a, b]
+    C = np.asarray(cap, float)
+    free = [i for i in range(n) if i not in fixed]
+    fx = sorted(fixed)
+    Amat = K.copy()
+    for i in range(n):
+        Amat[i, i] += C[i] / dt
+    Aff_inv = np.linalg.inv(Amat[np.ix_(free, free)])
+    Afe = Amat[np.ix_(free, fx)] if fx else None
+    T = np.full(n, float(T0))
+    Cf = C[free]
+    hist = [(0.0, [float(T[m]) for m in monitors])]
+    for s in range(nsteps):
+        tnow = (s + 1) * dt
+        rhs = Cf * T[free] / dt
+        if fx:
+            Te = np.full(len(fx), Tfunc(tnow))
+            rhs = rhs - Afe @ Te
+        T[free] = Aff_inv @ rhs
+        if fx:
+            for i in fx:
+                T[i] = Tfunc(tnow)
+        hist.append((tnow, [float(T[m]) for m in monitors]))
+    return T, hist
+
+
 def _sat_vapour_pressure(theta):
     """Saturation water-vapour pressure (Pa) at temperature theta (deg C), per
     EN ISO 13788 (separate fits above/below 0 C). p_sat(0)=610.5, p_sat(20)~2337."""
@@ -5424,7 +5470,7 @@ class ClearAnalysis:
                       "PlateForces", "PlateReinforcement", "PlateSteel",
                       "PunchingShear", "MovingEnvelope", "ResponseHistory",
                       "StoreyDrift", "GMSpectrum", "WallThermal",
-                      "ThermalBridge")
+                      "ThermalBridge", "FireThermal")
         all_sheets = res_sheets + ("LoadCases", "Combinations", "AnalysisResults")
         to_del = []
         for o in list(doc.Objects):
@@ -6548,6 +6594,167 @@ class ThermalBridge2D:
             ob = doc.addObject("Part::Feature", "ThermMap_b%d" % b)
             ob.Shape = Part.makeCompound(fs)
             ob.Label = "Temperature (C)"
+            _set(ob, "App::PropertyString", "DiagKind", "_thermal")
+            _set(ob, "App::PropertyFloat", "CompMax", float(Tmax))
+            _set(ob, "App::PropertyFloat", "CompMin", float(Tmin))
+            col = _ramp((b + 0.5) / NB)
+            try:
+                ob.ViewObject.ShapeColor = col; ob.ViewObject.LineColor = col
+            except Exception:
+                pass
+            grp.addObject(ob)
+
+
+class FireThermal:
+    _EXPOSURE = {"All 4 sides (column)": "all", "3 sides (beam soffit+webs)": "three",
+                 "Underside only (slab/floor)": "bottom", "One face (wall)": "one"}
+
+    def GetResources(self):
+        return {"Pixmap": _icon("fire"), "MenuText": "Fire Resistance (transient)",
+                "ToolTip": "Transient 2-D heat conduction through a section exposed "
+                           "to the standard fire (ISO 834 / EN 1991-1-2): the "
+                           "temperature field over time, with the temperature at the "
+                           "reinforcement cover depth - for fire-rating / reduced-"
+                           "capacity checks.", "Accel": "A, F"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        import numpy as np
+        doc = FreeCAD.ActiveDocument
+        mats = list(THERMAL_MATERIALS.keys())
+        vals = form_dialog("Fire Resistance (transient thermal)", [
+            {"key": "_i", "kind": "info", "default":
+             "2-D transient conduction in a rectangular section exposed to the "
+             "standard fire (ISO 834). The exposed faces follow the fire gas "
+             "temperature; reports the temperature at the cover depth and the "
+             "core over time. (Surface = gas temperature, i.e. conservative.)"},
+            {"key": "mat", "label": "Section material", "kind": "combo",
+             "options": mats, "default": "Reinforced concrete"},
+            {"key": "w", "label": "Section width (mm)", "kind": "float", "default": 300.0},
+            {"key": "h", "label": "Section depth (mm)", "kind": "float", "default": 300.0},
+            {"key": "exp", "label": "Fire exposure", "kind": "combo",
+             "options": list(self._EXPOSURE.keys()), "default": "All 4 sides (column)"},
+            {"key": "cover", "label": "Reinforcement cover (mm)", "kind": "float",
+             "default": 35.0},
+            {"key": "dur", "label": "Fire duration (min)", "kind": "float", "default": 60.0},
+            {"key": "dt", "label": "Time step (s)", "kind": "float", "default": 15.0},
+            {"key": "ndiv", "label": "Mesh divisions (each way)", "kind": "int",
+             "default": 30, "min": 6, "max": 120},
+        ])
+        if not vals:
+            return
+        k, _mu, _fR, rho, cp = _thermal_mat(vals["mat"])
+        W = float(vals["w"]) / 1000.0; H = float(vals["h"]) / 1000.0
+        cover = float(vals["cover"]) / 1000.0
+        dur = max(1.0, float(vals["dur"])); dt = max(1.0, float(vals["dt"]))
+        nd = max(6, int(vals["ndiv"]))
+        exposure = self._EXPOSURE.get(vals["exp"], "all")
+        nx = nd + 1; ny = max(6, int(nd * H / W)) + 1 if W > 1e-9 else nd + 1
+        xs = [W * i / (nx - 1) for i in range(nx)]
+        ys = [H * j / (ny - 1) for j in range(ny)]
+
+        def nid(ix, iy):
+            return iy * nx + ix
+        nodes = [(xs[ix], ys[iy]) for iy in range(ny) for ix in range(nx)]
+        tris = []; ktri = []; cap = [0.0] * len(nodes)
+        for iy in range(ny - 1):
+            for ix in range(nx - 1):
+                a = nid(ix, iy); b = nid(ix + 1, iy)
+                c = nid(ix + 1, iy + 1); d = nid(ix, iy + 1)
+                for tri in ((a, b, c), (a, c, d)):
+                    _Ke, A = _cond_tri([nodes[i] for i in tri], k)
+                    tris.append(tri); ktri.append(k)
+                    for nn in tri:
+                        cap[nn] += rho * cp * A / 3.0        # lumped heat capacity
+        # exposed (fire-driven) boundary nodes
+        fixed = set()
+        for ix in range(nx):
+            for iy in range(ny):
+                left = ix == 0; right = ix == nx - 1
+                bot = iy == 0; top = iy == ny - 1
+                if exposure == "all" and (left or right or bot or top):
+                    fixed.add(nid(ix, iy))
+                elif exposure == "three" and (left or right or bot):
+                    fixed.add(nid(ix, iy))
+                elif exposure == "bottom" and bot:
+                    fixed.add(nid(ix, iy))
+                elif exposure == "one" and bot:
+                    fixed.add(nid(ix, iy))
+        # monitor nodes: cover depth from the (bottom) fire face, and the centre
+        iy_cov = min(range(ny), key=lambda j: abs(ys[j] - cover))
+        mon_cov = nid(nx // 2, iy_cov)
+        mon_core = nid(nx // 2, ny // 2)
+        nsteps = int(round(dur * 60.0 / dt))
+        Tf, hist = _transient_conduction(nodes, tris, ktri, cap, fixed,
+                                         lambda t: _iso834(t / 60.0), 20.0, dt,
+                                         nsteps, [mon_cov, mon_core])
+        Tcov = hist[-1][1][0]; Tcore = hist[-1][1][1]
+        # time for the cover depth to pass 500 C (steel critical temperature)
+        t500 = None
+        for (t, mv) in hist:
+            if mv[0] >= 500.0:
+                t500 = t / 60.0; break
+        doc.openTransaction("DynFrame: fire thermal")
+        self._contour(doc, nodes, tris, Tf)
+        try:
+            sh = doc.getObject("FireThermal") or \
+                doc.addObject("Spreadsheet::Sheet", "FireThermal")
+            sh.Label = "FireThermal"; sh.clearAll()
+            sh.set("A1", "FIRE RESISTANCE (ISO 834) - %s %gx%g mm, %s, %g min" %
+                   (vals["mat"], vals["w"], vals["h"], vals["exp"], dur))
+            sh.set("A2", "t (min)"); sh.set("B2", "fire gas T (C)")
+            sh.set("C2", "T at cover %.0f mm (C)" % (cover * 1000))
+            sh.set("D2", "T core (C)")
+            step = max(1, len(hist) // 60); r = 3
+            for (t, mv) in hist[::step]:
+                sh.set("A%d" % r, "%.1f" % (t / 60.0))
+                sh.set("B%d" % r, "%.0f" % _iso834(t / 60.0))
+                sh.set("C%d" % r, "%.0f" % mv[0]); sh.set("D%d" % r, "%.0f" % mv[1])
+                r += 1
+            _grp(doc, RES_GROUP).addObject(sh)
+            doc.commitTransaction(); doc.recompute()
+        except Exception as e:
+            doc.abortTransaction(); err("Fire thermal failed: %s" % e); return
+        try:
+            FreeCADGui.SendMsgToActiveView("ViewFit")
+        except Exception:
+            pass
+        info("Fire resistance (ISO 834 standard fire) - %s %gx%g mm, %s.\n\n"
+             "After %g min: fire gas %.0f C; temperature at the %.0f mm cover = "
+             "%.0f C; section core = %.0f C.\n%s\n\nShowing the temperature field; "
+             "see the 'FireThermal' table for the time history. (Steel loses ~50%% "
+             "strength by ~550 C; concrete spalls/weakens above ~400-500 C.)" %
+             (vals["mat"], vals["w"], vals["h"], vals["exp"], dur,
+              _iso834(dur), cover * 1000, Tcov, Tcore,
+              ("Reinforcement reached 500 C at ~%.0f min." % t500) if t500
+              else "Reinforcement stayed below 500 C."))
+
+    def _contour(self, doc, nodes, tris, T):
+        for o in list(doc.Objects):
+            if o.Name.startswith("FireMap"):
+                try:
+                    doc.removeObject(o.Name)
+                except Exception:
+                    pass
+        Tmin = min(T); Tmax = max(T); span = (Tmax - Tmin) or 1.0; NB = 16
+        bands = [[] for _ in range(NB)]
+        for t, tri in enumerate(tris):
+            try:
+                pts = [FreeCAD.Vector(nodes[i][0] * 1000.0, nodes[i][1] * 1000.0, 0.0)
+                       for i in tri]
+                f = Part.Face(Part.makePolygon(pts + [pts[0]]))
+            except Exception:
+                continue
+            tav = (T[tri[0]] + T[tri[1]] + T[tri[2]]) / 3.0
+            bands[min(NB - 1, max(0, int((tav - Tmin) / span * NB)))].append(f)
+        grp = _grp(doc, DIA_GROUP)
+        for b, fs in enumerate(bands):
+            if not fs:
+                continue
+            ob = doc.addObject("Part::Feature", "FireMap_b%d" % b)
+            ob.Shape = Part.makeCompound(fs); ob.Label = "Fire temperature (C)"
             _set(ob, "App::PropertyString", "DiagKind", "_thermal")
             _set(ob, "App::PropertyFloat", "CompMax", float(Tmax))
             _set(ob, "App::PropertyFloat", "CompMin", float(Tmin))
@@ -9215,6 +9422,7 @@ _add("DynFrame_PlateReinfEC2", PlateReinfEC2)
 _add("DynFrame_PunchingEC2", PunchingEC2)
 _add("DynFrame_WallThermal", WallThermal)
 _add("DynFrame_ThermalBridge2D", ThermalBridge2D)
+_add("DynFrame_FireThermal", FireThermal)
 _add("DynFrame_RunAnalysis", RunAnalysis)
 _add("DynFrame_ModalAnalysis", ModalAnalysis)
 _add("DynFrame_BucklingAnalysis", BucklingAnalysis)

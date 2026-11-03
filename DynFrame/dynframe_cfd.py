@@ -336,11 +336,17 @@ def build_view_script(opts):
 def wsl_run_argv(script, distro=DEFAULT_DISTRO, login=True):
     """argv for subprocess to run a bash script inside WSL. The script is passed
     base64-encoded to sidestep every quoting pitfall of nesting a multi-line
-    script inside `wsl.exe bash -c "..."`."""
+    script inside `wsl.exe bash -c "..."`. A blank/None distro omits `-d` so WSL
+    uses the user's DEFAULT distribution (avoids WSL_E_DISTRO_NOT_FOUND when the
+    distro isn't literally named 'Ubuntu')."""
     b64 = base64.b64encode(script.encode("utf-8")).decode("ascii")
     inner = "echo %s | base64 -d | bash" % b64
     flags = "-lc" if login else "-c"
-    return ["wsl.exe", "-d", distro, "bash", flags, inner]
+    argv = ["wsl.exe"]
+    if distro:
+        argv += ["-d", distro]
+    argv += ["bash", flags, inner]
+    return argv
 
 
 def decode_wsl_argv(argv):

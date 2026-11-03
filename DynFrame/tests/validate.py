@@ -1581,7 +1581,12 @@ assert "foamToVTK -region" in vw and "constant/*/polyMesh" in vw
 assert "/mnt/c/Users/T/dynframe_cfd/cht1" in vw
 # wsl argv round-trips (base64 wrapping)
 assert CF.decode_wsl_argv(CF.wsl_run_argv(sc)) == sc
-print("  case + view scripts and WSL invocation OK")
+_a1 = CF.wsl_run_argv(sc, distro="Ubuntu")
+assert _a1[:4] == ["wsl.exe", "-d", "Ubuntu", "bash"]
+_a0 = CF.wsl_run_argv(sc, distro="")        # blank -> default distro (no -d)
+assert _a0[:2] == ["wsl.exe", "bash"] and "-d" not in _a0
+assert CF.decode_wsl_argv(_a0) == sc
+print("  case + view scripts and WSL invocation OK (blank distro -> default)")
 # command end-to-end under the mock: writes scripts, records the CFD sheet
 import tempfile as _tf
 _tmp = _tf.mkdtemp()

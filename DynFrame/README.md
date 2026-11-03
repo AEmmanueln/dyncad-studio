@@ -224,6 +224,24 @@ spreadsheets at the root.
   solver matches the semi‑infinite `erf` solution to the digit — 273 °C at
   50 mm after 1 h of a 500 °C face — and the ISO 834 curve gives 842 °C at
   30 min, 945 °C at 60 min.)
+- **CFD Case / CFD View (OpenFOAM)** — drive real CFD from FreeCAD. **SimScale's
+  CFD _is_ OpenFOAM**, so for the same case you get the same results on the free
+  engine. **CFD Case** lets you pick any of OpenFOAM 14's **20 solver modules**
+  (incompressible flow, compressible/buoyant `fluid` for HVAC, conjugate heat
+  transfer `multiRegion`, VOF free surface, Euler–Euler + boiling,
+  reacting/combustion `multicomponentFluid`, premixed `XiFluid`, dense
+  particles, drift-flux, films, shocks, solid stress, moving mesh, meshing) —
+  **well beyond the flow+heat CfdOF exposes**. DynFrame copies OpenFOAM's own
+  validated tutorial for that physics, sets your run controls and inlet via the
+  native `foamDictionary`, and writes ready-to-run `run_<name>.sh` /
+  `view_<name>.sh` scripts plus the one-liners to paste into your WSL OpenFOAM
+  terminal; **CFD View** converts a case's latest results to VTK (all regions)
+  and copies them to a Windows folder for ParaView. The engine is OpenFOAM and
+  the viewer is ParaView; DynFrame automates the setup/run/convert/view loop.
+  (Validated: the path translation, `foamDictionary` edits, catalog, and the
+  generated run/view scripts are checked in the test suite; the physics is
+  OpenFOAM's, run and viewed on your machine.) See **`CFD_with_OpenFOAM.md`**
+  §0 and **`OpenFOAM14_solver_catalog.md`**.
 - **Steel Code Check (EC3)** — a full EN 1993-1-1 member verification, the
   way Robot does it: each member is **classified** (Class 1–4) from its own
   flange/web slenderness under the actual axial force and moment; the bending
@@ -441,7 +459,15 @@ rely on. The checks it runs:
 > U = 0.320 W/m²K; Glaser flags wrong‑side insulation; dynamic EN ISO 13786
 > gives decrement ≈ 0.33 / lag ≈ 8 h for 300 mm concrete; the 2D thermal‑bridge
 > conduction FE reproduces the 1D U‑value exactly and a steel stud raises U
-> from 0.23 to 0.60 W/m²K). It covers **static, P-Δ, modal, buckling, seismic
+> from 0.23 to 0.60 W/m²K); and the **CFD (OpenFOAM) driver** is checked as
+> software — Windows↔WSL path translation round-trips, the native
+> `foamDictionary` edits and shell quoting are exact, the 20-module catalog is
+> complete, and the generated run script (multi-region → `foamMultiRun`, prefers
+> the tutorial `Allrun`, sets `endTime`) and view script (region-aware
+> `foamToVTK`, VTK copied to the Windows path) are asserted, with the WSL
+> invocation base64-round-tripping (the *physics* is OpenFOAM's, run and
+> validated on your machine, exactly as SimScale runs it). It covers **static,
+> P-Δ, modal, buckling, seismic
 > (response-spectrum), time-history (Newmark-β), moving-load influence,
 > plates/shells, wind, building thermal (U-value / condensation / thermal mass /
 > 2D thermal bridges) and a full EN 1993-1-1 / EN 1992-1-1 design check

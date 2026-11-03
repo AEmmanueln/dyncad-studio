@@ -1543,4 +1543,69 @@ assert len(fm)>=2 and "cover" in gFR["msg"].lower(), (len(fm),gFR["msg"][:60])
 print("  command: %s"%gFR["msg"].split(chr(10))[0])
 print("fire resistance OK")
 
+# ---------- CFD (OpenFOAM driver) ----------
+print("\n== CFD (OpenFOAM case driver) ==")
+import dynframe_cfd as CF
+# path translation both ways
+assert CF.win_to_wsl(r"C:\Users\T\dynframe_cfd\c1") == "/mnt/c/Users/T/dynframe_cfd/c1"
+assert CF.win_to_wsl(r"\\wsl.localhost\Ubuntu\home\t\cht") == "/home/t/cht"
+assert CF.wsl_to_win("/mnt/c/Users/T") == r"C:\Users\T"
+# native foamDictionary command + quoting
+assert CF.foam_set_cmd("system/controlDict", "endTime", "5") == \
+    "foamDictionary -entry 'endTime' -set '5' 'system/controlDict'"
+assert CF.shq("uniform (1 0 0)") == "'uniform (1 0 0)'"
+# control edits drop non-positive deltaT/writeInterval, keep endTime
+e = CF.control_edits({"endTime": 5.0, "deltaT": 0.0, "writeInterval": -1})
+assert e == [("system/controlDict", "endTime", "5")], e
+print("  path/dict/control helpers OK")
+# catalog spans all 20 modules incl. advanced physics CfdOF cannot do
+ids = {c["id"] for c in CF.CATALOG}
+assert {"incompressibleFluid","fluid","multiRegion","incompressibleVoF",
+        "multiphaseEuler","multicomponentFluid","XiFluid","shockFluid",
+        "incompressibleDenseParticleFluid"} <= ids, ids
+assert len(CF.CATALOG) == len({c["id"] for c in CF.CATALOG}) == 20
+print("  catalog: %d solver modules (flow, CHT, multiphase, combustion, particles)"
+      % len(CF.CATALOG))
+# CHT case script: multi-region -> foamMultiRun, sets endTime, prefers Allrun
+cht = CF.CATALOG_BY_ID["multiRegion"]
+sc = CF.build_case_script({"of_env": "/opt/openfoam14/etc/bashrc",
+    "module": cht["module"], "multiRegion": cht["multiRegion"], "solve": cht["solve"],
+    "tutorial": cht["tutorial"], "name": "cht1",
+    "edits": CF.control_edits({"endTime": 5})})
+assert ". /opt/openfoam14/etc/bashrc" in sc and "$FOAM_TUTORIALS/multiRegion/CHT" in sc
+assert "foamMultiRun" in sc and "./Allrun" in sc
+assert "foamDictionary -entry 'endTime' -set '5'" in sc
+# view script: region-aware foamToVTK, copies to the wsl-translated Windows dir
+vw = CF.build_view_script({"name": "cht1", "win_out": r"C:\Users\T\dynframe_cfd\cht1"})
+assert "foamToVTK -region" in vw and "constant/*/polyMesh" in vw
+assert "/mnt/c/Users/T/dynframe_cfd/cht1" in vw
+# wsl argv round-trips (base64 wrapping)
+assert CF.decode_wsl_argv(CF.wsl_run_argv(sc)) == sc
+print("  case + view scripts and WSL invocation OK")
+# command end-to-end under the mock: writes scripts, records the CFD sheet
+import tempfile as _tf
+_tmp = _tf.mkdtemp()
+C._cfd_outdir = lambda d=_tmp: d
+dCF = Doc(); FreeCAD.ActiveDocument = dCF
+C.form_dialog = lambda title, fields: {"phys": "Conjugate heat transfer (fluid + solid)",
+    "name": "cht1", "endTime": 5.0, "deltaT": 0.0, "writeInterval": 0.0,
+    "inletU": 0.0, "case": "", "latest": "Yes", "distro": "Ubuntu",
+    "env": "/opt/openfoam14/etc/bashrc", "run": "No"}
+gCF = {}; C.info = lambda m, g=gCF: g.setdefault("msg", m)
+C.CfdCase().Activated()
+_rp = os.path.join(_tmp, "run_cht1.sh"); _vp = os.path.join(_tmp, "view_cht1.sh")
+assert os.path.isfile(_rp) and os.path.isfile(_vp), "scripts not written"
+_rt = open(_rp, "rb").read()
+assert b"\r\n" not in _rt, "script must have LF endings for bash"
+assert b"foamMultiRun" in _rt and b"foamDictionary -entry 'endTime' -set '5'" in _rt
+sh = dCF.getObject("CFD_cht1")
+assert sh is not None and sh._cells.get("A1") == "Module"
+_b6 = sh._cells.get("B6", "")   # "1) Run (paste in WSL)" -> bash <wsl path>
+assert _b6.startswith("bash ") and _b6.endswith("run_cht1.sh"), _b6
+assert "run it" in gCF["msg"] and "ParaView" in gCF["msg"]
+print("  command wrote run/view scripts + CFD_cht1 record: %s"
+      % gCF["msg"].split(chr(10))[0])
+import shutil as _sh; _sh.rmtree(_tmp, ignore_errors=True)
+print("CFD driver OK")
+
 print("\nALL RUNTIME CHECKS PASSED")

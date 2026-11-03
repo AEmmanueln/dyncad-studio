@@ -12,6 +12,10 @@ import FreeCADGui
 import Part
 
 import dynframe_profiles as profiles
+try:
+    import dynframe_cfd as cfd            # OpenFOAM case driver (pure, testable)
+except Exception:                         # keep the workbench loading if absent
+    cfd = None
 
 from PySide import QtGui
 try:
@@ -3154,9 +3158,10 @@ DIA_GROUP = "Force Diagrams"
 STR_GROUP = "Structure"
 META_NAME = "DynFrameAnalysis"
 ROOT_GROUP = "DynFrame"          # one container for every analysis sub-group
+CFD_GROUP = "CFD"                # OpenFOAM case records live here
 # the sub-groups that live under the single DynFrame root (keeps the tree tidy)
 _SUBGROUPS = (SUP_GROUP, LOAD_GROUP, RES_GROUP, DIA_GROUP, STR_GROUP,
-              "Analysis Setup")
+              CFD_GROUP, "Analysis Setup")
 DIAG_KINDS = ["N", "Vy", "Vz", "Mx", "My", "Mz", "Stress"]
 
 
@@ -6766,6 +6771,240 @@ class FireThermal:
             grp.addObject(ob)
 
 
+# ── CFD (OpenFOAM) ───────────────────────────────────────────────
+def _cfd_outdir():
+    """Windows-visible folder where DynFrame writes the generated .sh scripts
+    and receives the VTK results for ParaView. Overridable in tests."""
+    return os.path.join(os.path.expanduser("~"), "dynframe_cfd")
+
+
+def _write_lf(path, text):
+    """Write a shell script with LF endings, so bash in WSL is happy even though
+    FreeCAD wrote it from Windows."""
+    d = os.path.dirname(path)
+    if d and not os.path.isdir(d):
+        os.makedirs(d)
+    data = (text if text.endswith("\n") else text + "\n").encode("utf-8")
+    with open(path, "wb") as fh:
+        fh.write(data.replace(b"\r\n", b"\n"))
+
+
+def _try_launch_terminal(argv):
+    """Best-effort: start a visible terminal running argv (Windows Terminal, else
+    a headless WSL process that logs to the case). Never raises; returns a short
+    status string."""
+    import subprocess
+    try:
+        subprocess.Popen(["wt.exe"] + list(argv), close_fds=True)
+        return "launched in Windows Terminal"
+    except Exception:
+        pass
+    try:
+        subprocess.Popen(list(argv), close_fds=True)
+        return "launched (headless; watch the case log)"
+    except Exception as e:
+        return "could not auto-launch (%s) - run the command yourself" % e
+
+
+def _cfd_record(doc, name, rows):
+    """Store the case summary + the exact WSL commands in a CFD_<name> sheet."""
+    if doc is None:
+        return
+    doc.openTransaction("DynFrame: CFD case")
+    try:
+        sh = doc.getObject("CFD_%s" % name) or \
+            doc.addObject("Spreadsheet::Sheet", "CFD_%s" % name)
+        sh.Label = "CFD_%s" % name
+        sh.clearAll()
+        for i, (a, b) in enumerate(rows, start=1):
+            sh.set("A%d" % i, str(a))
+            sh.set("B%d" % i, str(b))
+        _grp(doc, CFD_GROUP).addObject(sh)
+        doc.commitTransaction()
+        doc.recompute()
+    except Exception:
+        try:
+            doc.abortTransaction()
+        except Exception:
+            pass
+
+
+class CfdCase:
+    def GetResources(self):
+        return {"Pixmap": _icon("cfd"), "MenuText": "CFD Case (OpenFOAM)",
+                "ToolTip": "Set up and run a CFD case on your OpenFOAM install "
+                           "(the same engine SimScale uses), from any of its 20 "
+                           "solver modules - flow, heat/CHT, multiphase, "
+                           "combustion, particles. DynFrame copies OpenFOAM's "
+                           "own validated tutorial for the chosen physics, sets "
+                           "your run controls, runs it, and converts the result "
+                           "to VTK for ParaView. Same case -> same results.",
+                "Accel": "C, F"}
+
+    def IsActive(self):
+        return cfd is not None
+
+    def Activated(self):
+        if cfd is None:
+            err("The CFD module (dynframe_cfd.py) failed to load."); return
+        titles = [c["title"] for c in cfd.CATALOG]
+        fields = [
+            {"key": "_i", "kind": "info", "default":
+             "Drive OpenFOAM - the same solver SimScale runs - from FreeCAD. "
+             "Pick a physics module; DynFrame copies OpenFOAM's validated "
+             "tutorial for it, applies your run controls, runs it on your "
+             "WSL/Linux OpenFOAM and converts the result to VTK for ParaView. "
+             "For the SAME case (mesh + BCs + model) you get the SAME results. "
+             "Changing it to your own geometry/BCs is the case-specific step "
+             "(CfdOF's mesher for flow; adapt the tutorial for advanced physics)."},
+            {"key": "phys", "label": "Physics module", "kind": "combo",
+             "options": titles, "default": titles[0]},
+            {"key": "name", "label": "Case name (folder)", "kind": "text",
+             "default": "case1"},
+            {"key": "endTime", "label": "End time", "kind": "float",
+             "default": 100.0, "decimals": 4},
+            {"key": "deltaT", "label": "Time step (0 = keep tutorial's)",
+             "kind": "float", "default": 0.0, "decimals": 6},
+            {"key": "writeInterval", "label": "Write interval (0 = keep)",
+             "kind": "float", "default": 0.0, "decimals": 4},
+            {"key": "inletU", "label": "Inlet velocity Ux m/s (0 = keep; needs an "
+             "'inlet' patch)", "kind": "float", "default": 0.0, "decimals": 4},
+            {"key": "case", "label": "Tutorial case (blank = first available)",
+             "kind": "text", "default": ""},
+            {"key": "latest", "label": "View: latest time only", "kind": "combo",
+             "options": ["Yes", "No"], "default": "Yes"},
+            {"key": "distro", "label": "WSL distro", "kind": "text",
+             "default": cfd.DEFAULT_DISTRO},
+            {"key": "env", "label": "OpenFOAM env (source)", "kind": "text",
+             "default": cfd.DEFAULT_OF_ENV},
+            {"key": "run", "label": "Try to launch the run now", "kind": "combo",
+             "options": ["No", "Yes"], "default": "No"},
+        ]
+        vals = form_dialog("CFD Case (OpenFOAM)", fields)
+        if not vals:
+            return
+        ent = next((c for c in cfd.CATALOG if c["title"] == vals["phys"]),
+                   cfd.CATALOG[0])
+        name = (str(vals.get("name") or "case1").strip().replace(" ", "_")) or "case1"
+        of_env = str(vals.get("env") or cfd.DEFAULT_OF_ENV).strip()
+        distro = str(vals.get("distro") or cfd.DEFAULT_DISTRO).strip()
+        edits = cfd.control_edits({"endTime": vals.get("endTime"),
+                                   "deltaT": vals.get("deltaT"),
+                                   "writeInterval": vals.get("writeInterval")})
+        try:
+            if float(vals.get("inletU") or 0.0) != 0.0:
+                edits.append(cfd.inlet_velocity_edit(float(vals["inletU"])))
+        except (TypeError, ValueError):
+            pass
+        case = str(vals.get("case") or "").strip() or None
+        run_script = cfd.build_case_script(
+            {"of_env": of_env, "module": ent["module"],
+             "multiRegion": ent["multiRegion"], "solve": ent["solve"],
+             "tutorial": ent["tutorial"], "case": case, "name": name,
+             "edits": edits})
+        outdir = _cfd_outdir()
+        win_out = os.path.join(outdir, name)
+        view_script = cfd.build_view_script(
+            {"of_env": of_env, "name": name, "win_out": win_out,
+             "latest": vals.get("latest", "Yes") == "Yes"})
+        run_path = os.path.join(outdir, "run_%s.sh" % name)
+        view_path = os.path.join(outdir, "view_%s.sh" % name)
+        try:
+            _write_lf(run_path, run_script)
+            _write_lf(view_path, view_script)
+        except Exception as e:
+            err("Could not write the CFD scripts to %s:\n%s" % (outdir, e)); return
+        run_cmd = "bash %s" % cfd.win_to_wsl(run_path, distro)
+        view_cmd = "bash %s" % cfd.win_to_wsl(view_path, distro)
+        _cfd_record(FreeCAD.ActiveDocument, name, [
+            ("Module", ent["title"]), ("Solver", ent["module"] or "(mesh only)"),
+            ("Tutorial", ent["tutorial"]), ("Case name", name),
+            ("Applies to", ent["use"]),
+            ("1) Run (paste in WSL)", run_cmd),
+            ("2) View (paste in WSL)", view_cmd),
+            ("Then open in ParaView", os.path.join(win_out, "VTK")),
+            ("Run script", run_path), ("View script", view_path)])
+        launch = ""
+        if vals.get("run") == "Yes":
+            launch = "\n\nAuto-run: " + _try_launch_terminal(
+                cfd.wsl_run_argv(run_script, distro))
+        info("CFD case '%s' - %s\n(engine: OpenFOAM, the same SimScale runs)\n\n"
+             "DynFrame wrote two ready scripts. In your WSL OpenFOAM terminal:\n\n"
+             "  1) run it:\n     %s\n\n"
+             "  2) convert + copy results for ParaView:\n     %s\n\n"
+             "Then open in ParaView:  %s\n\n"
+             "The case is built from OpenFOAM's own '%s' tutorial, so it runs as-"
+             "is; edit %s\\run_%s.sh (or the case's 0/ and constant/ files) to put "
+             "in your geometry's boundary conditions. The full command list is in "
+             "the 'CFD_%s' sheet.%s" %
+             (name, ent["title"], run_cmd, view_cmd,
+              os.path.join(win_out, "VTK"), ent["tutorial"], outdir, name, name,
+              launch))
+
+
+class CfdView:
+    def GetResources(self):
+        return {"Pixmap": _icon("cfd"), "MenuText": "CFD View in ParaView",
+                "ToolTip": "Convert an existing OpenFOAM case's latest results to "
+                           "VTK (all regions) and copy them to a Windows folder, "
+                           "ready to open in ParaView. Use after a run, or to "
+                           "re-export a case you set up elsewhere.",
+                "Accel": "C, V"}
+
+    def IsActive(self):
+        return cfd is not None
+
+    def Activated(self):
+        if cfd is None:
+            err("The CFD module (dynframe_cfd.py) failed to load."); return
+        fields = [
+            {"key": "_i", "kind": "info", "default":
+             "Convert an OpenFOAM case's latest results to VTK and copy them to a "
+             "Windows folder for ParaView (File > Open the VTK folder, Apply, "
+             "colour by T or U). The case must already exist under ~/dynframe_cfd "
+             "on the Linux side (that is where CFD Case builds them)."},
+            {"key": "name", "label": "Case name (folder under ~/dynframe_cfd)",
+             "kind": "text", "default": "case1"},
+            {"key": "latest", "label": "Latest time only", "kind": "combo",
+             "options": ["Yes", "No"], "default": "Yes"},
+            {"key": "distro", "label": "WSL distro", "kind": "text",
+             "default": cfd.DEFAULT_DISTRO},
+            {"key": "env", "label": "OpenFOAM env (source)", "kind": "text",
+             "default": cfd.DEFAULT_OF_ENV},
+            {"key": "run", "label": "Try to run the conversion now", "kind": "combo",
+             "options": ["No", "Yes"], "default": "No"},
+        ]
+        vals = form_dialog("CFD View in ParaView", fields)
+        if not vals:
+            return
+        name = (str(vals.get("name") or "case1").strip().replace(" ", "_")) or "case1"
+        of_env = str(vals.get("env") or cfd.DEFAULT_OF_ENV).strip()
+        distro = str(vals.get("distro") or cfd.DEFAULT_DISTRO).strip()
+        outdir = _cfd_outdir()
+        win_out = os.path.join(outdir, name)
+        view_script = cfd.build_view_script(
+            {"of_env": of_env, "name": name, "win_out": win_out,
+             "latest": vals.get("latest", "Yes") == "Yes"})
+        view_path = os.path.join(outdir, "view_%s.sh" % name)
+        try:
+            _write_lf(view_path, view_script)
+        except Exception as e:
+            err("Could not write the view script to %s:\n%s" % (outdir, e)); return
+        view_cmd = "bash %s" % cfd.win_to_wsl(view_path, distro)
+        _cfd_record(FreeCAD.ActiveDocument, name, [
+            ("Case name", name), ("View (paste in WSL)", view_cmd),
+            ("Then open in ParaView", os.path.join(win_out, "VTK")),
+            ("View script", view_path)])
+        launch = ""
+        if vals.get("run") == "Yes":
+            launch = "\n\nAuto-run: " + _try_launch_terminal(
+                cfd.wsl_run_argv(view_script, distro))
+        info("CFD view for case '%s'.\n\nIn your WSL OpenFOAM terminal:\n\n"
+             "  %s\n\nThen in ParaView: File > Open > %s > select the .vtk files > "
+             "Apply > colour by T (or U).%s" %
+             (name, view_cmd, os.path.join(win_out, "VTK"), launch))
+
+
 class Envelope:
     def GetResources(self):
         return {"Pixmap": _icon("envelope"), "MenuText": "Envelope (all combinations)",
@@ -9423,6 +9662,8 @@ _add("DynFrame_PunchingEC2", PunchingEC2)
 _add("DynFrame_WallThermal", WallThermal)
 _add("DynFrame_ThermalBridge2D", ThermalBridge2D)
 _add("DynFrame_FireThermal", FireThermal)
+_add("DynFrame_CfdCase", CfdCase)
+_add("DynFrame_CfdView", CfdView)
 _add("DynFrame_RunAnalysis", RunAnalysis)
 _add("DynFrame_ModalAnalysis", ModalAnalysis)
 _add("DynFrame_BucklingAnalysis", BucklingAnalysis)

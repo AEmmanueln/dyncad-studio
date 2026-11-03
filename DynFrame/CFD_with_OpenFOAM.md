@@ -19,6 +19,50 @@ shedding, HVAC/duct flow, etc.
 
 ---
 
+## 0. The fast path: the DynFrame **CFD Case** tool (drive OpenFOAM from FreeCAD)
+
+DynFrame now has two commands (toolbar **DynFrame · CFD**, menu **DynFrame →
+CFD (OpenFOAM)**) that turn the whole "adapt a tutorial → run → convert → view"
+workflow below into a dialog, for **any** of OpenFOAM 14's 20 solver modules —
+not just the flow+heat that CfdOF exposes:
+
+- **CFD Case (OpenFOAM)** — pick a physics module (incompressible flow,
+  compressible/buoyant HVAC `fluid`, conjugate heat transfer `multiRegion`, VOF
+  free surface, Euler–Euler + boiling, reacting/combustion, premixed `XiFluid`,
+  dense particles, drift-flux, films, shocks, solid stress, …). DynFrame copies
+  OpenFOAM's **own validated tutorial** for that physics, sets your run controls
+  (end time, time step, write interval) and an optional inlet velocity using
+  OpenFOAM's native `foamDictionary`, and writes two ready-to-run scripts.
+- **CFD View in ParaView** — converts a case's latest results to VTK
+  (auto-detecting fluid/solid regions) and copies them to a Windows folder for
+  ParaView.
+
+It writes `run_<name>.sh` and `view_<name>.sh` into `…\dynframe_cfd\` and shows
+you the exact one-liners to paste into your **WSL OpenFOAM 14** terminal:
+
+```
+bash /mnt/c/Users/<you>/dynframe_cfd/run_<name>.sh      # mesh + solve
+bash /mnt/c/Users/<you>/dynframe_cfd/view_<name>.sh     # -> VTK for ParaView
+```
+
+Then open the reported `…\dynframe_cfd\<name>\VTK` folder in ParaView and colour
+by `T` or `U`. (Tick *Try to launch the run now* to have DynFrame start it for
+you; the one-liners always work regardless.)
+
+**What this is and isn't.** The engine is OpenFOAM — the *same* engine SimScale
+runs — so for the **same case** you get the **same results**. The tool gives you
+a running, viewable case for every module in one dialog. Putting **your** CAD
+geometry and **your** boundary conditions in is the case-specific step: for
+flow+heat use CfdOF's mesher (§2–§6); for the advanced modules, start from the
+tool's tutorial case and edit its `0/` and `constant/` files (§7, and the
+`OpenFOAM14_solver_catalog.md` reference). No tool — free or paid — skips that
+step; it is what the mesh and BCs *are*.
+
+The sections below are the manual version of the same workflow, plus the CfdOF
+GUI route for flow — read them to understand what the scripts do and to debug.
+
+---
+
 ## 1. What you can and cannot expect
 
 | Capability | DynFrame | OpenFOAM + CfdOF | Ansys / SimScale |

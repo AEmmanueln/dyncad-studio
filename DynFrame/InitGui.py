@@ -69,7 +69,8 @@ class DynFrameWorkbench(FreeCADGui.Workbench):
                    "DynFrame_WallThermal", "DynFrame_ThermalBridge2D",
                    "DynFrame_FireThermal",
                    "DynFrame_ShowDiagram", "DynFrame_ClearAnalysis"]
-        analysis = panel + structure + loads + results
+        cfd = ["DynFrame_CfdCase", "DynFrame_CfdView"]
+        analysis = panel + structure + loads + results + cfd
         io = ["DynFrame_ExportStep", "DynFrame_ExportStl"]
         setup = ["DynFrame_InventorNav"]
 
@@ -82,10 +83,12 @@ class DynFrameWorkbench(FreeCADGui.Workbench):
         self.appendToolbar("DynFrame · Structure", structure)
         self.appendToolbar("DynFrame · Loads", loads)
         self.appendToolbar("DynFrame · Results", results)
+        self.appendToolbar("DynFrame · CFD", cfd)
         self.appendToolbar("DynFrame · Export", io)
         self.appendMenu(["DynFrame", "Analysis (Structure)"], structure)
         self.appendMenu(["DynFrame", "Analysis (Loads)"], loads)
         self.appendMenu(["DynFrame", "Analysis (Results)"], results)
+        self.appendMenu(["DynFrame", "CFD (OpenFOAM)"], cfd)
         self.appendMenu("DynFrame", frame + pattern + skel + model + report
                         + analysis + io + setup)
         FreeCAD.Console.PrintMessage("DynFrame workbench loaded\n")

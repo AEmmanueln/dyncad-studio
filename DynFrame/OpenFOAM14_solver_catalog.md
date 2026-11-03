@@ -9,6 +9,13 @@ change a few parameters. Nothing here needs you to write a solver.
 > `sourceOF` is broken by the space in *Program Files*. Make OF‑14 automatic:
 > `echo '. /opt/openfoam14/etc/bashrc' >> ~/.bashrc`
 
+> **Shortcut from FreeCAD:** DynFrame's **CFD Case (OpenFOAM)** command (toolbar
+> *DynFrame · CFD*) runs this whole recipe for any module below — pick the
+> physics, it copies the module's tutorial, sets your run controls with
+> `foamDictionary`, and writes `run_<name>.sh` / `view_<name>.sh` plus the
+> one-liners to paste here. See `CFD_with_OpenFOAM.md` §0. The catalog below is
+> the reference for *which* module and *what* to change.
+
 ---
 
 ## The universal recipe (identical for every module)

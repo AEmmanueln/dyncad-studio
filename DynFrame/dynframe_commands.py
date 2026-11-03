@@ -2865,39 +2865,79 @@ def _material(name):
     return MATERIALS.get(name, MATERIALS[DEFAULT_MAT])
 
 
-# Building thermal materials: name -> (lambda k [W/mK], mu vapour-resistance
-# factor [-], fixed R [m2K/W] or None). Air gaps use a fixed R (EN ISO 6946),
-# membranes use a very high mu. Used by the Wall Thermal (U-value/condensation)
-# and 2D conduction tools.
+# Building thermal materials: name -> (k [W/mK], mu vapour-resistance factor
+# [-], fixed R [m2K/W] or None, rho [kg/m3], cp [J/kgK]). k/mu/R feed the
+# U-value and condensation tools; rho/cp feed the dynamic (thermal-mass)
+# analysis. Air gaps use a fixed R (EN ISO 6946), membranes a very high mu.
 THERMAL_MATERIALS = {
-    "Concrete (dense)":      (2.00, 120, None),
-    "Concrete (lightweight)": (0.38, 60, None),
-    "Reinforced concrete":   (2.30, 130, None),
-    "Brick (fired clay)":    (0.77, 10, None),
-    "AAC block (aircrete)":  (0.15, 8, None),
-    "Natural stone":         (3.50, 150, None),
-    "EPS insulation":        (0.035, 40, None),
-    "XPS insulation":        (0.034, 100, None),
-    "Mineral wool":          (0.035, 1, None),
-    "PIR / PUR board":       (0.022, 60, None),
-    "Wood fibre board":      (0.040, 5, None),
-    "Timber (softwood)":     (0.13, 50, None),
-    "Plywood / OSB":         (0.13, 150, None),
-    "Plasterboard":          (0.25, 8, None),
-    "Gypsum plaster":        (0.57, 10, None),
-    "Cement render":         (1.00, 25, None),
-    "Lime plaster":          (0.80, 10, None),
-    "Glass":                 (1.00, 1e6, None),
-    "Steel":                 (50.0, 1e6, None),
-    "Vapour barrier (PE)":   (0.33, 100000, None),
-    "Air gap (unventilated)": (1.00, 1, 0.18),
+    "Concrete (dense)":      (2.00, 120, None, 2300, 1000),
+    "Concrete (lightweight)": (0.38, 60, None, 1200, 1000),
+    "Reinforced concrete":   (2.30, 130, None, 2400, 1000),
+    "Brick (fired clay)":    (0.77, 10, None, 1700, 1000),
+    "AAC block (aircrete)":  (0.15, 8, None, 500, 1000),
+    "Natural stone":         (3.50, 150, None, 2600, 1000),
+    "EPS insulation":        (0.035, 40, None, 20, 1450),
+    "XPS insulation":        (0.034, 100, None, 35, 1450),
+    "Mineral wool":          (0.035, 1, None, 30, 1030),
+    "PIR / PUR board":       (0.022, 60, None, 30, 1400),
+    "Wood fibre board":      (0.040, 5, None, 160, 2100),
+    "Timber (softwood)":     (0.13, 50, None, 500, 1600),
+    "Plywood / OSB":         (0.13, 150, None, 600, 1700),
+    "Plasterboard":          (0.25, 8, None, 900, 1000),
+    "Gypsum plaster":        (0.57, 10, None, 1300, 1000),
+    "Cement render":         (1.00, 25, None, 1800, 1000),
+    "Lime plaster":          (0.80, 10, None, 1600, 1000),
+    "Glass":                 (1.00, 1e6, None, 2500, 750),
+    "Steel":                 (50.0, 1e6, None, 7800, 450),
+    "Vapour barrier (PE)":   (0.33, 100000, None, 980, 1800),
+    "Air gap (unventilated)": (1.00, 1, 0.18, 1.2, 1000),
 }
 DEFAULT_THERMAL = "Mineral wool"
 
 
 def _thermal_mat(name):
-    """(k, mu, fixedR) for a thermal material name."""
+    """(k, mu, fixedR, rho, cp) for a thermal material name."""
     return THERMAL_MATERIALS.get(name, THERMAL_MATERIALS[DEFAULT_THERMAL])
+
+
+def _dynamic_thermal(layers, rsi, rse, period_s=86400.0):
+    """Dynamic (periodic) thermal response of a layered element by the
+    EN ISO 13786 heat-transfer-matrix method. layers = [(d_m, k, rho, cp), ...]
+    inside->outside. Over a daily cycle (period_s) it returns the steady U, the
+    decrement factor f (amplitude ratio dynamic/steady, 0..1 - how much a daily
+    swing is damped) and the time lag (hours - how long the peak is delayed by
+    the thermal mass). Heavy/massive walls give small f and long lag."""
+    import math, cmath
+
+    def layer_Z(d, k, rho, cp):
+        if k <= 0 or rho <= 0 or cp <= 0 or d <= 0:
+            R = (d / k) if k > 0 else 0.0
+            return [[1 + 0j, complex(-R, 0)], [0j, 1 + 0j]]
+        a = k / (rho * cp)                      # thermal diffusivity
+        delta = math.sqrt(a * period_s / math.pi)   # penetration depth
+        xi = d / delta
+        sh = math.sinh(xi); ch = math.cosh(xi); s = math.sin(xi); c = math.cos(xi)
+        Z11 = complex(ch * c, sh * s)
+        Z12 = -(delta / (2.0 * k)) * complex(sh * c + ch * s, ch * s - sh * c)
+        Z21 = -(k / delta) * complex(sh * c - ch * s, sh * c + ch * s)
+        return [[Z11, Z12], [Z21, Z11]]
+
+    def mm(A, B):
+        return [[A[0][0] * B[0][0] + A[0][1] * B[1][0],
+                 A[0][0] * B[0][1] + A[0][1] * B[1][1]],
+                [A[1][0] * B[0][0] + A[1][1] * B[1][0],
+                 A[1][0] * B[0][1] + A[1][1] * B[1][1]]]
+    Z = [[1 + 0j, complex(-rsi, 0)], [0j, 1 + 0j]]
+    for (d, k, rho, cp) in layers:
+        Z = mm(Z, layer_Z(d, k, rho, cp))
+    Z = mm(Z, [[1 + 0j, complex(-rse, 0)], [0j, 1 + 0j]])
+    Rtot = rsi + rse + sum((d / k if k > 0 else 0.0) for (d, k, _r, _c) in layers)
+    U = 1.0 / Rtot if Rtot > 1e-9 else 0.0
+    Z12 = Z[0][1]
+    Y12 = (-1.0 / Z12) if abs(Z12) > 1e-30 else 0j
+    f = abs(Y12) / U if U > 1e-9 else 0.0
+    lag_h = abs(period_s / (2.0 * math.pi) * cmath.phase(Y12)) / 3600.0
+    return {"U": U, "R": Rtot, "f": f, "lag_h": lag_h}
 
 
 def _cond_tri(p, k):
@@ -6265,21 +6305,26 @@ class WallThermal:
             nm = vals["m%d" % i]; d = float(vals["d%d" % i])
             if nm == "(none)" or d <= 0.0:
                 continue
-            k, mu, fR = _thermal_mat(nm)
+            k, mu, fR = _thermal_mat(nm)[:3]
             layers.append((nm, d, k, mu, fR))
         if not layers:
             info("Add at least one layer (material + thickness)."); return
         r = _wall_thermal(layers, float(vals["Ti"]), float(vals["RHi"]),
                           float(vals["Te"]), float(vals["RHe"]),
                           float(vals["rsi"]), float(vals["rse"]))
+        # dynamic (thermal-mass) response, EN ISO 13786
+        dlayers = [(d / 1000.0, k, _thermal_mat(nm)[3], _thermal_mat(nm)[4])
+                   for (nm, d, k, _mu, _fR) in layers]
+        dyn = _dynamic_thermal(dlayers, float(vals["rsi"]), float(vals["rse"]))
         doc.openTransaction("DynFrame: wall thermal")
         try:
             sh = doc.getObject("WallThermal") or \
                 doc.addObject("Spreadsheet::Sheet", "WallThermal")
             sh.Label = "WallThermal"; sh.clearAll()
-            sh.set("A1", "WALL THERMAL - U=%.3f W/m2K, R=%.3f m2K/W, q=%.1f W/m2, "
-                   "f_Rsi=%.3f%s" % (r["U"], r["R"], r["q"], r["fRsi"],
-                                     "  CONDENSATION RISK" if r["condensation"] else ""))
+            sh.set("A1", "WALL THERMAL - U=%.3f W/m2K, R=%.3f, q=%.1f W/m2, "
+                   "f_Rsi=%.3f | dynamic: decrement f=%.3f, time lag=%.1f h%s"
+                   % (r["U"], r["R"], r["q"], r["fRsi"], dyn["f"], dyn["lag_h"],
+                      "  CONDENSATION RISK" if r["condensation"] else ""))
             for c, h in zip("ABCDEF", ["Interface", "T (C)", "p_vapour (Pa)",
                                        "p_sat (Pa)", "RH (%)", "Condensation?"]):
                 sh.set("%s2" % c, h)
@@ -6304,7 +6349,10 @@ class WallThermal:
              "U-value = %.3f W/m2K   (R = %.3f m2K/W)\n"
              "Heat flux = %.1f W/m2 at %g/%g C.\n"
              "Internal surface temp = %.1f C, f_Rsi = %.3f%s\n"
-             "Interstitial condensation: %s\n\n"
+             "Interstitial condensation: %s\n"
+             "Dynamic (EN ISO 13786): decrement factor f = %.3f, time lag = "
+             "%.1f h (thermal mass damps a daily swing to %.0f%% of it, delayed "
+             "%.1f h).\n\n"
              "See the 'WallThermal' table for the temperature / vapour / "
              "saturation profile through the build-up. (Condensation where the "
              "vapour pressure reaches saturation; mould risk if f_Rsi < 0.70.)" %
@@ -6312,7 +6360,8 @@ class WallThermal:
               float(vals["Te"]), r["nodeT"][0], r["fRsi"],
               "  - MOULD RISK (f_Rsi < 0.70)" if mould else "",
               "RISK - vapour reaches saturation inside the build-up"
-              if r["condensation"] else "none predicted"))
+              if r["condensation"] else "none predicted",
+              dyn["f"], dyn["lag_h"], 100.0 * dyn["f"], dyn["lag_h"]))
 
 
 class ThermalBridge2D:
@@ -6365,7 +6414,7 @@ class ThermalBridge2D:
             nm = vals["m%d" % i]; d = float(vals["d%d" % i])
             if nm == "(none)" or d <= 0.0:
                 continue
-            k, mu, fR = _thermal_mat(nm)
+            k, mu, fR = _thermal_mat(nm)[:3]
             layers.append((nm, d / 1000.0, k))      # (name, thickness_m, k)
         if not layers:
             info("Add at least one layer."); return

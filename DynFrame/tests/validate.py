@@ -1416,7 +1416,7 @@ print("\n=== Wall thermal: U-value (EN ISO 6946) + Glaser condensation (13788) =
 assert abs(C._sat_vapour_pressure(0.0)-610.5)<1.0 and abs(C._sat_vapour_pressure(20.0)-2337)<6
 assert abs(C._sat_vapour_pressure(10.0)-1227)<6, C._sat_vapour_pressure(10.0)
 def _lyr(name,d):
-    k,mu,fR=C._thermal_mat(name); return (name,d,k,mu,fR)
+    k,mu,fR=C._thermal_mat(name)[:3]; return (name,d,k,mu,fR)
 # U-value: 200 mm dense concrete (k=2.0) + 100 mm EPS (k=0.035)
 L=[_lyr("Concrete (dense)",200.0), _lyr("EPS insulation",100.0)]
 U,R,perR=C._wall_uvalue(L,0.13,0.04)
@@ -1476,5 +1476,29 @@ print("  steel bridge: U_2D=%.4f (plain %.4f)  f_Rsi=%.3f (plain %.3f)  map objs
       %(U2b,U1,f2,f0,len(tm)))
 assert U2b>1.3*U1 and f2<f0 and len(tm)>=2, (U2b,U1,f2,f0,len(tm))
 print("2D thermal bridge OK")
+
+print("\n=== Dynamic thermal (EN ISO 13786 thermal mass) ===")
+import math as _mp2
+def _dl(name,d_mm):
+    k,mu,fR,rho,cp=C._thermal_mat(name); return (d_mm/1000.0,k,rho,cp)
+# thin lightweight layer -> little damping: decrement f~1, lag~0
+thin=C._dynamic_thermal([_dl("Plasterboard",12.5)],0.13,0.04)
+print("  12.5mm plasterboard: f=%.3f  lag=%.2f h  (expect ~1, ~0)"%(thin["f"],thin["lag_h"]))
+assert thin["f"]>0.9 and thin["lag_h"]<2.0, thin
+# massive wall -> strong damping and a long time lag
+thick=C._dynamic_thermal([_dl("Concrete (dense)",300.0)],0.13,0.04)
+print("  300mm dense concrete: f=%.3f  lag=%.2f h  (expect f small, lag several h)"
+      %(thick["f"],thick["lag_h"]))
+assert thick["f"]<0.4 and 5.0<thick["lag_h"]<16.0, thick
+# monotonic: thicker -> lower decrement, longer lag
+t150=C._dynamic_thermal([_dl("Concrete (dense)",150.0)],0.13,0.04)
+assert thick["f"]<t150["f"] and thick["lag_h"]>t150["lag_h"], (thick,t150)
+# steady U consistency + penetration depth ~0.155 m for concrete
+U0,R0,_=C._wall_uvalue([("c",300.0,2.0,1,None)],0.13,0.04)
+assert abs(thick["U"]-U0)/U0<1e-6
+delta=_mp2.sqrt((2.0/(2300*1000))*86400/_mp2.pi)
+print("  concrete penetration depth=%.4f m (known ~0.155)"%delta)
+assert abs(delta-0.1547)<0.003
+print("dynamic thermal OK")
 
 print("\nALL RUNTIME CHECKS PASSED")

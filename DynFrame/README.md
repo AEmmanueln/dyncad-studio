@@ -191,7 +191,11 @@ spreadsheets at the root.
   and the internal‑surface temperature factor f_Rsi (mould). Pick the layers
   (a small thermal‑material library with conductivity λ and vapour‑resistance μ)
   from inside to outside and the inside/outside temperature and humidity;
-  results go to the `WallThermal` table. (Validated: 200 mm concrete + 100 mm
+  results go to the `WallThermal` table. It also reports the **dynamic
+  (thermal‑mass) response** by the EN ISO 13786 heat‑transfer‑matrix method —
+  the **decrement factor** f (how much a daily temperature swing is damped) and
+  the **time lag** (hours the peak is delayed) — so you can judge summer
+  overheating / thermal comfort, not just steady heat loss. (Validated: 200 mm concrete + 100 mm
   EPS → U = 0.320 W/m²K; Glaser correctly predicts condensation for
   wrong‑side (internal) insulation and none for external insulation.) This is
   the standards method for insulation performance — CFD is only needed for
@@ -421,9 +425,14 @@ rely on. The checks it runs:
 > (1/200)α_h α_m with the notional force φ·N applied exactly; and the
 > **moving-load envelope** returns the absolute-maximum moment PL/4 on a
 > simply-supported span (ratio 1.000) with the shear envelope reaching P at a
-> support. It covers **static, P-Δ, modal, buckling, seismic
+> support; the **building thermal** tools match their standards (wall
+> U = 0.320 W/m²K; Glaser flags wrong‑side insulation; dynamic EN ISO 13786
+> gives decrement ≈ 0.33 / lag ≈ 8 h for 300 mm concrete; the 2D thermal‑bridge
+> conduction FE reproduces the 1D U‑value exactly and a steel stud raises U
+> from 0.23 to 0.60 W/m²K). It covers **static, P-Δ, modal, buckling, seismic
 > (response-spectrum), time-history (Newmark-β), moving-load influence,
-> plates/shells, wind and a full EN 1993-1-1 / EN 1992-1-1 design check
+> plates/shells, wind, building thermal (U-value / condensation / thermal mass /
+> 2D thermal bridges) and a full EN 1993-1-1 / EN 1992-1-1 design check
 > (members, slab reinforcement and punching)**.
 > FreeCAD is not Robot — this reproduces Robot's *workflow and core
 > engineering* on its kernel.

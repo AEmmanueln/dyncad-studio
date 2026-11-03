@@ -21,11 +21,20 @@ shedding, HVAC/duct flow, etc.
 
 ## 0. The fast path: the DynFrame **CFD Case** tool (drive OpenFOAM from FreeCAD)
 
-DynFrame now has two commands (toolbar **DynFrame · CFD**, menu **DynFrame →
-CFD (OpenFOAM)**) that turn the whole "adapt a tutorial → run → convert → view"
-workflow below into a dialog, for **any** of OpenFOAM 14's 20 solver modules —
-not just the flow+heat that CfdOF exposes:
+DynFrame now has three commands (toolbar **DynFrame · CFD**, menu **DynFrame →
+CFD (OpenFOAM)**) that turn the whole "mesh → adapt a tutorial → run → convert →
+view" workflow below into dialogs, for **any** of OpenFOAM 14's 20 solver
+modules — not just the flow+heat that CfdOF exposes:
 
+- **CFD Mesh from CAD (snappyHexMesh)** — select a solid; DynFrame exports it to
+  STL (scaled to metres), sizes a background wind-tunnel box around it, and
+  writes a complete **snappyHexMesh** setup (surface + feature refinement +
+  boundary layers) — the *same mesher SimScale's standard mesh uses*. It runs
+  `surfaceFeatures → blockMesh → snappyHexMesh → checkMesh` and converts the
+  mesh to VTK so you can inspect it in ParaView. +X is the flow direction; you
+  set the margins, cell counts, refinement levels and layer count in the dialog.
+  *(This is the accurate auto-meshing step; wiring the solver's boundary
+  conditions onto this mesh is the next build, physics by physics.)*
 - **CFD Case (OpenFOAM)** — pick a physics module (incompressible flow,
   compressible/buoyant HVAC `fluid`, conjugate heat transfer `multiRegion`, VOF
   free surface, Euler–Euler + boiling, reacting/combustion, premixed `XiFluid`,

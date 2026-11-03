@@ -1608,4 +1608,74 @@ print("  command wrote run/view scripts + CFD_cht1 record: %s"
 import shutil as _sh; _sh.rmtree(_tmp, ignore_errors=True)
 print("CFD driver OK")
 
+# ---------- CFD mesh-from-CAD (snappyHexMesh generators) ----------
+print("\n== CFD mesh from CAD (snappyHexMesh) ==")
+import dynframe_cfd_gen as CG
+# domain + resolution from a 10x2x3 m body at the origin
+_dom = CG.domain_from_bbox(0, 0, 0, 10, 2, 3, up=2, down=4, side=2, top=2, ground=1)
+assert _dom == (-20.0, -20.0, -10.0, 50.0, 22.0, 23.0), _dom
+assert CG.cell_counts(*_dom, h=10.0) == (7, 4, 3)
+_loc = CG.location_in_mesh(*_dom, bx0=0.0)
+assert _dom[0] < _loc[0] < 0.0, _loc          # upstream of the body -> in fluid
+# blockMesh: box patches + ground wall, correct cell counts and extents
+_bm = CG.block_mesh_dict(*_dom, 7, 4, 3)
+assert "hex (0 1 2 3 4 5 6 7) (7 4 3)" in _bm and "type wall" in _bm
+for _p in ("inlet", "outlet", "sides", "top", "ground"):
+    assert _p in _bm, _p
+assert "(-20 -20 -10)" in _bm and "(50 22 23)" in _bm
+# snappy: references the STL, refinement + layers, braces balanced
+_sn = CG.snappy_hex_mesh_dict(level_min=2, level_max=4, feature_level=4,
+                              n_layers=3, location=_loc)
+assert "type triSurfaceMesh" in _sn and "level (2 4)" in _sn and "nSurfaceLayers 3" in _sn
+assert _sn.count("{") == _sn.count("}")
+assert 'surfaces ( "body.stl" )' in CG.surface_features_dict()
+# ASCII STL writer from a tessellation (unit normal of the triangle)
+_stl = CG.ascii_stl("body", [(0, 0, 0), (1, 0, 0), (0, 1, 0)], [(0, 1, 2)])
+assert _stl.startswith("solid body") and _stl.rstrip().endswith("endsolid body")
+assert "facet normal 0 0 1" in _stl and _stl.count("vertex") == 3
+print("  domain/blockMesh/snappy/STL generators OK")
+# mesh script threads it together
+_msq = CG.build_mesh_script({"name": "part1",
+    "stage_win": r"C:\Users\T\dynframe_cfd\part1_src",
+    "win_out": r"C:\Users\T\dynframe_cfd\part1"})
+for _t in ("blockMesh", "snappyHexMesh -overwrite", "checkMesh",
+           "constant/triSurface/body.stl", "/mnt/c/Users/T/dynframe_cfd/part1_src"):
+    assert _t in _msq, _t
+print("  mesh script OK")
+# command end-to-end under a geometry mock: writes staged dicts + STL + script
+class _FM:                                     # fake FreeCAD.Matrix
+    def scale(s, *a): return s
+class _FShape:                                 # fake tessellated solid (metres)
+    BoundBox = BB([Vec(0, 0, 0), Vec(10, 2, 3)])
+    def transformGeometry(s, m): return s
+    def tessellate(s, tol):
+        return ([Vec(0, 0, 0), Vec(10, 0, 0), Vec(0, 2, 0)], [(0, 1, 2)])
+_savedM = getattr(FreeCAD, "Matrix", None); FreeCAD.Matrix = _FM
+_savedGS = C.global_shape; C.global_shape = lambda o: _FShape()
+class _Sel2:
+    def getSelection(s): return [Obj("Part::Feature", "Body")]
+_savedSel = C.FreeCADGui.Selection; C.FreeCADGui.Selection = _Sel2()
+_tmp2 = _tf.mkdtemp(); C._cfd_outdir = lambda d=_tmp2: d
+dMZ = Doc(); FreeCAD.ActiveDocument = dMZ
+C.form_dialog = lambda title, fields: {"name": "part1", "ncb": 8, "lmin": 2,
+    "lmax": 4, "nlay": 3, "up": 2.0, "down": 4.0, "side": 2.0, "top": 2.0,
+    "ground": 1.0, "distro": "Ubuntu", "env": "/opt/openfoam14/etc/bashrc", "run": "No"}
+gMZ = {}; C.info = lambda m, g=gMZ: g.setdefault("msg", m)
+C.CfdMeshFromCad().Activated()
+_src = os.path.join(_tmp2, "part1_src")
+for _f in ("blockMeshDict", "snappyHexMeshDict", "surfaceFeaturesDict", "body.stl"):
+    assert os.path.isfile(os.path.join(_src, _f)), _f
+assert open(os.path.join(_src, "body.stl")).read().startswith("solid body")
+assert os.path.isfile(os.path.join(_tmp2, "mesh_part1.sh"))
+assert b"snappyHexMesh" in open(os.path.join(_tmp2, "mesh_part1.sh"), "rb").read()
+shM = dMZ.getObject("CFD_part1")
+assert shM is not None and "snappyHexMesh" in shM._cells.get("B2", "")
+assert "snappyHexMesh" in gMZ["msg"]
+print("  command staged dicts + STL + script + CFD_part1 record: %s"
+      % gMZ["msg"].split(chr(10))[0])
+# restore patched globals
+FreeCAD.Matrix = _savedM; C.global_shape = _savedGS; C.FreeCADGui.Selection = _savedSel
+_sh.rmtree(_tmp2, ignore_errors=True)
+print("CFD mesh-from-CAD OK")
+
 print("\nALL RUNTIME CHECKS PASSED")

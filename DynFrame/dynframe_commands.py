@@ -16,6 +16,10 @@ try:
     import dynframe_cfd as cfd            # OpenFOAM case driver (pure, testable)
 except Exception:                         # keep the workbench loading if absent
     cfd = None
+try:
+    import dynframe_cfd_gen as cfdgen     # mesh-from-CAD generators (pure)
+except Exception:
+    cfdgen = None
 
 from PySide import QtGui
 try:
@@ -7005,6 +7009,145 @@ class CfdView:
              (name, view_cmd, os.path.join(win_out, "VTK"), launch))
 
 
+class CfdMeshFromCad:
+    def GetResources(self):
+        return {"Pixmap": _icon("cfdmesh"),
+                "MenuText": "CFD Mesh from CAD (snappyHexMesh)",
+                "ToolTip": "Auto-mesh a selected solid for CFD the accurate way: a "
+                           "background hex box with the body carved out and "
+                           "boundary-layered by snappyHexMesh - the same mesher "
+                           "SimScale's standard mesh uses. Exports the solid to "
+                           "STL, generates the blockMesh / snappyHexMesh dicts and "
+                           "runs them on your OpenFOAM; inspect the result "
+                           "(checkMesh + ParaView). +X is the flow direction.",
+                "Accel": "C, M"}
+
+    def IsActive(self):
+        return (cfd is not None and cfdgen is not None
+                and FreeCAD.ActiveDocument is not None)
+
+    def Activated(self):
+        if cfd is None or cfdgen is None:
+            err("The CFD modules (dynframe_cfd / dynframe_cfd_gen) failed to load.")
+            return
+        try:
+            sel = [o for o in FreeCADGui.Selection.getSelection()
+                   if getattr(o, "Shape", None) is not None]
+        except Exception:
+            sel = []
+        if not sel:
+            info("Select the solid (the body the fluid flows around or through) "
+                 "first, then run CFD Mesh from CAD.")
+            return
+        obj = sel[0]
+        try:
+            shp = global_shape(obj)                       # mm, placement baked in
+            mat = FreeCAD.Matrix(); mat.scale(1e-3, 1e-3, 1e-3)
+            shp_m = shp.transformGeometry(mat)            # -> metres
+            bb = shp_m.BoundBox
+            Lm = max(bb.XLength, bb.YLength, bb.ZLength, 1e-6)
+            verts, facets = shp_m.tessellate(max(Lm / 400.0, 1e-5))
+            pts = [(v.x, v.y, v.z) for v in verts]
+        except Exception as e:
+            err("Could not tessellate '%s': %s" % (getattr(obj, "Label", "?"), e))
+            return
+        fields = [
+            {"key": "_i", "kind": "info", "default":
+             "Auto-mesh '%s' with snappyHexMesh (the mesher SimScale's standard "
+             "mesh uses). Body ~%.3g x %.3g x %.3g m; +X is the flow direction. "
+             "Margins are multiples of the body length; higher surface level = "
+             "finer mesh on the body." %
+             (getattr(obj, "Label", "body"), bb.XLength, bb.YLength, bb.ZLength)},
+            {"key": "name", "label": "Case name", "kind": "text", "default": "part1"},
+            {"key": "ncb", "label": "Background cells across body", "kind": "int",
+             "default": 8, "min": 2, "max": 200},
+            {"key": "lmin", "label": "Surface refinement level min", "kind": "int",
+             "default": 2, "min": 0, "max": 8},
+            {"key": "lmax", "label": "Surface refinement level max", "kind": "int",
+             "default": 4, "min": 0, "max": 9},
+            {"key": "nlay", "label": "Boundary layers on the body", "kind": "int",
+             "default": 3, "min": 0, "max": 20},
+            {"key": "up", "label": "Upstream margin (x body length)",
+             "kind": "float", "default": 2.0},
+            {"key": "down", "label": "Downstream margin (x L)", "kind": "float",
+             "default": 4.0},
+            {"key": "side", "label": "Side margin (x L)", "kind": "float",
+             "default": 2.0},
+            {"key": "top", "label": "Top margin (x L)", "kind": "float",
+             "default": 2.0},
+            {"key": "ground", "label": "Ground margin (x L; small = on ground)",
+             "kind": "float", "default": 1.0},
+            {"key": "distro", "label": "WSL distro", "kind": "text",
+             "default": cfd.DEFAULT_DISTRO},
+            {"key": "env", "label": "OpenFOAM env (source)", "kind": "text",
+             "default": cfd.DEFAULT_OF_ENV},
+            {"key": "run", "label": "Try to mesh now", "kind": "combo",
+             "options": ["No", "Yes"], "default": "No"},
+        ]
+        vals = form_dialog("CFD Mesh from CAD (snappyHexMesh)", fields)
+        if not vals:
+            return
+        name = (str(vals.get("name") or "part1").strip().replace(" ", "_")) or "part1"
+        dom = cfdgen.domain_from_bbox(
+            bb.XMin, bb.YMin, bb.ZMin, bb.XMax, bb.YMax, bb.ZMax,
+            up=float(vals["up"]), down=float(vals["down"]), side=float(vals["side"]),
+            top=float(vals["top"]), ground=float(vals["ground"]))
+        h = Lm / max(2, int(vals["ncb"]))
+        nx, ny, nz = cfdgen.cell_counts(*dom, h=h)
+        loc = cfdgen.location_in_mesh(*dom, bx0=bb.XMin)
+        bm = cfdgen.block_mesh_dict(*dom, nx, ny, nz)
+        sn = cfdgen.snappy_hex_mesh_dict(
+            stl="body.stl", name="body", level_min=int(vals["lmin"]),
+            level_max=int(vals["lmax"]), feature_level=int(vals["lmax"]),
+            n_layers=int(vals["nlay"]), location=loc)
+        sf = cfdgen.surface_features_dict("body.stl")
+        stl = cfdgen.ascii_stl("body", pts, facets)
+        outdir = _cfd_outdir()
+        stage = os.path.join(outdir, name + "_src")
+        try:
+            _write_lf(os.path.join(stage, "blockMeshDict"), bm)
+            _write_lf(os.path.join(stage, "snappyHexMeshDict"), sn)
+            _write_lf(os.path.join(stage, "surfaceFeaturesDict"), sf)
+            _write_lf(os.path.join(stage, "body.stl"), stl)
+        except Exception as e:
+            err("Could not write the CFD mesh files to %s:\n%s" % (stage, e)); return
+        of_env = str(vals.get("env") or cfd.DEFAULT_OF_ENV).strip()
+        distro = str(vals.get("distro") or cfd.DEFAULT_DISTRO).strip()
+        win_out = os.path.join(outdir, name)
+        ms = cfdgen.build_mesh_script({"of_env": of_env, "name": name,
+                                       "stage_win": stage, "win_out": win_out})
+        mpath = os.path.join(outdir, "mesh_%s.sh" % name)
+        try:
+            _write_lf(mpath, ms)
+        except Exception as e:
+            err("Could not write the mesh script:\n%s" % e); return
+        mesh_cmd = "bash %s" % cfd.win_to_wsl(mpath, distro)
+        ncell = nx * ny * nz
+        _cfd_record(FreeCAD.ActiveDocument, name, [
+            ("Geometry", getattr(obj, "Label", "body")),
+            ("Mesher", "snappyHexMesh (same as SimScale's standard mesh)"),
+            ("Body size (m)", "%.3g x %.3g x %.3g" % (bb.XLength, bb.YLength, bb.ZLength)),
+            ("Background cells", "%d x %d x %d = %d" % (nx, ny, nz, ncell)),
+            ("Surface level", "%d-%d, %d layers"
+             % (int(vals["lmin"]), int(vals["lmax"]), int(vals["nlay"]))),
+            ("Mesh (paste in WSL)", mesh_cmd),
+            ("Then open in ParaView", os.path.join(win_out, "VTK")),
+            ("Mesh script", mpath), ("Staged files", stage)])
+        launch = ""
+        if vals.get("run") == "Yes":
+            launch = "\n\nAuto-run: " + _try_launch_terminal(cfd.wsl_run_argv(ms, distro))
+        info("CFD mesh for '%s' -> case '%s'.\n\nsnappyHexMesh setup written "
+             "(background %d x %d x %d cells; surface level %d-%d; %d boundary "
+             "layers). In your WSL OpenFOAM terminal:\n\n  %s\n\nIt meshes and "
+             "prints a checkMesh summary (look for 'Mesh OK'), then writes the "
+             "mesh VTK to:\n  %s\n\nOpen that in ParaView (Surface With Edges) to "
+             "inspect it; tune the levels / margins and re-run if needed. Details "
+             "in the 'CFD_%s' sheet.%s" %
+             (getattr(obj, "Label", "body"), name, nx, ny, nz, int(vals["lmin"]),
+              int(vals["lmax"]), int(vals["nlay"]), mesh_cmd,
+              os.path.join(win_out, "VTK"), name, launch))
+
+
 class Envelope:
     def GetResources(self):
         return {"Pixmap": _icon("envelope"), "MenuText": "Envelope (all combinations)",
@@ -9663,6 +9806,7 @@ _add("DynFrame_WallThermal", WallThermal)
 _add("DynFrame_ThermalBridge2D", ThermalBridge2D)
 _add("DynFrame_FireThermal", FireThermal)
 _add("DynFrame_CfdCase", CfdCase)
+_add("DynFrame_CfdMeshFromCad", CfdMeshFromCad)
 _add("DynFrame_CfdView", CfdView)
 _add("DynFrame_RunAnalysis", RunAnalysis)
 _add("DynFrame_ModalAnalysis", ModalAnalysis)

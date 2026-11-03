@@ -224,9 +224,14 @@ spreadsheets at the root.
   solver matches the semi‑infinite `erf` solution to the digit — 273 °C at
   50 mm after 1 h of a 500 °C face — and the ISO 834 curve gives 842 °C at
   30 min, 945 °C at 60 min.)
-- **CFD Case / CFD View (OpenFOAM)** — drive real CFD from FreeCAD. **SimScale's
-  CFD _is_ OpenFOAM**, so for the same case you get the same results on the free
-  engine. **CFD Case** lets you pick any of OpenFOAM 14's **20 solver modules**
+- **CFD Mesh from CAD / CFD Case / CFD View (OpenFOAM)** — drive real CFD from
+  FreeCAD. **SimScale's CFD _is_ OpenFOAM**, so for the same case you get the
+  same results on the free engine. **CFD Mesh from CAD** auto-meshes a selected
+  solid the accurate way — it exports the body to STL and writes a full
+  **snappyHexMesh** setup (background box + surface/feature refinement +
+  boundary layers), *the same mesher SimScale's standard mesh uses*, then runs
+  `blockMesh → snappyHexMesh → checkMesh` and converts the mesh to VTK for
+  ParaView. **CFD Case** lets you pick any of OpenFOAM 14's **20 solver modules**
   (incompressible flow, compressible/buoyant `fluid` for HVAC, conjugate heat
   transfer `multiRegion`, VOF free surface, Euler–Euler + boiling,
   reacting/combustion `multicomponentFluid`, premixed `XiFluid`, dense
@@ -465,8 +470,15 @@ rely on. The checks it runs:
 > complete, and the generated run script (multi-region → `foamMultiRun`, prefers
 > the tutorial `Allrun`, sets `endTime`) and view script (region-aware
 > `foamToVTK`, VTK copied to the Windows path) are asserted, with the WSL
-> invocation base64-round-tripping (the *physics* is OpenFOAM's, run and
-> validated on your machine, exactly as SimScale runs it). It covers **static,
+> invocation base64-round-tripping; the **mesh-from-CAD** generators are checked
+> too — the wind-tunnel domain and cell counts from a body bounding box, the
+> `blockMesh` box (patches, extents, ground wall), the `snappyHexMesh` dict
+> (STL reference, refinement levels, boundary layers, balanced braces), the
+> ASCII-STL writer (triangle unit normals) and the mesh script
+> (`surfaceFeatures → blockMesh → snappyHexMesh → checkMesh`), with the command
+> staging the dicts + STL end-to-end (the *physics and the mesh* are OpenFOAM's,
+> run and validated on your machine, exactly as SimScale runs them). It covers
+> **static,
 > P-Δ, modal, buckling, seismic
 > (response-spectrum), time-history (Newmark-β), moving-load influence,
 > plates/shells, wind, building thermal (U-value / condensation / thermal mass /

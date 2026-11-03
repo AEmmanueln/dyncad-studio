@@ -26,6 +26,12 @@ CFD (OpenFOAM)**) that turn the whole "mesh → adapt a tutorial → run → con
 view" workflow below into dialogs, for **any** of OpenFOAM 14's 20 solver
 modules — not just the flow+heat that CfdOF exposes:
 
+- **CFD Domain & BCs (preview)** — select a solid and DynFrame draws the flow
+  domain **in the 3D view**, SimScale-style: a box whose faces are coloured by
+  boundary condition (**green inlet**, **red outlet**, **blue far-field**, **tan
+  ground**) with **inlet velocity arrows** along +X. Visual preview only — tweak
+  the margins and re-run until the domain looks right, then solve. (CFD Flow
+  draws the same visual automatically when it sets a case up.)
 - **CFD Mesh from CAD (snappyHexMesh)** — select a solid; DynFrame exports it to
   STL (scaled to metres), sizes a background wind-tunnel box around it, and
   writes a complete **snappyHexMesh** setup (surface + feature refinement +

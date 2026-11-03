@@ -63,6 +63,19 @@ def _pt(x, y, z):
     return "(%s %s %s)" % (_g(x), _g(y), _g(z))
 
 
+# ---- viewport preview: domain box faces -> boundary conditions ---------------
+# Part.makeBox returns faces in the order [Xmin, Xmax, Ymin, Ymax, Zmin, Zmax];
+# for our +X flow that maps to these boundary conditions, and these SimScale-style
+# colours, so the setup is visible on the part in the FreeCAD 3D view.
+DOMAIN_FACE_BCS = ("inlet", "outlet", "sides", "sides", "ground", "top")
+DOMAIN_FACE_COLORS = ((0.20, 0.70, 0.30),   # inlet  - green
+                      (0.85, 0.25, 0.20),   # outlet - red
+                      (0.45, 0.65, 0.88),   # side   - blue
+                      (0.45, 0.65, 0.88),   # side   - blue
+                      (0.62, 0.55, 0.42),   # ground - tan
+                      (0.55, 0.78, 0.95))   # top    - light blue
+
+
 # ---- domain + resolution from the body's bounding box ------------------------
 def body_length(dx, dy, dz):
     """Characteristic length = largest body dimension (metres)."""

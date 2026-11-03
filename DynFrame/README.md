@@ -231,7 +231,10 @@ spreadsheets at the root.
   **snappyHexMesh** setup (background box + surface/feature refinement +
   boundary layers), *the same mesher SimScale's standard mesh uses*, then runs
   `blockMesh → snappyHexMesh → checkMesh` and converts the mesh to VTK for
-  ParaView. **CFD Flow (wind / air)** is the end-to-end command: it auto-meshes
+  ParaView. **CFD Domain & BCs** draws the flow domain **on the part in the 3D
+  view** — a box with its faces coloured by boundary condition (green inlet, red
+  outlet, blue far-field, tan ground) and inlet-velocity arrows, a SimScale-style
+  visual preview of the setup. **CFD Flow (wind / air)** is the end-to-end command: it auto-meshes
   the solid, **generates the boundary conditions + kOmegaSST turbulence to match
   the mesh patches** (inlet k/ω from your turbulence intensity), solves with
   OpenFOAM's `incompressibleFluid`, and writes VTK — colour by U or p in

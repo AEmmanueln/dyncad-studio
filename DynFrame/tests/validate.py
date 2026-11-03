@@ -90,6 +90,7 @@ def _mkcyl(r,h,p=None,d=None): return Shape(3,[p] if p else None)   # 3 faces pe
 Part.makeLine=_mkline; Part.makeCone=_mkcone; Part.makePolygon=_mkpoly
 Part.Face=_mkface; Part.makeCompound=_mkcompound; Part.makeCylinder=_mkcyl
 Part.makeCircle=lambda *a,**k: Shape(0); Part.Wire=lambda *a,**k: Shape(0)
+Part.makeBox=lambda *a,**k: Shape(6)        # a box has 6 faces (CFD domain preview)
 sys.modules["Part"]=Part
 
 # ---------- document / objects ----------
@@ -1746,5 +1747,33 @@ print("  command staged full case + run_flow script + CFD_flow1 record: %s"
 FreeCAD.Matrix = _savedM; C.global_shape = _savedGS; C.FreeCADGui.Selection = _savedSel
 _sh.rmtree(_tmp3, ignore_errors=True)
 print("CFD flow case OK")
+
+# ---------- CFD domain preview (SimScale-style BC faces on the part) ----------
+print("\n== CFD domain preview (viewport visuals) ==")
+# face -> BC map matches Part.makeBox face order; colours are valid rgb triples
+assert CG.DOMAIN_FACE_BCS == ("inlet", "outlet", "sides", "sides", "ground", "top")
+assert len(CG.DOMAIN_FACE_COLORS) == 6
+for _c in CG.DOMAIN_FACE_COLORS:
+    assert len(_c) == 3 and all(0.0 <= _v <= 1.0 for _v in _c), _c
+assert CG.DOMAIN_FACE_COLORS[0] != CG.DOMAIN_FACE_COLORS[1]   # inlet vs outlet differ
+print("  face->BC mapping + colours OK")
+# command draws the domain box + inlet arrows on the selected part
+C.global_shape = lambda o: _FShape()       # BoundBox 0..10 x 0..2 x 0..3 (mm)
+C.FreeCADGui.Selection = _Sel2()
+dDM = Doc(); FreeCAD.ActiveDocument = dDM
+C.form_dialog = lambda title, fields: {"name": "flow1", "U": 10.0, "up": 3.0,
+    "down": 6.0, "side": 3.0, "top": 3.0, "ground": 3.0}
+gDM = {}; C.info = lambda m, g=gDM: g.setdefault("msg", m)
+C.CfdDomain().Activated()
+assert dDM.getObject("CFDDomain_flow1") is not None, "domain box not drawn"
+assert dDM.getObject("CFDInlet_flow1") is not None, "inlet arrows not drawn"
+# the domain box carries the 6 per-face colours, inlet first (green)
+_dbx = dDM.getObject("CFDDomain_flow1")
+assert getattr(_dbx.ViewObject, "DiffuseColor", None) and \
+    len(_dbx.ViewObject.DiffuseColor) == 6
+assert "inlet" in gDM["msg"] and "outlet" in gDM["msg"]
+print("  CfdDomain drew domain box + inlet arrows + BC colours on the part")
+C.global_shape = _savedGS; C.FreeCADGui.Selection = _savedSel
+print("CFD domain preview OK")
 
 print("\nALL RUNTIME CHECKS PASSED")

@@ -6833,6 +6833,154 @@ def _cfd_record(doc, name, rows):
             pass
 
 
+def _cfd_clear_setup(doc, name):
+    for nm in ("CFDDomain_%s" % name, "CFDInlet_%s" % name):
+        o = doc.getObject(nm)
+        if o is not None:
+            try:
+                doc.removeObject(o.Name)
+            except Exception:
+                pass
+
+
+def _draw_cfd_domain(doc, dom_mm, Ux=0.0, name="part1"):
+    """Draw the flow domain as a transparent box with its six faces coloured by
+    boundary condition (green inlet, red outlet, blue far-field, tan ground) plus
+    a grid of inlet arrows along +X - a SimScale-style visual of the CFD setup in
+    the FreeCAD 3D view. dom_mm is the domain (x0,y0,z0,x1,y1,z1) in millimetres.
+    All drawing is best-effort so it never breaks the command."""
+    if doc is None or cfdgen is None:
+        return
+    try:
+        import Part
+    except Exception:
+        return
+    x0, y0, z0, x1, y1, z1 = [float(v) for v in dom_mm]
+    _cfd_clear_setup(doc, name)
+    try:
+        box = Part.makeBox(max(x1 - x0, 1e-6), max(y1 - y0, 1e-6),
+                           max(z1 - z0, 1e-6), FreeCAD.Vector(x0, y0, z0))
+        ob = doc.addObject("Part::Feature", "CFDDomain_%s" % name)
+        ob.Shape = box
+        ob.Label = "CFD domain: %s" % name
+        _set(ob, "App::PropertyString", "DiagKind", "_cfd")
+        try:
+            vo = ob.ViewObject
+            vo.DisplayMode = "Shaded"
+            vo.Transparency = 82
+            vo.DiffuseColor = [tuple(c) for c in cfdgen.DOMAIN_FACE_COLORS]
+        except Exception:
+            pass
+        _grp(doc, CFD_GROUP).addObject(ob)
+    except Exception:
+        pass
+    # inlet velocity arrows (3x3 grid on the inlet face, pointing +X)
+    try:
+        Lx = x1 - x0
+        aL = max(Lx * 0.12, (y1 - y0) * 0.12, 1e-3)
+        rad = aL * 0.09
+        parts = []
+        for fy in (0.3, 0.5, 0.7):
+            for fz in (0.3, 0.5, 0.7):
+                yy = y0 + (y1 - y0) * fy
+                zz = z0 + (z1 - z0) * fz
+                parts.append(Part.makeCylinder(rad, aL * 0.7,
+                             FreeCAD.Vector(x0, yy, zz), FreeCAD.Vector(1, 0, 0)))
+                parts.append(Part.makeCone(rad * 2.2, 0.0, aL * 0.3,
+                             FreeCAD.Vector(x0 + aL * 0.7, yy, zz),
+                             FreeCAD.Vector(1, 0, 0)))
+        ar = doc.addObject("Part::Feature", "CFDInlet_%s" % name)
+        ar.Shape = Part.makeCompound(parts)
+        ar.Label = "CFD inlet +X" + (" %.3g m/s" % Ux if Ux else "")
+        _set(ar, "App::PropertyString", "DiagKind", "_cfd")
+        try:
+            ar.ViewObject.ShapeColor = (0.10, 0.80, 0.30)
+            ar.ViewObject.LineColor = (0.10, 0.80, 0.30)
+        except Exception:
+            pass
+        _grp(doc, CFD_GROUP).addObject(ar)
+    except Exception:
+        pass
+
+
+class CfdDomain:
+    def GetResources(self):
+        return {"Pixmap": _icon("cfd"),
+                "MenuText": "CFD Domain & BCs (preview)",
+                "ToolTip": "Show the CFD setup on the selected solid, SimScale-"
+                           "style: draw the flow domain as a box with its faces "
+                           "coloured by boundary condition (green inlet, red "
+                           "outlet, blue far-field, tan ground) and inlet arrows "
+                           "along +X. Visual preview only - no meshing or solving; "
+                           "run CFD Flow to solve.",
+                "Accel": "C, D"}
+
+    def IsActive(self):
+        return cfdgen is not None and FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        if cfdgen is None:
+            err("The CFD module (dynframe_cfd_gen.py) failed to load."); return
+        try:
+            sel = [o for o in FreeCADGui.Selection.getSelection()
+                   if getattr(o, "Shape", None) is not None]
+        except Exception:
+            sel = []
+        if not sel:
+            info("Select the solid the air flows around, then run CFD Domain.")
+            return
+        obj = sel[0]
+        try:
+            bb = global_shape(obj).BoundBox       # millimetres
+        except Exception as e:
+            err("Could not read the geometry of '%s': %s"
+                % (getattr(obj, "Label", "?"), e)); return
+        fields = [
+            {"key": "_i", "kind": "info", "default":
+             "Preview the CFD flow domain + boundary-condition faces on '%s' in "
+             "the 3D view. +X is the flow direction. Margins are multiples of the "
+             "body length. Green = inlet, red = outlet, blue = far-field sides/"
+             "top, tan = ground." % getattr(obj, "Label", "body")},
+            {"key": "name", "label": "Case name", "kind": "text", "default": "flow1"},
+            {"key": "U", "label": "Inlet speed (m/s, for the arrow label)",
+             "kind": "float", "default": 10.0, "decimals": 3},
+            {"key": "up", "label": "Upstream margin (x L)", "kind": "float", "default": 3.0},
+            {"key": "down", "label": "Downstream margin (x L)", "kind": "float", "default": 6.0},
+            {"key": "side", "label": "Side margin (x L)", "kind": "float", "default": 3.0},
+            {"key": "top", "label": "Top margin (x L)", "kind": "float", "default": 3.0},
+            {"key": "ground", "label": "Below margin (x L)", "kind": "float", "default": 3.0},
+        ]
+        vals = form_dialog("CFD Domain & BCs (preview)", fields)
+        if not vals:
+            return
+        name = (str(vals.get("name") or "flow1").strip().replace(" ", "_")) or "flow1"
+        dom = cfdgen.domain_from_bbox(
+            bb.XMin, bb.YMin, bb.ZMin, bb.XMax, bb.YMax, bb.ZMax,
+            up=float(vals["up"]), down=float(vals["down"]), side=float(vals["side"]),
+            top=float(vals["top"]), ground=float(vals["ground"]))
+        doc = FreeCAD.ActiveDocument
+        doc.openTransaction("DynFrame: CFD domain")
+        try:
+            _draw_cfd_domain(doc, dom, float(vals["U"]), name)
+            doc.commitTransaction(); doc.recompute()
+        except Exception as e:
+            try:
+                doc.abortTransaction()
+            except Exception:
+                pass
+            err("Could not draw the CFD domain: %s" % e); return
+        try:
+            FreeCADGui.SendMsgToActiveView("ViewFit")
+        except Exception:
+            pass
+        info("Drew the CFD setup for '%s' on the part.\n\nThe box is the flow "
+             "domain; its faces are the boundary conditions - GREEN = inlet (air "
+             "enters, +X), RED = outlet, BLUE = far-field sides/top, TAN = ground. "
+             "The green arrows are the inlet velocity. Adjust the margins and re-"
+             "run to resize it. When it looks right, run CFD Flow to mesh + solve."
+             % name)
+
+
 class CfdCase:
     def GetResources(self):
         return {"Pixmap": _icon("cfd"), "MenuText": "CFD Case (OpenFOAM)",
@@ -7283,6 +7431,13 @@ class CfdFlow:
             ("Run (paste in WSL)", flow_cmd),
             ("Then open in ParaView", os.path.join(win_out, "VTK")),
             ("Flow script", fpath), ("Staged files", stage)])
+        # draw the setup on the part (domain box + BC-coloured faces + inlet arrows)
+        try:
+            _draw_cfd_domain(FreeCAD.ActiveDocument,
+                             tuple(c * 1000.0 for c in dom), Ux, name)
+            FreeCAD.ActiveDocument.recompute()
+        except Exception:
+            pass
         launch = ""
         if vals.get("run") == "Yes":
             launch = "\n\nAuto-run: " + _try_launch_terminal(cfd.wsl_run_argv(fs, distro))
@@ -9956,6 +10111,7 @@ _add("DynFrame_WallThermal", WallThermal)
 _add("DynFrame_ThermalBridge2D", ThermalBridge2D)
 _add("DynFrame_FireThermal", FireThermal)
 _add("DynFrame_CfdCase", CfdCase)
+_add("DynFrame_CfdDomain", CfdDomain)
 _add("DynFrame_CfdMeshFromCad", CfdMeshFromCad)
 _add("DynFrame_CfdFlow", CfdFlow)
 _add("DynFrame_CfdView", CfdView)

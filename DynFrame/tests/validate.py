@@ -1678,4 +1678,68 @@ FreeCAD.Matrix = _savedM; C.global_shape = _savedGS; C.FreeCADGui.Selection = _s
 _sh.rmtree(_tmp2, ignore_errors=True)
 print("CFD mesh-from-CAD OK")
 
+# ---------- CFD flow case (step 2: BCs + turbulence + solver) ----------
+print("\n== CFD flow (incompressible, auto BCs + solve) ==")
+# inlet turbulence closed form: k = 1.5(I U)^2
+_k, _om = CG.inlet_turbulence(10, 0.05, 10)
+assert abs(_k - 0.375) < 1e-9, _k
+assert abs(_om - (0.375 ** 0.5) / ((0.09 ** 0.25) * 0.7)) < 1e-9, _om
+# every field declares a BC for all six mesh patches, with the right wall funcs
+for _f, _txt in [("U", CG.field_U(12)), ("p", CG.field_p()), ("k", CG.field_k(_k)),
+                 ("omega", CG.field_omega(_om)), ("nut", CG.field_nut())]:
+    for _p in ("inlet", "outlet", "sides", "top", "ground", "body"):
+        assert _p in _txt, (_f, _p)
+assert "noSlip" in CG.field_U(12) and "uniform (12 0 0)" in CG.field_U(12)
+assert "nutkWallFunction" in CG.field_nut() and "omegaWallFunction" in CG.field_omega(_om)
+# constant + system dicts
+assert "kOmegaSST" in CG.momentum_transport_dict()
+assert "nu              [0 2 -1 0 0 0 0] 1.5e-05" in CG.physical_properties_dict(1.5e-5)
+assert "steadyState" in CG.fv_schemes_simple() and "meshWave" in CG.fv_schemes_simple()
+assert "consistent      yes" in CG.fv_solution_simple()
+assert "solver          incompressibleFluid" in CG.control_dict_simple("incompressibleFluid", 1000, 200)
+_files, _k0, _om0 = CG.flow_case_files(10, nu=1.5e-5, intensity=0.05, L=10,
+                                       end_iter=1500, write_interval=300)
+assert set(_files) == {"U", "p", "k", "omega", "nut", "momentumTransport",
+                       "physicalProperties", "fvSchemes", "fvSolution", "controlDict"}
+assert "endTime         1500" in _files["controlDict"] and abs(_k0 - 0.375) < 1e-9
+for _nm, _t in _files.items():
+    assert _t.count("{") == _t.count("}"), (_nm, _t.count("{"), _t.count("}"))
+_fsq = CG.build_flow_script({"name": "flow1",
+    "stage_win": r"C:\Users\T\dynframe_cfd\flow1_src",
+    "win_out": r"C:\Users\T\dynframe_cfd\flow1"})
+for _t in ("blockMesh", "snappyHexMesh -overwrite", "checkMesh", "foamRun",
+           "foamToVTK", 'cp "$STAGE"/U '):
+    assert _t in _fsq, _t
+print("  turbulence/fields/dicts/flow-script generators OK")
+# command end-to-end under the geometry mock
+FreeCAD.Matrix = _FM; C.global_shape = lambda o: _FShape()
+C.FreeCADGui.Selection = _Sel2()
+_tmp3 = _tf.mkdtemp(); C._cfd_outdir = lambda d=_tmp3: d
+dFL = Doc(); FreeCAD.ActiveDocument = dFL
+C.form_dialog = lambda title, fields: {"name": "flow1", "U": 10.0, "ti": 5.0,
+    "nu": 1.5e-5, "iters": 800, "ncb": 8, "lmin": 2, "lmax": 4, "nlay": 3,
+    "up": 3.0, "down": 6.0, "side": 3.0, "top": 3.0, "ground": 3.0,
+    "distro": "Ubuntu", "env": "/opt/openfoam14/etc/bashrc", "run": "No"}
+gFL = {}; C.info = lambda m, g=gFL: g.setdefault("msg", m)
+C.CfdFlow().Activated()
+_src3 = os.path.join(_tmp3, "flow1_src")
+for _f in ("blockMeshDict", "snappyHexMeshDict", "body.stl", "U", "p", "k",
+           "omega", "nut", "momentumTransport", "physicalProperties",
+           "fvSchemes", "fvSolution", "controlDict"):
+    assert os.path.isfile(os.path.join(_src3, _f)), _f
+assert os.path.isfile(os.path.join(_tmp3, "run_flow_flow1.sh"))
+_ft = open(os.path.join(_tmp3, "run_flow_flow1.sh"), "rb").read()
+assert b"foamRun" in _ft and b"snappyHexMesh" in _ft and b"\r\n" not in _ft
+# the generated U really carries the inlet speed we asked for
+assert "uniform (10 0 0)" in open(os.path.join(_src3, "U")).read()
+shF = dFL.getObject("CFD_flow1")
+assert shF is not None and "Incompressible flow" in shF._cells.get("B1", ""), \
+    shF and shF._cells.get("B1")
+assert "incompressibleFluid" in gFL["msg"]
+print("  command staged full case + run_flow script + CFD_flow1 record: %s"
+      % gFL["msg"].split(chr(10))[0])
+FreeCAD.Matrix = _savedM; C.global_shape = _savedGS; C.FreeCADGui.Selection = _savedSel
+_sh.rmtree(_tmp3, ignore_errors=True)
+print("CFD flow case OK")
+
 print("\nALL RUNTIME CHECKS PASSED")

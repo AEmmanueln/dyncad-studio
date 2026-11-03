@@ -231,7 +231,11 @@ spreadsheets at the root.
   **snappyHexMesh** setup (background box + surface/feature refinement +
   boundary layers), *the same mesher SimScale's standard mesh uses*, then runs
   `blockMesh → snappyHexMesh → checkMesh` and converts the mesh to VTK for
-  ParaView. **CFD Case** lets you pick any of OpenFOAM 14's **20 solver modules**
+  ParaView. **CFD Flow (wind / air)** is the end-to-end command: it auto-meshes
+  the solid, **generates the boundary conditions + kOmegaSST turbulence to match
+  the mesh patches** (inlet k/ω from your turbulence intensity), solves with
+  OpenFOAM's `incompressibleFluid`, and writes VTK — colour by U or p in
+  ParaView. *Pick geometry → set inlet speed → Run → view*, steady RANS. **CFD Case** lets you pick any of OpenFOAM 14's **20 solver modules**
   (incompressible flow, compressible/buoyant `fluid` for HVAC, conjugate heat
   transfer `multiRegion`, VOF free surface, Euler–Euler + boiling,
   reacting/combustion `multicomponentFluid`, premixed `XiFluid`, dense
@@ -475,9 +479,15 @@ rely on. The checks it runs:
 > `blockMesh` box (patches, extents, ground wall), the `snappyHexMesh` dict
 > (STL reference, refinement levels, boundary layers, balanced braces), the
 > ASCII-STL writer (triangle unit normals) and the mesh script
-> (`surfaceFeatures → blockMesh → snappyHexMesh → checkMesh`), with the command
-> staging the dicts + STL end-to-end (the *physics and the mesh* are OpenFOAM's,
-> run and validated on your machine, exactly as SimScale runs them). It covers
+> (`surfaceFeatures → blockMesh → snappyHexMesh → checkMesh`); and the
+> **incompressible-flow case generator** — the inlet turbulence closed form
+> (k = 1.5(I·U)², ω = √k/(C_μ^0.25·l)), the five field files (U/p/k/ω/νt) each
+> declaring a BC for every mesh patch with the right wall functions, the
+> kOmegaSST momentum-transport / physical-properties / fvSchemes / fvSolution /
+> controlDict dicts (all with balanced braces), and the full mesh-plus-solve
+> script (`blockMesh → snappyHexMesh → foamRun → foamToVTK`), with the commands
+> staging every file end-to-end (the *physics and the mesh* are OpenFOAM's, run
+> and validated on your machine, exactly as SimScale runs them). It covers
 > **static,
 > P-Δ, modal, buckling, seismic
 > (response-spectrum), time-history (Newmark-β), moving-load influence,

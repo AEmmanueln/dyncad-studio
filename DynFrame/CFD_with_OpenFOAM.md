@@ -33,8 +33,17 @@ modules — not just the flow+heat that CfdOF exposes:
   `surfaceFeatures → blockMesh → snappyHexMesh → checkMesh` and converts the
   mesh to VTK so you can inspect it in ParaView. +X is the flow direction; you
   set the margins, cell counts, refinement levels and layer count in the dialog.
-  *(This is the accurate auto-meshing step; wiring the solver's boundary
-  conditions onto this mesh is the next build, physics by physics.)*
+  You set the margins, cell counts, refinement levels and layer count.
+- **CFD Flow: wind / air (incompressible)** — the **end-to-end** one: select a
+  solid, set the inlet air speed, and DynFrame auto-meshes it (snappyHexMesh),
+  **generates the boundary conditions and kOmegaSST turbulence to match the mesh
+  patches** (inlet/outlet/far-field/body-wall, with inlet k and ω from your
+  turbulence intensity), solves with OpenFOAM's `incompressibleFluid`, and
+  converts to VTK. Open in ParaView and colour by **U** (velocity) or **p**
+  (pressure). This is the full *pick geometry → set inlet → Run → view* flow,
+  on the same engine SimScale runs. (Steady RANS; watch residuals fall in
+  `log.foamRun`. More physics — heat/HVAC, then multiphase/combustion — build on
+  this same path next.)
 - **CFD Case (OpenFOAM)** — pick a physics module (incompressible flow,
   compressible/buoyant HVAC `fluid`, conjugate heat transfer `multiRegion`, VOF
   free surface, Euler–Euler + boiling, reacting/combustion, premixed `XiFluid`,

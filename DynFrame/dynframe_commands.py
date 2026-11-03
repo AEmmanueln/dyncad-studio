@@ -7148,6 +7148,156 @@ class CfdMeshFromCad:
               os.path.join(win_out, "VTK"), name, launch))
 
 
+class CfdFlow:
+    def GetResources(self):
+        return {"Pixmap": _icon("cfd"),
+                "MenuText": "CFD Flow: wind / air (incompressible)",
+                "ToolTip": "Full incompressible-flow CFD on a selected solid, end "
+                           "to end: auto-mesh with snappyHexMesh, generate the "
+                           "boundary conditions + turbulence (kOmegaSST) to match, "
+                           "solve with OpenFOAM's incompressibleFluid, and convert "
+                           "to VTK for ParaView. Same engine as SimScale. +X is "
+                           "the flow direction; set the inlet speed in the dialog.",
+                "Accel": "C, W"}
+
+    def IsActive(self):
+        return (cfd is not None and cfdgen is not None
+                and FreeCAD.ActiveDocument is not None)
+
+    def Activated(self):
+        if cfd is None or cfdgen is None:
+            err("The CFD modules (dynframe_cfd / dynframe_cfd_gen) failed to load.")
+            return
+        try:
+            sel = [o for o in FreeCADGui.Selection.getSelection()
+                   if getattr(o, "Shape", None) is not None]
+        except Exception:
+            sel = []
+        if not sel:
+            info("Select the solid the air flows around (or through), then run "
+                 "CFD Flow.")
+            return
+        obj = sel[0]
+        try:
+            shp = global_shape(obj)
+            mat = FreeCAD.Matrix(); mat.scale(1e-3, 1e-3, 1e-3)
+            shp_m = shp.transformGeometry(mat)
+            bb = shp_m.BoundBox
+            Lm = max(bb.XLength, bb.YLength, bb.ZLength, 1e-6)
+            verts, facets = shp_m.tessellate(max(Lm / 400.0, 1e-5))
+            pts = [(v.x, v.y, v.z) for v in verts]
+        except Exception as e:
+            err("Could not tessellate '%s': %s" % (getattr(obj, "Label", "?"), e))
+            return
+        fields = [
+            {"key": "_i", "kind": "info", "default":
+             "Incompressible-flow CFD on '%s' (body ~%.3g x %.3g x %.3g m). +X is "
+             "the flow direction. DynFrame meshes with snappyHexMesh, writes the "
+             "matching boundary conditions + kOmegaSST turbulence, solves with "
+             "incompressibleFluid and converts to VTK. Same engine as SimScale." %
+             (getattr(obj, "Label", "body"), bb.XLength, bb.YLength, bb.ZLength)},
+            {"key": "name", "label": "Case name", "kind": "text", "default": "flow1"},
+            {"key": "U", "label": "Inlet air speed Ux (m/s)", "kind": "float",
+             "default": 10.0, "decimals": 3},
+            {"key": "ti", "label": "Turbulence intensity (%)", "kind": "float",
+             "default": 5.0, "decimals": 2},
+            {"key": "nu", "label": "Kinematic viscosity nu (m2/s)", "kind": "float",
+             "default": 1.5e-5, "decimals": 9},
+            {"key": "iters", "label": "Iterations (steady)", "kind": "int",
+             "default": 1000, "min": 50, "max": 100000},
+            {"key": "ncb", "label": "Background cells across body", "kind": "int",
+             "default": 8, "min": 2, "max": 200},
+            {"key": "lmin", "label": "Surface refinement level min", "kind": "int",
+             "default": 2, "min": 0, "max": 8},
+            {"key": "lmax", "label": "Surface refinement level max", "kind": "int",
+             "default": 4, "min": 0, "max": 9},
+            {"key": "nlay", "label": "Boundary layers on the body", "kind": "int",
+             "default": 3, "min": 0, "max": 20},
+            {"key": "up", "label": "Upstream margin (x L)", "kind": "float", "default": 3.0},
+            {"key": "down", "label": "Downstream margin (x L)", "kind": "float", "default": 6.0},
+            {"key": "side", "label": "Side margin (x L)", "kind": "float", "default": 3.0},
+            {"key": "top", "label": "Top margin (x L)", "kind": "float", "default": 3.0},
+            {"key": "ground", "label": "Below margin (x L)", "kind": "float", "default": 3.0},
+            {"key": "distro", "label": "WSL distro", "kind": "text", "default": cfd.DEFAULT_DISTRO},
+            {"key": "env", "label": "OpenFOAM env (source)", "kind": "text", "default": cfd.DEFAULT_OF_ENV},
+            {"key": "run", "label": "Try to run now", "kind": "combo",
+             "options": ["No", "Yes"], "default": "No"},
+        ]
+        vals = form_dialog("CFD Flow: wind / air (incompressible)", fields)
+        if not vals:
+            return
+        name = (str(vals.get("name") or "flow1").strip().replace(" ", "_")) or "flow1"
+        Ux = float(vals["U"]); nu = float(vals["nu"])
+        I = max(0.0, float(vals["ti"]) / 100.0)
+        dom = cfdgen.domain_from_bbox(
+            bb.XMin, bb.YMin, bb.ZMin, bb.XMax, bb.YMax, bb.ZMax,
+            up=float(vals["up"]), down=float(vals["down"]), side=float(vals["side"]),
+            top=float(vals["top"]), ground=float(vals["ground"]))
+        h = Lm / max(2, int(vals["ncb"]))
+        nx, ny, nz = cfdgen.cell_counts(*dom, h=h)
+        loc = cfdgen.location_in_mesh(*dom, bx0=bb.XMin)
+        # freestream box: all far-field patches (incl. ground) are slip
+        bm = cfdgen.block_mesh_dict(*dom, nx, ny, nz, ground_type="patch")
+        sn = cfdgen.snappy_hex_mesh_dict(
+            stl="body.stl", name="body", level_min=int(vals["lmin"]),
+            level_max=int(vals["lmax"]), feature_level=int(vals["lmax"]),
+            n_layers=int(vals["nlay"]), location=loc)
+        sf = cfdgen.surface_features_dict("body.stl")
+        stl = cfdgen.ascii_stl("body", pts, facets)
+        wri = max(1, int(int(vals["iters"]) / 5))
+        casefiles, k0, om0 = cfdgen.flow_case_files(
+            Ux, nu=nu, intensity=I, L=Lm, end_iter=int(vals["iters"]),
+            write_interval=wri)
+        outdir = _cfd_outdir()
+        stage = os.path.join(outdir, name + "_src")
+        try:
+            _write_lf(os.path.join(stage, "blockMeshDict"), bm)
+            _write_lf(os.path.join(stage, "snappyHexMeshDict"), sn)
+            _write_lf(os.path.join(stage, "surfaceFeaturesDict"), sf)
+            _write_lf(os.path.join(stage, "body.stl"), stl)
+            for fn, txt in casefiles.items():
+                _write_lf(os.path.join(stage, fn), txt)
+        except Exception as e:
+            err("Could not write the CFD case files to %s:\n%s" % (stage, e)); return
+        of_env = str(vals.get("env") or cfd.DEFAULT_OF_ENV).strip()
+        distro = str(vals.get("distro") or cfd.DEFAULT_DISTRO).strip()
+        win_out = os.path.join(outdir, name)
+        fs = cfdgen.build_flow_script({"of_env": of_env, "name": name,
+                                       "stage_win": stage, "win_out": win_out,
+                                       "latest": True})
+        fpath = os.path.join(outdir, "run_flow_%s.sh" % name)
+        try:
+            _write_lf(fpath, fs)
+        except Exception as e:
+            err("Could not write the flow script:\n%s" % e); return
+        flow_cmd = "bash %s" % cfd.win_to_wsl(fpath, distro)
+        _cfd_record(FreeCAD.ActiveDocument, name, [
+            ("Analysis", "Incompressible flow (RANS kOmegaSST)"),
+            ("Geometry", getattr(obj, "Label", "body")),
+            ("Inlet speed (m/s)", "%g (+X)" % Ux),
+            ("Inlet k / omega", "%.4g / %.4g" % (k0, om0)),
+            ("Viscosity nu", "%g" % nu),
+            ("Background cells", "%d x %d x %d" % (nx, ny, nz)),
+            ("Mesh", "snappyHexMesh, level %d-%d, %d layers"
+             % (int(vals["lmin"]), int(vals["lmax"]), int(vals["nlay"]))),
+            ("Run (paste in WSL)", flow_cmd),
+            ("Then open in ParaView", os.path.join(win_out, "VTK")),
+            ("Flow script", fpath), ("Staged files", stage)])
+        launch = ""
+        if vals.get("run") == "Yes":
+            launch = "\n\nAuto-run: " + _try_launch_terminal(cfd.wsl_run_argv(fs, distro))
+        info("CFD flow case '%s' on '%s' (engine: OpenFOAM incompressibleFluid, as "
+             "SimScale runs).\n\nInlet %g m/s (+X), kOmegaSST turbulence "
+             "(k=%.4g, omega=%.4g), mesh %d x %d x %d background + snappyHexMesh. "
+             "In your WSL OpenFOAM terminal:\n\n  %s\n\nIt meshes, solves (%d "
+             "iterations) and writes VTK to:\n  %s\n\nOpen in ParaView and colour "
+             "by U (velocity) or p (pressure). It is a steady RANS solve - watch "
+             "the residuals fall in log.foamRun. Details in the 'CFD_%s' sheet.%s" %
+             (name, getattr(obj, "Label", "body"), Ux, k0, om0, nx, ny, nz,
+              flow_cmd, int(vals["iters"]), os.path.join(win_out, "VTK"), name,
+              launch))
+
+
 class Envelope:
     def GetResources(self):
         return {"Pixmap": _icon("envelope"), "MenuText": "Envelope (all combinations)",
@@ -9807,6 +9957,7 @@ _add("DynFrame_ThermalBridge2D", ThermalBridge2D)
 _add("DynFrame_FireThermal", FireThermal)
 _add("DynFrame_CfdCase", CfdCase)
 _add("DynFrame_CfdMeshFromCad", CfdMeshFromCad)
+_add("DynFrame_CfdFlow", CfdFlow)
 _add("DynFrame_CfdView", CfdView)
 _add("DynFrame_RunAnalysis", RunAnalysis)
 _add("DynFrame_ModalAnalysis", ModalAnalysis)

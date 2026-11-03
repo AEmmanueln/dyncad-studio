@@ -264,3 +264,209 @@ def build_mesh_script(opts):
              % win_out)
     L.append('echo "=== MESH DONE: $DST  (read the checkMesh summary above) ==="')
     return "\n".join(L)
+
+
+# =============================================================================
+# Step 2: incompressible-flow case (boundary conditions + solver settings)
+# =============================================================================
+# Patches produced by our blockMesh box + snappyHexMesh body, so every generated
+# field file below declares a boundaryField for exactly these:
+OUTER_PATCHES = ("inlet", "outlet", "sides", "top", "ground")
+SLIP_PATCHES = ("sides", "top", "ground")   # far-field box walls (freestream)
+BODY_PATCH = "body"
+
+
+def inlet_turbulence(U, intensity=0.05, L=1.0):
+    """Inlet k and omega for a RANS (kOmegaSST) run from the inlet speed, the
+    turbulence intensity I and a length scale from the body (l = 0.07 L):
+        k      = 1.5 (I U)^2
+        omega  = k^0.5 / (Cmu^0.25 l),   Cmu = 0.09
+    Returns (k, omega), floored so a zero inlet speed is still well-posed."""
+    U = abs(float(U)); I = float(intensity); L = max(float(L), 1e-6)
+    k = max(1.5 * (I * U) ** 2, 1e-8)
+    l = max(0.07 * L, 1e-6)
+    omega = k ** 0.5 / ((0.09 ** 0.25) * l)
+    return k, omega
+
+
+def _foam_header(cls, obj):
+    return (
+        "/*--------------------------------*- C++ -*----------------------------------*\\\n"
+        "| DynFrame CFD - generated case file                                          |\n"
+        "\\*---------------------------------------------------------------------------*/\n"
+        "FoamFile\n{\n    format      ascii;\n    class       %s;\n"
+        "    object      %s;\n}\n\n" % (cls, obj))
+
+
+def _field(cls, obj, dims, internal, bmap):
+    """Assemble a field file from a {patch: body-lines} map, in OUTER+body order."""
+    body = ""
+    for p in list(OUTER_PATCHES) + [BODY_PATCH]:
+        body += "    %s\n    {\n%s\n    }\n" % (p, bmap[p])
+    return (_foam_header(cls, obj)
+            + "dimensions      %s;\n\ninternalField   %s;\n\n"
+              "boundaryField\n{\n%s}\n" % (dims, internal, body))
+
+
+def _slip(bmap):
+    for p in SLIP_PATCHES:
+        bmap[p] = "        type            slip;"
+    return bmap
+
+
+def field_U(Ux):
+    uin = "uniform (%s 0 0)" % _g(Ux)
+    b = {"inlet": "        type            fixedValue;\n        value           %s;" % uin,
+         "outlet": "        type            inletOutlet;\n        inletValue      uniform (0 0 0);\n        value           %s;" % uin,
+         BODY_PATCH: "        type            noSlip;"}
+    return _field("volVectorField", "U", "[0 1 -1 0 0 0 0]", uin, _slip(b))
+
+
+def field_p():
+    b = {"inlet": "        type            zeroGradient;",
+         "outlet": "        type            fixedValue;\n        value           uniform 0;",
+         BODY_PATCH: "        type            zeroGradient;"}
+    return _field("volScalarField", "p", "[0 2 -2 0 0 0 0]", "uniform 0", _slip(b))
+
+
+def field_k(k0):
+    kin = "uniform %s" % _g(k0)
+    b = {"inlet": "        type            fixedValue;\n        value           %s;" % kin,
+         "outlet": "        type            inletOutlet;\n        inletValue      %s;\n        value           %s;" % (kin, kin),
+         BODY_PATCH: "        type            kqRWallFunction;\n        value           %s;" % kin}
+    return _field("volScalarField", "k", "[0 2 -2 0 0 0 0]", kin, _slip(b))
+
+
+def field_omega(omega0):
+    oin = "uniform %s" % _g(omega0)
+    b = {"inlet": "        type            fixedValue;\n        value           %s;" % oin,
+         "outlet": "        type            inletOutlet;\n        inletValue      %s;\n        value           %s;" % (oin, oin),
+         BODY_PATCH: "        type            omegaWallFunction;\n        value           %s;" % oin}
+    return _field("volScalarField", "omega", "[0 0 -1 0 0 0 0]", oin, _slip(b))
+
+
+def field_nut():
+    b = {"inlet": "        type            calculated;\n        value           uniform 0;",
+         "outlet": "        type            calculated;\n        value           uniform 0;",
+         BODY_PATCH: "        type            nutkWallFunction;\n        value           uniform 0;"}
+    return _field("volScalarField", "nut", "[0 2 -1 0 0 0 0]", "uniform 0", _slip(b))
+
+
+def momentum_transport_dict(model="kOmegaSST"):
+    return _foam_header("dictionary", "momentumTransport") + (
+        "simulationType  RAS;\n\nRAS\n{\n    model           %s;\n"
+        "    turbulence      on;\n    printCoeffs     on;\n}\n" % model)
+
+
+def physical_properties_dict(nu=1.5e-5):
+    return _foam_header("dictionary", "physicalProperties") + (
+        "viscosityModel  constant;\n\nnu              [0 2 -1 0 0 0 0] %s;\n" % _g(nu))
+
+
+def fv_schemes_simple():
+    return _foam_header("dictionary", "fvSchemes") + (
+        "ddtSchemes\n{\n    default         steadyState;\n}\n\n"
+        "gradSchemes\n{\n    default         Gauss linear;\n"
+        "    grad(U)         cellLimited Gauss linear 1;\n}\n\n"
+        "divSchemes\n{\n    default         none;\n"
+        "    div(phi,U)      bounded Gauss linearUpwind grad(U);\n"
+        "    div(phi,k)      bounded Gauss upwind;\n"
+        "    div(phi,omega)  bounded Gauss upwind;\n"
+        "    div((nuEff*dev2(T(grad(U))))) Gauss linear;\n}\n\n"
+        "laplacianSchemes\n{\n    default         Gauss linear corrected;\n}\n\n"
+        "interpolationSchemes\n{\n    default         linear;\n}\n\n"
+        "snGradSchemes\n{\n    default         corrected;\n}\n\n"
+        "wallDist\n{\n    method          meshWave;\n}\n")
+
+
+def fv_solution_simple():
+    return _foam_header("dictionary", "fvSolution") + (
+        "solvers\n{\n"
+        "    p\n    {\n        solver          GAMG;\n        tolerance       1e-7;\n"
+        "        relTol          0.01;\n        smoother        GaussSeidel;\n    }\n\n"
+        "    \"(U|k|omega)\"\n    {\n        solver          smoothSolver;\n"
+        "        smoother        symGaussSeidel;\n        tolerance       1e-8;\n"
+        "        relTol          0.1;\n    }\n}\n\n"
+        "SIMPLE\n{\n    nNonOrthogonalCorrectors 0;\n    consistent      yes;\n"
+        "    residualControl\n    {\n        p               1e-4;\n"
+        "        U               1e-4;\n        \"(k|omega)\"     1e-4;\n    }\n}\n\n"
+        "relaxationFactors\n{\n    equations\n    {\n        U               0.9;\n"
+        "        \".*\"            0.9;\n    }\n}\n")
+
+
+def control_dict_simple(solver="incompressibleFluid", end_iter=1000,
+                        write_interval=200, deltaT=1):
+    return _foam_header("dictionary", "controlDict") + (
+        "solver          %s;\n\n"
+        "startFrom       startTime;\nstartTime       0;\n"
+        "stopAt          endTime;\nendTime         %d;\n"
+        "deltaT          %s;\n\n"
+        "writeControl    timeStep;\nwriteInterval   %d;\n\n"
+        "purgeWrite      0;\nwriteFormat     ascii;\nwritePrecision  7;\n"
+        "writeCompression off;\ntimeFormat      general;\ntimePrecision   6;\n"
+        "runTimeModifiable true;\n"
+        % (solver, int(end_iter), _g(deltaT), int(write_interval)))
+
+
+def flow_case_files(Ux, nu=1.5e-5, intensity=0.05, L=1.0,
+                    end_iter=1000, write_interval=200):
+    """All the non-mesh files of a steady incompressible (kOmegaSST) case, as a
+    {filename: text} map. Patch BCs match the blockMesh+snappy patches, so the
+    case is self-consistent on the mesh DynFrame generates."""
+    k0, omega0 = inlet_turbulence(Ux, intensity, L)
+    return {
+        "U": field_U(Ux), "p": field_p(), "k": field_k(k0),
+        "omega": field_omega(omega0), "nut": field_nut(),
+        "momentumTransport": momentum_transport_dict("kOmegaSST"),
+        "physicalProperties": physical_properties_dict(nu),
+        "fvSchemes": fv_schemes_simple(), "fvSolution": fv_solution_simple(),
+        "controlDict": control_dict_simple("incompressibleFluid", end_iter,
+                                            write_interval),
+    }, k0, omega0
+
+
+def build_flow_script(opts):
+    """Bash for the full incompressible-flow pipeline: assemble the staged case,
+    mesh (blockMesh+snappyHexMesh), solve (foamRun -> incompressibleFluid) and
+    convert to VTK for ParaView. opts: of_env, name, stage_win (holds every
+    generated file + body.stl), win_out, latest."""
+    import dynframe_cfd as cfd
+    of_env = opts.get("of_env", cfd.DEFAULT_OF_ENV)
+    name = opts.get("name", "flow1")
+    stage = cfd.win_to_wsl(opts["stage_win"])
+    win_out = opts["win_out"]
+    out = cfd.win_to_wsl(win_out)
+    lt = " -latestTime" if opts.get("latest", True) else ""
+    work = cfd.WORK_ROOT
+
+    L = []
+    L.append("# DynFrame CFD - generated incompressible-flow case (mesh + solve + view)")
+    L.append(". %s" % of_env)
+    L.append('STAGE=%s' % cfd.shq(stage))
+    L.append('mkdir -p %s' % work)
+    L.append('DST=%s/%s' % (work, name))
+    L.append('rm -rf "$DST"; mkdir -p "$DST/0" "$DST/constant/triSurface" "$DST/system"')
+    L.append('cd "$DST" || exit 1')
+    L.append('cp "$STAGE"/blockMeshDict "$STAGE"/snappyHexMeshDict '
+             '"$STAGE"/surfaceFeaturesDict "$STAGE"/fvSchemes "$STAGE"/fvSolution '
+             '"$STAGE"/controlDict system/')
+    L.append('cp "$STAGE"/momentumTransport "$STAGE"/physicalProperties constant/')
+    L.append('cp "$STAGE"/U "$STAGE"/p "$STAGE"/k "$STAGE"/omega "$STAGE"/nut 0/')
+    L.append('cp "$STAGE"/body.stl constant/triSurface/body.stl')
+    L.append('echo "== blockMesh =="; blockMesh 2>&1 | tee log.blockMesh | tail -3')
+    L.append('echo "== surfaceFeatures =="; surfaceFeatures 2>&1 | tail -3 || echo "skipped"')
+    L.append('if ! ls constant/*/*.eMesh constant/*.eMesh >/dev/null 2>&1; then '
+             'foamDictionary -entry castellatedMeshControls/features -set "()" '
+             'system/snappyHexMeshDict 2>/dev/null || true; fi')
+    L.append('echo "== snappyHexMesh =="; snappyHexMesh -overwrite 2>&1 | '
+             'tee log.snappyHexMesh | tail -4')
+    L.append('echo "== checkMesh =="; checkMesh 2>&1 | tee log.checkMesh | tail -12')
+    L.append('echo "== foamRun (incompressibleFluid) =="; foamRun 2>&1 | '
+             'tee log.foamRun | tail -25')
+    L.append('echo "== foamToVTK =="; foamToVTK%s 2>&1 | tail -3' % lt)
+    L.append('OUT=%s' % cfd.shq(out))
+    L.append('mkdir -p "$OUT"; rm -rf "$OUT/VTK"')
+    L.append('[ -d VTK ] && cp -r VTK "$OUT/" && echo "=== results VTK copied to: %s ==="'
+             % win_out)
+    L.append('echo "=== FLOW DONE: $DST  (colour by U or p in ParaView) ==="')
+    return "\n".join(L)

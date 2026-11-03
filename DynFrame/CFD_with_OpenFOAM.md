@@ -382,6 +382,13 @@ transfer, combustion, multiphase, species) the reliable *no‑code* route is to
 **reuse OpenFOAM's own validated tutorial** for that physics and change only a
 few parameters — you never write a case from scratch.
 
+> **For the *complete* list of every solver** (not just the four below), see
+> **`OpenFOAM14_solver_catalog.md`** in this folder. It maps every module in
+> your OpenFOAM 14 `$FOAM_TUTORIALS` — flow, heat/CHT, every multiphase model,
+> combustion, particles, films, mesh motion — to one universal recipe. The
+> four recipes below are the worked, debug-together versions of the most-asked
+> ones.
+
 **Important — OpenFOAM 12 (your blueCFD) reorganised solvers into modules run by
 `foamRun` / `foamMultiRun`, and moved the tutorials.** So don't trust a fixed
 path: locate the case on *your* machine first. Open the blueCFD terminal (Start

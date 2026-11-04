@@ -171,7 +171,7 @@ def snappy_hex_mesh_dict(stl="body.stl", name="body", level_min=2, level_max=4,
         "snap            true;\n"
         "addLayers       true;\n\n"
         "geometry\n{\n"
-        "    %s\n    {\n        type triSurfaceMesh;\n        name %s;\n    }\n"
+        "    %s\n    {\n        type triSurfaceMesh;\n        file \"%s\";\n    }\n"
         "}\n\n"
         "castellatedMeshControls\n{\n"
         "    maxLocalCells 1000000;\n"
@@ -211,7 +211,7 @@ def snappy_hex_mesh_dict(stl="body.stl", name="body", level_min=2, level_max=4,
         "    minFaceWeight 0.02;\n    minVolRatio 0.01;\n    minTriangleTwist -1;\n"
         "    nSmoothScale 4;\n    errorReduction 0.75;\n}\n\n"
         "mergeTolerance 1e-6;\n"
-        % (stl, name, name, feature_level, name, level_min, level_max,
+        % (name, stl, name, feature_level, name, level_min, level_max,
            _g(resolve_angle), _g(lx), _g(ly), _g(lz), name, n_layers,
            _g(expansion), _g(final_layer)))
 
@@ -260,7 +260,7 @@ def build_mesh_script(opts):
     L.append('echo "== surfaceFeatures =="; surfaceFeatures 2>&1 | tail -4 || '
              'echo "surfaceFeatures skipped"')
     # if no edge mesh was produced, disable feature snapping so snappy still runs
-    L.append('if ! ls constant/*/*.eMesh constant/*.eMesh >/dev/null 2>&1; then '
+    L.append('if [ -z "$(find constant -name \'*.eMesh\' 2>/dev/null)" ]; then '
              'echo "no eMesh -> disabling feature snapping"; '
              'foamDictionary -entry castellatedMeshControls/features -set "()" '
              'system/snappyHexMeshDict 2>/dev/null || true; fi')
@@ -468,7 +468,8 @@ def build_flow_script(opts):
     L.append('cp "$STAGE"/body.stl constant/triSurface/body.stl')
     L.append('echo "== blockMesh =="; blockMesh 2>&1 | tee log.blockMesh | tail -3')
     L.append('echo "== surfaceFeatures =="; surfaceFeatures 2>&1 | tail -3 || echo "skipped"')
-    L.append('if ! ls constant/*/*.eMesh constant/*.eMesh >/dev/null 2>&1; then '
+    L.append('if [ -z "$(find constant -name \'*.eMesh\' 2>/dev/null)" ]; then '
+             'echo "no eMesh -> disabling feature snapping"; '
              'foamDictionary -entry castellatedMeshControls/features -set "()" '
              'system/snappyHexMeshDict 2>/dev/null || true; fi')
     L.append('echo "== snappyHexMesh =="; snappyHexMesh -overwrite 2>&1 | '

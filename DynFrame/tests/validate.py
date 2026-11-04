@@ -1633,6 +1633,11 @@ assert "(-20 -20 -10)" in _bm and "(50 22 23)" in _bm
 _sn = CG.snappy_hex_mesh_dict(level_min=2, level_max=4, feature_level=4,
                               n_layers=3, location=_loc)
 assert "type triSurfaceMesh" in _sn and "level (2 4)" in _sn and "nSurfaceLayers 3" in _sn
+# OF-14 geometry syntax: block keyed by the region name with a file entry,
+# NOT the pre-14 "<stl> { ...; name <region>; }" form (snappy rejects that
+# with "keyword file is undefined"). Regression guard for that fix.
+assert 'file "body.stl"' in _sn and "name body;" not in _sn
+assert "body\n    {\n        type triSurfaceMesh;" in _sn
 assert _sn.count("{") == _sn.count("}")
 assert 'surfaces ( "body.stl" )' in CG.surface_features_dict()
 # ASCII STL writer from a tessellation (unit normal of the triangle)
@@ -1716,6 +1721,9 @@ _fsq = CG.build_flow_script({"name": "flow1",
 for _t in ("blockMesh", "snappyHexMesh -overwrite", "checkMesh", "foamRun",
            "foamToVTK", 'cp "$STAGE"/U '):
     assert _t in _fsq, _t
+# eMesh guard must use find (an "ls a b" test fails on a non-matching glob even
+# when another matches, which wrongly disabled feature snapping every run).
+assert "find constant -name '*.eMesh'" in _fsq and "ls constant/*/*.eMesh" not in _fsq
 print("  turbulence/fields/dicts/flow-script generators OK")
 # command end-to-end under the geometry mock
 FreeCAD.Matrix = _FM; C.global_shape = lambda o: _FShape()

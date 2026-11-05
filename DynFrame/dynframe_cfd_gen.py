@@ -366,6 +366,9 @@ def field_nut():
 
 
 def momentum_transport_dict(model="kOmegaSST"):
+    if str(model).strip().lower() == "laminar":
+        return _foam_header("dictionary", "momentumTransport") + \
+            "simulationType  laminar;\n"
     return _foam_header("dictionary", "momentumTransport") + (
         "simulationType  RAS;\n\nRAS\n{\n    model           %s;\n"
         "    turbulence      on;\n    printCoeffs     on;\n}\n" % model)
@@ -499,8 +502,10 @@ def bc_field_files(patches, nu=1.5e-5, intensity=0.05, L=1.0):
     `patches`: list of {"name": patch, "bc": one of inlet/outlet/wall/slip/
     noslip, "value": speed(m/s) or pressure(Pa)}. Returns ({filename: text},
     k0, omega0). kOmegaSST turbulence sized from the fastest inlet."""
+    _INLETS = ("velocity_inlet", "pressure_inlet")
+    _OUTLETS = ("velocity_outlet", "pressure_outlet")
     speeds = [abs(float(p.get("value", 0.0)))
-              for p in patches if p.get("bc") == "inlet"]
+              for p in patches if p.get("bc") == "velocity_inlet"]
     Uref = max(speeds) if speeds else 1.0
     k0, om0 = inlet_turbulence(Uref, intensity, L)
     kin = "uniform %s" % _g(k0)
@@ -508,55 +513,65 @@ def bc_field_files(patches, nu=1.5e-5, intensity=0.05, L=1.0):
 
     def U_entry(p):
         bc = p.get("bc"); v = _g(p.get("value", 0.0))
-        if bc == "inlet":
+        if bc in ("velocity_inlet", "velocity_outlet", "moving_wall"):
             return ("        type            fixedValue;\n"
                     "        value           uniform (%s 0 0);" % v)
-        if bc == "outlet":
+        if bc == "pressure_inlet":
+            return ("        type            pressureInletVelocity;\n"
+                    "        value           uniform (0 0 0);")
+        if bc == "pressure_outlet":
             return ("        type            pressureInletOutletVelocity;\n"
                     "        value           uniform (0 0 0);")
         if bc == "slip":
             return "        type            slip;"
-        if bc == "noslip":
-            return ("        type            fixedValue;\n"
-                    "        value           uniform (%s 0 0);" % v)
+        if bc == "symmetry":
+            return "        type            symmetry;"
         return "        type            noSlip;"
 
     def p_entry(p):
         bc = p.get("bc")
-        if bc == "outlet":
+        if bc in ("pressure_inlet", "pressure_outlet"):
             return ("        type            fixedValue;\n"
                     "        value           uniform %s;" % _g(p.get("value", 0.0)))
         if bc == "slip":
             return "        type            slip;"
+        if bc == "symmetry":
+            return "        type            symmetry;"
         return "        type            zeroGradient;"
 
     def k_entry(p):
         bc = p.get("bc")
-        if bc == "inlet":
-            return ("        type            fixedValue;\n        value           %s;" % kin)
-        if bc == "outlet":
+        if bc in _INLETS:
+            return "        type            fixedValue;\n        value           %s;" % kin
+        if bc in _OUTLETS:
             return ("        type            inletOutlet;\n        inletValue      %s;\n"
                     "        value           %s;" % (kin, kin))
         if bc == "slip":
             return "        type            slip;"
+        if bc == "symmetry":
+            return "        type            symmetry;"
         return "        type            kqRWallFunction;\n        value           %s;" % kin
 
     def omega_entry(p):
         bc = p.get("bc")
-        if bc == "inlet":
-            return ("        type            fixedValue;\n        value           %s;" % oin)
-        if bc == "outlet":
+        if bc in _INLETS:
+            return "        type            fixedValue;\n        value           %s;" % oin
+        if bc in _OUTLETS:
             return ("        type            inletOutlet;\n        inletValue      %s;\n"
                     "        value           %s;" % (oin, oin))
         if bc == "slip":
             return "        type            slip;"
+        if bc == "symmetry":
+            return "        type            symmetry;"
         return "        type            omegaWallFunction;\n        value           %s;" % oin
 
     def nut_entry(p):
         bc = p.get("bc")
         if bc == "slip":
             return "        type            slip;"
-        if bc in ("inlet", "outlet"):
+        if bc == "symmetry":
+            return "        type            symmetry;"
+        if bc in _INLETS or bc in _OUTLETS:
             return "        type            calculated;\n        value           uniform 0;"
         return "        type            nutkWallFunction;\n        value           uniform 0;"
 

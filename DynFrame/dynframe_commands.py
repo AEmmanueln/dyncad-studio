@@ -7438,6 +7438,162 @@ def _cfd_study_nu(doc, default=1.5e-5):
     return default
 
 
+def _cfd_study_set(doc, node, **kv):
+    """Store key/value settings on both the node and its study container."""
+    cont = _cfd_study_container(doc, node)
+    for tgt in (node, cont):
+        if tgt is not None:
+            for k, v in kv.items():
+                _cfd_set_str(tgt, k, v)
+    return cont
+
+
+def _cfd_study_get(doc, key, default=""):
+    """Read a study setting stored on any CFD object (first non-empty)."""
+    for o in getattr(doc, "Objects", []):
+        v = getattr(o, key, "")
+        if v:
+            return v
+    return default
+
+
+def _cfd_doc_solids(doc):
+    """Document objects that are solids (have a Shape with faces)."""
+    out = []
+    for o in getattr(doc, "Objects", []):
+        sh = getattr(o, "Shape", None)
+        if sh is not None and getattr(sh, "Faces", None):
+            out.append(o)
+    return out
+
+
+def _cfd_pick_geometry(node):
+    """Geometry step: choose the solid that is the flow region for this study."""
+    doc = FreeCAD.ActiveDocument
+    solid = None
+    try:
+        sel = [o for o in FreeCADGui.Selection.getSelection()
+               if getattr(o, "Shape", None) is not None]
+        if sel:
+            solid = sel[0]
+    except Exception:
+        pass
+    if solid is None:
+        solids = _cfd_doc_solids(doc)
+        if not solids:
+            info("Create or import a solid first (Part workbench -> Cube, or your "
+                 "CAD part), then open Geometry."); return
+        names = [getattr(o, "Label", o.Name) for o in solids]
+        vals = form_dialog("Geometry", [
+            {"key": "_i", "kind": "info", "default":
+             "Choose the solid that is the flow region (the part the fluid flows "
+             "through or around). Tip: select it in the tree first."},
+            {"key": "g", "label": "Solid", "kind": "combo",
+             "options": names, "default": names[0]}],
+            **_cfd_dialog_kwargs("Geometry", "Pick the simulation geometry."))
+        if not vals:
+            return
+        solid = next((o for o in solids
+                      if getattr(o, "Label", o.Name) == vals.get("g")), solids[0])
+    _cfd_study_set(doc, node, CfdGeometry=getattr(solid, "Name", ""))
+    _cfd_mark_node_done(node, "Geometry")
+    try:
+        doc.recompute()
+    except Exception:
+        pass
+    info("Geometry set to '%s'. Next: open Boundary conditions and tag its faces."
+         % getattr(solid, "Label", "solid"))
+
+
+def _cfd_pick_numerics(node):
+    """Numerics step: turbulence model, steady/transient, turbulence intensity."""
+    doc = FreeCAD.ActiveDocument
+    fields = [
+        {"key": "_i", "kind": "info", "default":
+         "Turbulence model and time dependency for the solve (SimScale's "
+         "Numerics). kOmegaSST is a robust default for most flows."},
+        {"key": "turb", "label": "Turbulence model", "kind": "combo",
+         "options": ["kOmegaSST", "kEpsilon", "Laminar"], "default":
+         _cfd_study_get(doc, "CfdTurbulence", "kOmegaSST")},
+        {"key": "time", "label": "Time dependency", "kind": "combo",
+         "options": ["Steady-state", "Transient"], "default": "Steady-state"},
+        {"key": "ti", "label": "Turbulence intensity (%)", "kind": "float",
+         "default": 5.0, "decimals": 2},
+    ]
+    vals = form_dialog("Numerics", fields,
+                       **_cfd_dialog_kwargs("Numerics",
+                                            "Turbulence model + time dependency."))
+    if not vals:
+        return
+    _cfd_study_set(doc, node, CfdTurbulence=vals.get("turb", "kOmegaSST"),
+                   CfdSteady=("1" if vals.get("time") == "Steady-state" else "0"),
+                   CfdIntensity=_g(vals.get("ti", 5.0)))
+    _cfd_mark_node_done(node, "Numerics")
+    try:
+        doc.recompute()
+    except Exception:
+        pass
+    info("Numerics: %s, %s, turbulence intensity %.1f%%."
+         % (vals.get("turb"), vals.get("time"), float(vals.get("ti", 5.0))))
+
+
+def _cfd_pick_control(node):
+    """Simulation-control step: iterations, write interval, convergence residual."""
+    doc = FreeCAD.ActiveDocument
+    fields = [
+        {"key": "_i", "kind": "info", "default":
+         "Run controls: how many steady iterations, how often to write, and the "
+         "residual at which the solve is called converged."},
+        {"key": "iters", "label": "Iterations (steady)", "kind": "int",
+         "default": int(float(_cfd_study_get(doc, "CfdIters", "1000") or 1000)),
+         "min": 50, "max": 200000},
+        {"key": "write", "label": "Write interval (iterations)", "kind": "int",
+         "default": 200, "min": 1, "max": 200000},
+        {"key": "res", "label": "Convergence residual", "kind": "float",
+         "default": 1e-4, "decimals": 8},
+    ]
+    vals = form_dialog("Simulation control", fields,
+                       **_cfd_dialog_kwargs("Simulation control",
+                                            "Iterations, output and convergence."))
+    if not vals:
+        return
+    _cfd_study_set(doc, node, CfdIters=str(int(vals.get("iters", 1000))),
+                   CfdWrite=str(int(vals.get("write", 200))),
+                   CfdResidual=_g(vals.get("res", 1e-4)))
+    _cfd_mark_node_done(node, "Simulation control")
+    try:
+        doc.recompute()
+    except Exception:
+        pass
+    info("Simulation control: %d iterations, write every %d, converge at %g."
+         % (int(vals.get("iters", 1000)), int(vals.get("write", 200)),
+            float(vals.get("res", 1e-4))))
+
+
+def _cfd_pick_mesh(node):
+    """Mesh step: base cell count across the domain (blockMesh for box solids)."""
+    doc = FreeCAD.ActiveDocument
+    fields = [
+        {"key": "_i", "kind": "info", "default":
+         "Mesh resolution: cells across the domain. A box solid is meshed with "
+         "blockMesh; higher = finer (and slower)."},
+        {"key": "cells", "label": "Cells across the domain", "kind": "int",
+         "default": int(float(_cfd_study_get(doc, "CfdCells", "20") or 20)),
+         "min": 4, "max": 400},
+    ]
+    vals = form_dialog("Mesh", fields,
+                       **_cfd_dialog_kwargs("Mesh", "Base mesh resolution."))
+    if not vals:
+        return
+    _cfd_study_set(doc, node, CfdCells=str(int(vals.get("cells", 20))))
+    _cfd_mark_node_done(node, "Mesh")
+    try:
+        doc.recompute()
+    except Exception:
+        pass
+    info("Mesh: %d cells across the domain." % int(vals.get("cells", 20)))
+
+
 def _cfd_open_node(node):
     """Drive the workflow from the clicked simulation-tree node - the SimScale way,
     where each node runs its own step. Reuses the dedicated commands so the tree
@@ -7449,24 +7605,18 @@ def _cfd_open_node(node):
         elif panel == "run":
             CfdFlowInternal().Activated()
         elif panel == "geometry":
-            info("Geometry: select the solid the flow is in (or around) in the "
-                 "Model tree, then open the 'Boundary conditions' node to tag its "
-                 "faces. The selected solid is this study's geometry.")
+            _cfd_pick_geometry(node)
         elif panel == "mesh":
-            info("Mesh: box solids are meshed automatically (blockMesh) when you "
-                 "Run. For an arbitrary solid use 'CFD Mesh from CAD' "
-                 "(snappyHexMesh). Per-node mesh controls are coming.")
+            _cfd_pick_mesh(node)
         elif panel in ("materials", "mat_fluid"):
             _cfd_pick_material(node)
         elif panel == "mat_solid":
             info("Material (solid): for conjugate heat transfer. Coming with the "
                  "multi-region solver panel.")
         elif panel == "numerics":
-            info("Numerics: steady kOmegaSST RANS with bounded schemes and SIMPLE "
-                 "(consistent) - SimScale's defaults. An editable panel is coming.")
+            _cfd_pick_numerics(node)
         elif panel == "control":
-            info("Simulation control: iteration count and write interval are set "
-                 "on the Run step for now; a dedicated panel is coming.")
+            _cfd_pick_control(node)
         else:
             info("This step uses validated defaults; a dedicated panel is coming.")
     except Exception as e:
@@ -7750,9 +7900,8 @@ class _CfdBCTaskPanel:
         self._type = QW.QComboBox(); self._type.addItems(cfdbc.bc_labels())
         self._type.currentIndexChanged.connect(self._sync_value_label)
         form.addRow("Type", self._type)
-        self._value = QW.QDoubleSpinBox()
-        self._value.setRange(-1e12, 1e12); self._value.setDecimals(4)
-        self._value.setValue(10.0)
+        self._value = QW.QComboBox()
+        self._value.setEditable(True)          # presets in the list, or type your own
         self._vrow = QW.QLabel("Inlet speed (m/s)")
         form.addRow(self._vrow, self._value)
         lay.addLayout(form)
@@ -7771,7 +7920,16 @@ class _CfdBCTaskPanel:
         bc = cfdbc.bc_by_label(self._type.currentText()) or cfdbc.BC_TYPES[0]
         lab = bc.get("value_label") or "Value (not needed)"
         self._vrow.setText(lab)
-        self._value.setEnabled(bool(bc.get("value_label")))
+        needs = bool(bc.get("value_label"))
+        self._value.setEnabled(needs)
+        try:
+            self._value.clear()
+            if needs:
+                self._value.addItems([str(v) for v in
+                                      (bc.get("presets") or [bc.get("value", 0.0)])])
+                self._value.setEditText(str(bc.get("value", 0.0)))
+        except Exception:
+            pass
 
     def refresh_selection(self):
         try:
@@ -7801,11 +7959,14 @@ class _CfdBCTaskPanel:
             self._status.setText("Select one or more faces in the 3D view first.")
             return
         bc = cfdbc.bc_by_label(self._type.currentText()) or cfdbc.BC_TYPES[0]
+        try:
+            val = float(self._value.currentText())
+        except (TypeError, ValueError):
+            val = 0.0
         doc = FreeCAD.ActiveDocument
         doc.openTransaction("DynFrame: assign BC")
         try:
-            _cfd_create_bc(doc, self._cur_solid, bc, self._cur_faces,
-                           self._value.value())
+            _cfd_create_bc(doc, self._cur_solid, bc, self._cur_faces, val)
             doc.commitTransaction(); doc.recompute()
         except Exception as e:
             try:
@@ -7944,11 +8105,8 @@ def _cfd_bc_values(doc, solid_name):
 
 
 def _cfd_patch_type(bc_key):
-    if bc_key in ("inlet", "outlet"):
-        return "patch"
-    if bc_key == "slip":
-        return "symmetry"
-    return "wall"
+    b = cfdbc.bc_type(bc_key) if cfdbc is not None else None
+    return b.get("patch", "wall") if b else "wall"
 
 
 class CfdFlowInternal:
@@ -8010,9 +8168,11 @@ class CfdFlowInternal:
                 ", ".join(sorted(set(assigns.values()))))},
             {"key": "name", "label": "Case name", "kind": "text", "default": "flowint1"},
             {"key": "ncells", "label": "Cells across the box", "kind": "int",
-             "default": 20, "min": 4, "max": 200},
+             "default": int(float(_cfd_study_get(doc, "CfdCells", "20") or 20)),
+             "min": 4, "max": 400},
             {"key": "iters", "label": "Iterations (steady)", "kind": "int",
-             "default": 1000, "min": 50, "max": 100000},
+             "default": int(float(_cfd_study_get(doc, "CfdIters", "1000") or 1000)),
+             "min": 50, "max": 200000},
             {"key": "nu", "label": "Kinematic viscosity nu (m2/s)", "kind": "float",
              "default": _cfd_study_nu(doc), "decimals": 9},
             {"key": "distro", "label": "WSL distro (blank = default)", "kind": "text", "default": ""},
@@ -8041,12 +8201,16 @@ class CfdFlowInternal:
         patches = [{"name": k, "bc": k, "value": vals0.get(k, 0.0)}
                    for k in sorted(used)]
         Lm = max(bb.XLength, bb.YLength, bb.ZLength, 1e-6)
+        intensity = float(_cfd_study_get(doc, "CfdIntensity", "5") or 5) / 100.0
         casefiles, k0, om0 = cfdgen.bc_field_files(
-            patches, nu=float(vals["nu"]), L=Lm)
-        # honour the requested iteration count
+            patches, nu=float(vals["nu"]), intensity=intensity, L=Lm)
+        # apply the study's Numerics (turbulence model) and run controls
+        turb = _cfd_study_get(doc, "CfdTurbulence", "kOmegaSST")
+        casefiles["momentumTransport"] = cfdgen.momentum_transport_dict(turb)
+        write = int(float(_cfd_study_get(doc, "CfdWrite", "")
+                          or max(1, int(int(vals["iters"]) / 5))))
         casefiles["controlDict"] = cfdgen.control_dict_simple(
-            "incompressibleFluid", int(vals["iters"]),
-            max(1, int(int(vals["iters"]) / 5)))
+            "incompressibleFluid", int(vals["iters"]), max(1, write))
         outdir = _cfd_outdir()
         stage = os.path.join(outdir, name + "_src")
         try:

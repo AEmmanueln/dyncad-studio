@@ -1859,12 +1859,13 @@ assert len(CB.BC_TYPES) >= 4
 for _b in CB.BC_TYPES:
     assert "key" in _b and len(_b["color"]) == 3 and "label" in _b
 assert CB.parse_face_indices(["Face3", "Face12", "Edge1", "x"]) == [2, 11]
-_fc = CB.face_colors(6, {0: "inlet", 2: "outlet"})
+_fc = CB.face_colors(6, {0: "velocity_inlet", 2: "pressure_outlet"})
 assert len(_fc) == 6
-assert _fc[0] == CB.bc_color("inlet") and _fc[2] == CB.bc_color("outlet")
+assert _fc[0] == CB.bc_color("velocity_inlet") and _fc[2] == CB.bc_color("pressure_outlet")
 assert _fc[1] == CB.BASE_FACE_COLOR
-_asg = CB.merge_assignments({0: "inlet"}, [2, 3], "wall")
-assert _asg == {0: "inlet", 2: "wall", 3: "wall"} and CB.summarize(_asg)["wall"] == 2
+_asg = CB.merge_assignments({0: "velocity_inlet"}, [2, 3], "wall")
+assert _asg == {0: "velocity_inlet", 2: "wall", 3: "wall"} and CB.summarize(_asg)["wall"] == 2
+assert len(CB.BC_TYPES) >= 8   # full SimScale-style set
 print("  BC types + face colouring + assignments OK")
 # command: assign a BC to the selected faces -> BC object + recoloured solid
 
@@ -1883,17 +1884,17 @@ C.FreeCADGui.Selection = type("S", (), {"getSelectionEx": staticmethod(
 C.form_dialog = lambda title, fields, **_k: {"type": CB.bc_labels()[0], "value": 7.5}
 gBCm = {}; C.info = lambda m, g=gBCm: g.setdefault("msg", m)
 C.CfdAssignBC().Activated()
-_bcobj = [o for o in dBC.Objects if getattr(o, "CfdBCType", "") == "inlet"]
+_bcobj = [o for o in dBC.Objects if getattr(o, "CfdBCType", "") == "velocity_inlet"]
 assert _bcobj, "BC object not created"
 assert getattr(_bcobj[0], "CfdBCFaces", "") == "0,1"
 assert getattr(_bcobj[0], "CfdBCSolid", "") == _sld.Name
 _dc = getattr(_sld.ViewObject, "DiffuseColor", None)
-assert _dc and len(_dc) == 6 and tuple(_dc[0]) == CB.bc_color("inlet")
+assert _dc and len(_dc) == 6 and tuple(_dc[0]) == CB.bc_color("velocity_inlet")
 C.global_shape = _savedGS2; C.FreeCADGui.Selection = _savedSel2
 print("  CfdAssignBC assigned + colour-coded the faces OK")
 # wire face-assigned BCs -> OpenFOAM 0/ field files
-_patches = [{"name": "inlet", "bc": "inlet", "value": 12.0},
-            {"name": "outlet", "bc": "outlet", "value": 0.0},
+_patches = [{"name": "inlet", "bc": "velocity_inlet", "value": 12.0},
+            {"name": "outlet", "bc": "pressure_outlet", "value": 0.0},
             {"name": "walls", "bc": "wall", "value": 0.0}]
 _ff, _k0f, _om0f = CG.bc_field_files(_patches, nu=1.5e-5, L=0.1)
 assert set(_ff) >= {"U", "p", "k", "omega", "nut", "controlDict", "physicalProperties"}
@@ -1932,7 +1933,7 @@ def _mkbc(typ, faces, val):
     C._cfd_set_str(o, "CfdBCFaces", faces); C._cfd_set_str(o, "CfdBCValue", str(val))
 
 
-_mkbc("inlet", "0", 12.0); _mkbc("outlet", "1", 0.0)
+_mkbc("velocity_inlet", "0", 12.0); _mkbc("pressure_outlet", "1", 0.0)
 
 
 class _BoxShape:
@@ -1997,6 +1998,44 @@ C._cfd_open_node(_mnode)
 assert abs(float(getattr(_mnode, "CfdNu", "0")) - 1.0e-6) < 1e-12
 assert abs(float(getattr(_cont, "CfdNu", "0")) - 1.0e-6) < 1e-12
 print("  material library + fluid assignment OK")
+# node setup panels: geometry / numerics / control / mesh store settings
+_savedGS3 = C.global_shape; _savedSel3 = C.FreeCADGui.Selection
+dND = Doc(); FreeCAD.ActiveDocument = dND
+_scont = dND.addObject("App::DocumentObjectGroup", "CFD_s")
+
+
+def _mknode(panel):
+    nd = dND.addObject("App::DocumentObjectGroupPython", "Cfd_" + panel)
+    C._cfd_set_str(nd, "CfdPanel", panel); _scont.addObject(nd); return nd
+
+
+gND = {}; C.info = lambda m, g=gND: g.setdefault("msg", m)
+_gn = _mknode("geometry")
+_sld2 = dND.addObject("Part::Box", "BoxG")
+C.global_shape = lambda o: Shape(6)
+C.FreeCADGui.Selection = type("S", (), {
+    "getSelection": staticmethod(lambda: [_sld2])})()
+C._cfd_open_node(_gn)
+assert getattr(_scont, "CfdGeometry", "") == _sld2.Name
+_nn = _mknode("numerics")
+C.form_dialog = lambda title, fields, **k: {"turb": "kEpsilon",
+                                            "time": "Steady-state", "ti": 3.0}
+C._cfd_open_node(_nn)
+assert getattr(_scont, "CfdTurbulence", "") == "kEpsilon"
+assert getattr(_scont, "CfdSteady", "") == "1"
+_cn = _mknode("control")
+C.form_dialog = lambda title, fields, **k: {"iters": 500, "write": 100, "res": 1e-5}
+C._cfd_open_node(_cn)
+assert int(getattr(_scont, "CfdIters", "0")) == 500
+assert int(getattr(_scont, "CfdWrite", "0")) == 100
+_mn = _mknode("mesh")
+C.form_dialog = lambda title, fields, **k: {"cells": 30}
+C._cfd_open_node(_mn)
+assert int(getattr(_scont, "CfdCells", "0")) == 30
+assert "simulationType  laminar" in CG.momentum_transport_dict("Laminar")
+assert "RAS" in CG.momentum_transport_dict("kOmegaSST")
+C.global_shape = _savedGS3; C.FreeCADGui.Selection = _savedSel3
+print("  node panels (geometry/numerics/control/mesh) + laminar OK")
 print("CFD boundary conditions OK")
 
 print("\nALL RUNTIME CHECKS PASSED")

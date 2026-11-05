@@ -10,24 +10,48 @@ a BC document object, and applies the colour list to the solid's ViewObject.
 """
 
 
-# The boundary-condition types a user can assign to faces, SimScale-style, with
-# the colour each paints on the 3D view and whether it needs a numeric value.
+# The boundary-condition types a user can assign to faces, the SimScale set, with
+# the colour each paints on the 3D view, the blockMesh/mesh patch type, whether
+# it needs a value (and some common preset values), and a help line. The field
+# treatment per type lives in dynframe_cfd_gen.bc_field_files, keyed by "key".
 BC_TYPES = [
-    {"key": "inlet",   "label": "Velocity inlet",
-     "color": (0.20, 0.70, 0.30), "value_label": "Inlet speed (m/s)",
-     "value": 10.0, "patch": "patch"},
-    {"key": "outlet",  "label": "Pressure outlet",
-     "color": (0.85, 0.25, 0.20), "value_label": "Gauge pressure (Pa)",
-     "value": 0.0, "patch": "patch"},
-    {"key": "wall",    "label": "Wall (no-slip)",
-     "color": (0.78, 0.80, 0.83), "value_label": "",
-     "value": 0.0, "patch": "wall"},
-    {"key": "slip",    "label": "Slip / symmetry",
-     "color": (0.45, 0.65, 0.88), "value_label": "",
-     "value": 0.0, "patch": "symmetry"},
-    {"key": "noslip",  "label": "Moving wall (velocity)",
-     "color": (0.62, 0.55, 0.42), "value_label": "Wall speed (m/s)",
-     "value": 0.0, "patch": "wall"},
+    {"key": "velocity_inlet", "label": "Velocity inlet",
+     "color": (0.20, 0.70, 0.30), "patch": "patch",
+     "value_label": "Inlet speed (m/s)", "value": 10.0,
+     "presets": [1, 2, 5, 10, 20, 50],
+     "help": "Fixed velocity into the domain (+X). k/omega set from turbulence."},
+    {"key": "pressure_inlet", "label": "Pressure inlet",
+     "color": (0.30, 0.78, 0.55), "patch": "patch",
+     "value_label": "Total pressure (Pa)", "value": 0.0,
+     "presets": [0, 50, 100, 500, 1000],
+     "help": "Fixed total pressure; velocity follows from the pressure field."},
+    {"key": "velocity_outlet", "label": "Velocity outlet",
+     "color": (0.95, 0.55, 0.20), "patch": "patch",
+     "value_label": "Outlet speed (m/s)", "value": 10.0,
+     "presets": [1, 2, 5, 10, 20, 50],
+     "help": "Fixed velocity leaving the domain."},
+    {"key": "pressure_outlet", "label": "Pressure outlet",
+     "color": (0.85, 0.25, 0.20), "patch": "patch",
+     "value_label": "Gauge pressure (Pa)", "value": 0.0,
+     "presets": [0, -50, -100, 100, 500],
+     "help": "Fixed static pressure (0 = atmosphere); backflow handled."},
+    {"key": "wall", "label": "Wall (no-slip)",
+     "color": (0.78, 0.80, 0.83), "patch": "wall",
+     "value_label": "", "value": 0.0, "presets": [],
+     "help": "Stationary solid wall, zero velocity, wall functions on k/omega."},
+    {"key": "moving_wall", "label": "Moving wall",
+     "color": (0.62, 0.55, 0.42), "patch": "wall",
+     "value_label": "Wall speed (m/s)", "value": 1.0,
+     "presets": [0.1, 0.5, 1, 2, 5],
+     "help": "Wall translating in +X at the given speed (lid-driven etc.)."},
+    {"key": "slip", "label": "Slip wall",
+     "color": (0.45, 0.65, 0.88), "patch": "patch",
+     "value_label": "", "value": 0.0, "presets": [],
+     "help": "Frictionless wall: no normal flow, free tangential (far-field)."},
+    {"key": "symmetry", "label": "Symmetry",
+     "color": (0.55, 0.60, 0.95), "patch": "symmetry",
+     "value_label": "", "value": 0.0, "presets": [],
+     "help": "Mirror plane: model half the domain to save cells."},
 ]
 
 BASE_FACE_COLOR = (0.80, 0.80, 0.82)   # unassigned faces (light grey)

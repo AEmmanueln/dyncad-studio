@@ -7351,6 +7351,236 @@ class CfdMeshFromCad:
               os.path.join(win_out, "VTK"), name, launch))
 
 
+def _cfd_flow_execute(obj, pts, facets, bb, Lm, vals):
+    """Build + stage the incompressible-flow case from the collected values and
+    report it. Shared by the modal form and the docked Task panel so both paths
+    run exactly the same, validated pipeline (snappyHexMesh + kOmegaSST)."""
+    name = (str(vals.get("name") or "flow1").strip().replace(" ", "_")) or "flow1"
+    Ux = float(vals["U"]); nu = float(vals["nu"])
+    I = max(0.0, float(vals["ti"]) / 100.0)
+    dom = cfdgen.domain_from_bbox(
+        bb.XMin, bb.YMin, bb.ZMin, bb.XMax, bb.YMax, bb.ZMax,
+        up=float(vals["up"]), down=float(vals["down"]), side=float(vals["side"]),
+        top=float(vals["top"]), ground=float(vals["ground"]))
+    h = Lm / max(2, int(vals["ncb"]))
+    nx, ny, nz = cfdgen.cell_counts(*dom, h=h)
+    loc = cfdgen.location_in_mesh(*dom, bx0=bb.XMin)
+    # freestream box: all far-field patches (incl. ground) are slip
+    bm = cfdgen.block_mesh_dict(*dom, nx, ny, nz, ground_type="patch")
+    sn = cfdgen.snappy_hex_mesh_dict(
+        stl="body.stl", name="body", level_min=int(vals["lmin"]),
+        level_max=int(vals["lmax"]), feature_level=int(vals["lmax"]),
+        n_layers=int(vals["nlay"]), location=loc)
+    sf = cfdgen.surface_features_dict("body.stl")
+    stl = cfdgen.ascii_stl("body", pts, facets)
+    wri = max(1, int(int(vals["iters"]) / 5))
+    casefiles, k0, om0 = cfdgen.flow_case_files(
+        Ux, nu=nu, intensity=I, L=Lm, end_iter=int(vals["iters"]),
+        write_interval=wri)
+    outdir = _cfd_outdir()
+    stage = os.path.join(outdir, name + "_src")
+    try:
+        _write_lf(os.path.join(stage, "blockMeshDict"), bm)
+        _write_lf(os.path.join(stage, "snappyHexMeshDict"), sn)
+        _write_lf(os.path.join(stage, "surfaceFeaturesDict"), sf)
+        _write_lf(os.path.join(stage, "body.stl"), stl)
+        for fn, txt in casefiles.items():
+            _write_lf(os.path.join(stage, fn), txt)
+    except Exception as e:
+        err("Could not write the CFD case files to %s:\n%s" % (stage, e)); return
+    of_env = str(vals.get("env") or cfd.DEFAULT_OF_ENV).strip()
+    distro = str(vals.get("distro") or cfd.DEFAULT_DISTRO).strip()
+    win_out = os.path.join(outdir, name)
+    fs = cfdgen.build_flow_script({"of_env": of_env, "name": name,
+                                   "stage_win": stage, "win_out": win_out,
+                                   "latest": True})
+    fpath = os.path.join(outdir, "run_flow_%s.sh" % name)
+    try:
+        _write_lf(fpath, fs)
+    except Exception as e:
+        err("Could not write the flow script:\n%s" % e); return
+    flow_cmd = "bash %s" % cfd.win_to_wsl(fpath, distro)
+    _cfd_record(FreeCAD.ActiveDocument, name, [
+        ("Analysis", "Incompressible flow (RANS kOmegaSST)"),
+        ("Geometry", getattr(obj, "Label", "body")),
+        ("Inlet speed (m/s)", "%g (+X)" % Ux),
+        ("Inlet k / omega", "%.4g / %.4g" % (k0, om0)),
+        ("Viscosity nu", "%g" % nu),
+        ("Background cells", "%d x %d x %d" % (nx, ny, nz)),
+        ("Mesh", "snappyHexMesh, level %d-%d, %d layers"
+         % (int(vals["lmin"]), int(vals["lmax"]), int(vals["nlay"]))),
+        ("Run (paste in WSL)", flow_cmd),
+        ("Then open in ParaView", os.path.join(win_out, "VTK")),
+        ("Flow script", fpath), ("Staged files", stage)])
+    # draw the setup on the part (domain box + BC-coloured faces + inlet arrows)
+    try:
+        _draw_cfd_domain(FreeCAD.ActiveDocument,
+                         tuple(c * 1000.0 for c in dom), Ux, name)
+        FreeCAD.ActiveDocument.recompute()
+    except Exception:
+        pass
+    launch = ""
+    if vals.get("run") == "Yes":
+        launch = "\n\nAuto-run: " + _try_launch_terminal(cfd.wsl_run_argv(fs, distro))
+    info("CFD flow case '%s' on '%s' (engine: OpenFOAM incompressibleFluid, as "
+         "SimScale runs).\n\nInlet %g m/s (+X), kOmegaSST turbulence "
+         "(k=%.4g, omega=%.4g), mesh %d x %d x %d background + snappyHexMesh. "
+         "In your WSL OpenFOAM terminal:\n\n  %s\n\nIt meshes, solves (%d "
+         "iterations) and writes VTK to:\n  %s\n\nOpen in ParaView and colour "
+         "by U (velocity) or p (pressure). It is a steady RANS solve - watch "
+         "the residuals fall in log.foamRun. Details in the 'CFD_%s' sheet.%s" %
+         (name, getattr(obj, "Label", "body"), Ux, k0, om0, nx, ny, nz,
+          flow_cmd, int(vals["iters"]), os.path.join(win_out, "VTK"), name,
+          launch))
+
+
+# ── SimScale-style docked CFD setup panel (FreeCAD Task panel) ──
+# The CFD section -> which setup step (QGroupBox) each field belongs to, so the
+# flat `fields` spec renders as a SimScale-style stack of setup steps in the dock.
+_CFD_FLOW_SECTIONS = ("Geometry", "Boundary conditions", "Fluid properties",
+                      "Mesh & refinement", "Simulation control", "Run")
+_CFD_FLOW_KEY_SECTION = {
+    "_i": "Geometry", "name": "Geometry",
+    "_legend": "Boundary conditions", "U": "Boundary conditions",
+    "ti": "Boundary conditions",
+    "nu": "Fluid properties",
+    "ncb": "Mesh & refinement", "lmin": "Mesh & refinement",
+    "lmax": "Mesh & refinement", "nlay": "Mesh & refinement",
+    "up": "Mesh & refinement", "down": "Mesh & refinement",
+    "side": "Mesh & refinement", "top": "Mesh & refinement",
+    "ground": "Mesh & refinement",
+    "iters": "Simulation control",
+    "distro": "Run", "env": "Run", "run": "Run",
+}
+
+
+def _cfd_make_widget(f):
+    """Create a Qt input widget + value getter from a field spec (same kinds as
+    form_dialog). Returns (widget, getter_or_None); info rows have no getter."""
+    kind = f.get("kind", "text")
+    if kind == "info":
+        return QW.QLabel(str(f.get("default", ""))), None
+    if kind == "combo":
+        w = QW.QComboBox()
+        opts = [str(x) for x in f.get("options", [])]
+        w.addItems(opts)
+        dv = f.get("default")
+        if dv is not None and str(dv) in opts:
+            w.setCurrentIndex(opts.index(str(dv)))
+        return w, (lambda w=w: w.currentText())
+    if kind in ("float", "int"):
+        w = QW.QDoubleSpinBox() if kind == "float" else QW.QSpinBox()
+        w.setMinimum(f.get("min", -1e12)); w.setMaximum(f.get("max", 1e12))
+        if kind == "float":
+            w.setDecimals(f.get("decimals", 3))
+        w.setValue(f.get("default", 0))
+        return w, (lambda w=w: w.value())
+    w = QW.QLineEdit(str(f.get("default", "")))
+    return w, (lambda w=w: w.text())
+
+
+class _CfdFlowTaskPanel:
+    """A docked FreeCAD Task panel for the incompressible-flow setup - the
+    SimScale-style left-dock experience (stacked setup steps, colour-coded BC
+    legend, themed) instead of a floating modal. OK runs the same validated
+    pipeline as the modal path via _cfd_flow_execute."""
+
+    def __init__(self, obj, pts, facets, bb, Lm, fields):
+        self._obj = obj; self._pts = pts; self._facets = facets
+        self._bb = bb; self._Lm = Lm
+        self._getters = {}
+        self.form = self._build(fields)
+
+    def _build(self, fields):
+        root = QW.QWidget(); root.setObjectName("cfdPanel")
+        root.setWindowTitle("CFD Flow")
+        if cfdui is not None:
+            try:
+                root.setStyleSheet(cfdui.stylesheet())
+            except Exception:
+                pass
+        outer = QW.QVBoxLayout(root)
+        hl = QW.QLabel("CFD Flow \u2013 Incompressible"); hl.setObjectName("cfdHeader")
+        outer.addWidget(hl)
+        sub = QW.QLabel("Wind / air around a solid \u2013 auto-mesh (snappyHexMesh), "
+                        "auto-BCs, kOmegaSST RANS, VTK for ParaView.")
+        sub.setObjectName("cfdSub"); sub.setWordWrap(True); outer.addWidget(sub)
+        forms = {}
+        for sec in _CFD_FLOW_SECTIONS:
+            gb = QW.QGroupBox(sec)
+            fl = QW.QFormLayout(gb)
+            forms[sec] = fl
+            outer.addWidget(gb)
+        for f in fields:
+            k = f.get("key"); kind = f.get("kind", "text")
+            sec = _CFD_FLOW_KEY_SECTION.get(k, "Mesh & refinement")
+            fl = forms.get(sec, forms[_CFD_FLOW_SECTIONS[0]])
+            w, getter = _cfd_make_widget(f)
+            if kind == "info":
+                w.setWordWrap(True)
+                fl.addRow(w)
+            else:
+                fl.addRow(f.get("label", k or ""), w)
+            if getter is not None:
+                self._getters[k] = getter
+        outer.addStretch(1)
+        return root
+
+    def getStandardButtons(self):
+        return int(QW.QDialogButtonBox.Ok | QW.QDialogButtonBox.Cancel)
+
+    def isAllowedAlterDocument(self):
+        return True
+
+    def _collect(self):
+        vals = {}
+        for k, g in self._getters.items():
+            try:
+                vals[k] = g()
+            except Exception:
+                pass
+        return vals
+
+    def accept(self):
+        vals = self._collect()
+        try:
+            _cfd_flow_execute(self._obj, self._pts, self._facets,
+                              self._bb, self._Lm, vals)
+        finally:
+            _close_task_dialog()
+        return True
+
+    def reject(self):
+        _close_task_dialog()
+        return True
+
+
+def _close_task_dialog():
+    try:
+        FreeCADGui.Control.closeDialog()
+    except Exception:
+        pass
+
+
+def _show_cfd_flow_panel(obj, pts, facets, bb, Lm, fields):
+    """Show the docked CFD-flow Task panel. Returns True if shown, False when the
+    Task-panel control is unavailable (headless / another dialog open) so the
+    caller falls back to the modal form."""
+    Ctrl = getattr(FreeCADGui, "Control", None)
+    if Ctrl is None or not hasattr(Ctrl, "showDialog"):
+        return False
+    try:
+        if hasattr(Ctrl, "activeDialog") and Ctrl.activeDialog():
+            return False
+    except Exception:
+        pass
+    try:
+        Ctrl.showDialog(_CfdFlowTaskPanel(obj, pts, facets, bb, Lm, fields))
+        return True
+    except Exception:
+        return False
+
+
 class CfdFlow:
     def GetResources(self):
         return {"Pixmap": _icon("cfd"),
@@ -7428,6 +7658,11 @@ class CfdFlow:
             {"key": "run", "label": "Try to run now", "kind": "combo",
              "options": ["No", "Yes"], "default": "No"},
         ]
+        # SimScale-style docked setup panel (FreeCAD's native left dock, the way
+        # SimScale docks its simulation setup); fall back to a modal form when
+        # the Task-panel control is unavailable (e.g. headless).
+        if _show_cfd_flow_panel(obj, pts, facets, bb, Lm, fields):
+            return
         vals = form_dialog("CFD Flow: wind / air (incompressible)", fields,
                            **_cfd_dialog_kwargs(
                                "CFD Flow - Incompressible",
@@ -7435,83 +7670,7 @@ class CfdFlow:
                                "kOmegaSST RANS solve, VTK for ParaView."))
         if not vals:
             return
-        name = (str(vals.get("name") or "flow1").strip().replace(" ", "_")) or "flow1"
-        Ux = float(vals["U"]); nu = float(vals["nu"])
-        I = max(0.0, float(vals["ti"]) / 100.0)
-        dom = cfdgen.domain_from_bbox(
-            bb.XMin, bb.YMin, bb.ZMin, bb.XMax, bb.YMax, bb.ZMax,
-            up=float(vals["up"]), down=float(vals["down"]), side=float(vals["side"]),
-            top=float(vals["top"]), ground=float(vals["ground"]))
-        h = Lm / max(2, int(vals["ncb"]))
-        nx, ny, nz = cfdgen.cell_counts(*dom, h=h)
-        loc = cfdgen.location_in_mesh(*dom, bx0=bb.XMin)
-        # freestream box: all far-field patches (incl. ground) are slip
-        bm = cfdgen.block_mesh_dict(*dom, nx, ny, nz, ground_type="patch")
-        sn = cfdgen.snappy_hex_mesh_dict(
-            stl="body.stl", name="body", level_min=int(vals["lmin"]),
-            level_max=int(vals["lmax"]), feature_level=int(vals["lmax"]),
-            n_layers=int(vals["nlay"]), location=loc)
-        sf = cfdgen.surface_features_dict("body.stl")
-        stl = cfdgen.ascii_stl("body", pts, facets)
-        wri = max(1, int(int(vals["iters"]) / 5))
-        casefiles, k0, om0 = cfdgen.flow_case_files(
-            Ux, nu=nu, intensity=I, L=Lm, end_iter=int(vals["iters"]),
-            write_interval=wri)
-        outdir = _cfd_outdir()
-        stage = os.path.join(outdir, name + "_src")
-        try:
-            _write_lf(os.path.join(stage, "blockMeshDict"), bm)
-            _write_lf(os.path.join(stage, "snappyHexMeshDict"), sn)
-            _write_lf(os.path.join(stage, "surfaceFeaturesDict"), sf)
-            _write_lf(os.path.join(stage, "body.stl"), stl)
-            for fn, txt in casefiles.items():
-                _write_lf(os.path.join(stage, fn), txt)
-        except Exception as e:
-            err("Could not write the CFD case files to %s:\n%s" % (stage, e)); return
-        of_env = str(vals.get("env") or cfd.DEFAULT_OF_ENV).strip()
-        distro = str(vals.get("distro") or cfd.DEFAULT_DISTRO).strip()
-        win_out = os.path.join(outdir, name)
-        fs = cfdgen.build_flow_script({"of_env": of_env, "name": name,
-                                       "stage_win": stage, "win_out": win_out,
-                                       "latest": True})
-        fpath = os.path.join(outdir, "run_flow_%s.sh" % name)
-        try:
-            _write_lf(fpath, fs)
-        except Exception as e:
-            err("Could not write the flow script:\n%s" % e); return
-        flow_cmd = "bash %s" % cfd.win_to_wsl(fpath, distro)
-        _cfd_record(FreeCAD.ActiveDocument, name, [
-            ("Analysis", "Incompressible flow (RANS kOmegaSST)"),
-            ("Geometry", getattr(obj, "Label", "body")),
-            ("Inlet speed (m/s)", "%g (+X)" % Ux),
-            ("Inlet k / omega", "%.4g / %.4g" % (k0, om0)),
-            ("Viscosity nu", "%g" % nu),
-            ("Background cells", "%d x %d x %d" % (nx, ny, nz)),
-            ("Mesh", "snappyHexMesh, level %d-%d, %d layers"
-             % (int(vals["lmin"]), int(vals["lmax"]), int(vals["nlay"]))),
-            ("Run (paste in WSL)", flow_cmd),
-            ("Then open in ParaView", os.path.join(win_out, "VTK")),
-            ("Flow script", fpath), ("Staged files", stage)])
-        # draw the setup on the part (domain box + BC-coloured faces + inlet arrows)
-        try:
-            _draw_cfd_domain(FreeCAD.ActiveDocument,
-                             tuple(c * 1000.0 for c in dom), Ux, name)
-            FreeCAD.ActiveDocument.recompute()
-        except Exception:
-            pass
-        launch = ""
-        if vals.get("run") == "Yes":
-            launch = "\n\nAuto-run: " + _try_launch_terminal(cfd.wsl_run_argv(fs, distro))
-        info("CFD flow case '%s' on '%s' (engine: OpenFOAM incompressibleFluid, as "
-             "SimScale runs).\n\nInlet %g m/s (+X), kOmegaSST turbulence "
-             "(k=%.4g, omega=%.4g), mesh %d x %d x %d background + snappyHexMesh. "
-             "In your WSL OpenFOAM terminal:\n\n  %s\n\nIt meshes, solves (%d "
-             "iterations) and writes VTK to:\n  %s\n\nOpen in ParaView and colour "
-             "by U (velocity) or p (pressure). It is a steady RANS solve - watch "
-             "the residuals fall in log.foamRun. Details in the 'CFD_%s' sheet.%s" %
-             (name, getattr(obj, "Label", "body"), Ux, k0, om0, nx, ny, nz,
-              flow_cmd, int(vals["iters"]), os.path.join(win_out, "VTK"), name,
-              launch))
+        _cfd_flow_execute(obj, pts, facets, bb, Lm, vals)
 
 
 class Envelope:

@@ -1822,4 +1822,34 @@ assert "&amp;" in _hdr and "&lt;" in _hdr      # escaped, no raw & or <
 print("  BC legend HTML + header HTML OK")
 print("CFD UI theme OK")
 
+# ---------- CFD simulation tree (SimScale-style document objects) ----------
+print("\n== CFD simulation tree ==")
+import dynframe_cfd_tree as CT
+_sts = CT.study_types()
+assert len(_sts) == len(CF.CATALOG) and len(_sts) >= 20, len(_sts)
+assert all(("id" in s and "title" in s) for s in _sts)
+assert CT.find_study(_sts[0]["title"])["id"] == _sts[0]["id"]
+# base = 7 steps; a multi-region study splits Materials into fluid + solid (8)
+_base = CT.study_steps()
+assert [s["key"] for s in _base] == ["geometry", "materials", "bcs",
+                                     "numerics", "control", "mesh", "run"]
+_mr = CT.study_steps(multi_region=True)
+assert len(_mr) == len(_base) + 1 and any(s["key"] == "mat_solid" for s in _mr)
+assert CT.safe_name("Conjugate heat (fluid+solid)").replace("_", "").isalnum()
+print("  study types (%d) + setup steps OK" % len(_sts))
+# the command builds the tree: a study container with a child node per step
+C.form_dialog = lambda title, fields, **_kw: {"phys": _sts[0]["title"]}
+dCT = Doc(); FreeCAD.ActiveDocument = dCT
+gCT = {}; C.info = lambda m, g=gCT: g.setdefault("msg", m)
+C.CfdStudy().Activated()
+_cont = [o for o in dCT.Objects
+         if getattr(o, "CfdStudy", "") == _sts[0]["id"] and o.Group]
+assert _cont, "study container not created"
+_c = _cont[0]
+assert len(_c.Group) == 7, len(_c.Group)
+assert all(getattr(n, "CfdPanel", None) for n in _c.Group)
+assert getattr(_c.Group[-1], "CfdStep", "") == "run"
+print("  CfdStudy built the simulation tree (container + 7 nodes) OK")
+print("CFD simulation tree OK")
+
 print("\nALL RUNTIME CHECKS PASSED")

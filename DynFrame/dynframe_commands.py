@@ -24,6 +24,10 @@ try:
     import dynframe_cfd_ui as cfdui       # SimScale-style CFD theme (pure)
 except Exception:
     cfdui = None
+try:
+    import dynframe_cfd_tree as cfdtree    # SimScale-style simulation-tree model
+except Exception:
+    cfdtree = None
 
 from PySide import QtGui
 try:
@@ -7351,6 +7355,160 @@ class CfdMeshFromCad:
               os.path.join(win_out, "VTK"), name, launch))
 
 
+# ── SimScale-style simulation tree (document objects in the Model panel) ──
+_CFD_STATUS_GLYPH = {"done": "✓", "todo": "○"}   # check / open circle
+
+
+def _cfd_open_node(node):
+    """Open the setup for a clicked simulation-tree node. Phase 1: the actionable
+    nodes launch the study's end-to-end setup; the rest explain that their own
+    SimScale-style panel is the next phase."""
+    panel = getattr(node, "CfdPanel", "") or ""
+    sid = getattr(node, "CfdStudy", "") or ""
+    if panel in ("geometry", "bcs", "mesh", "run"):
+        try:
+            if sid == "incompressibleFluid":
+                CfdFlow().Activated()
+            else:
+                CfdCase().Activated()
+        except Exception as e:
+            err("Could not open the study setup: %s" % e)
+    else:
+        info("The '%s' step gets its own SimScale-style setup panel in the next "
+             "phase. For now, double-click the 'Run' node to set up and solve the "
+             "whole study end to end." % panel)
+
+
+class _CfdNodeVP:
+    """A minimal view provider so double-clicking a simulation-tree node opens its
+    setup (SimScale-style). GUI-only; attached guardedly so headless still loads."""
+    def __init__(self, vobj=None):
+        try:
+            if vobj is not None:
+                vobj.Proxy = self
+        except Exception:
+            pass
+
+    def attach(self, vobj):
+        try:
+            self.Object = vobj.Object
+        except Exception:
+            pass
+
+    def doubleClicked(self, vobj):
+        try:
+            _cfd_open_node(vobj.Object)
+        except Exception:
+            pass
+        return True
+
+    def __getstate__(self):
+        return None
+
+    def __setstate__(self, state):
+        return None
+
+
+def _cfd_set_str(obj, name, value):
+    """Add (if needed) and set a string property on a document object."""
+    try:
+        if not hasattr(obj, name):
+            obj.addProperty("App::PropertyString", name, "CFD")
+        setattr(obj, name, str(value))
+    except Exception:
+        pass
+
+
+def build_cfd_tree(doc, study):
+    """Create the SimScale-style simulation tree for `study` (a dict with id/title/
+    multiRegion) as document-object groups in the Model panel: a study container
+    with a child node per setup step. Returns the container object."""
+    container = doc.addObject("App::DocumentObjectGroup",
+                              cfdtree.safe_name(study.get("title", "study")))
+    try:
+        container.Label = "CFD · " + str(study.get("title", "study"))
+    except Exception:
+        pass
+    _cfd_set_str(container, "CfdStudy", study.get("id", ""))
+    steps = cfdtree.study_steps(study.get("id"), study.get("multiRegion"))
+    for st in steps:
+        node = doc.addObject("App::DocumentObjectGroup",
+                             cfdtree.safe_name(st["label"], prefix="Cfd"))
+        try:
+            glyph = _CFD_STATUS_GLYPH.get(st.get("status"), "")
+            node.Label = ("%s %s" % (glyph, st["label"])).strip()
+        except Exception:
+            pass
+        _cfd_set_str(node, "CfdStudy", study.get("id", ""))
+        _cfd_set_str(node, "CfdStep", st["key"])
+        _cfd_set_str(node, "CfdPanel", st["panel"])
+        try:
+            if getattr(node, "ViewObject", None) is not None:
+                _CfdNodeVP(node.ViewObject)
+        except Exception:
+            pass
+        container.addObject(node)
+    return container
+
+
+class CfdStudy:
+    def GetResources(self):
+        return {"Pixmap": _icon("cfd"),
+                "MenuText": "CFD Study (new simulation)",
+                "ToolTip": "Start a SimScale-style CFD study: pick the physics "
+                           "(any OpenFOAM module) and DynFrame builds the "
+                           "simulation tree in the Model panel - Geometry, "
+                           "Materials, Boundary conditions, Numerics, Simulation "
+                           "control, Mesh, Run - each a node you open to set up. "
+                           "Double-click 'Run' to mesh + solve.",
+                "Accel": "C, S"}
+
+    def IsActive(self):
+        return (cfd is not None and cfdtree is not None
+                and FreeCAD.ActiveDocument is not None)
+
+    def Activated(self):
+        if cfd is None or cfdtree is None:
+            err("The CFD modules failed to load."); return
+        titles = cfdtree.study_titles()
+        if not titles:
+            err("No OpenFOAM study catalog available."); return
+        fields = [
+            {"key": "_i", "kind": "info", "default":
+             "Start a CFD study (the SimScale way): pick the physics module and "
+             "DynFrame builds its simulation tree in the Model panel. Open each "
+             "node to set it up; double-click 'Run' to mesh + solve on OpenFOAM."},
+            {"key": "phys", "label": "Study type (OpenFOAM physics)", "kind": "combo",
+             "options": titles, "default": titles[0]},
+        ]
+        vals = form_dialog("New CFD Study", fields,
+                           **_cfd_dialog_kwargs(
+                               "New CFD Study",
+                               "Pick the physics; DynFrame builds the SimScale-"
+                               "style simulation tree."))
+        if not vals:
+            return
+        study = cfdtree.find_study(vals.get("phys")) or cfdtree.study_types()[0]
+        doc = FreeCAD.ActiveDocument
+        doc.openTransaction("DynFrame: new CFD study")
+        try:
+            container = build_cfd_tree(doc, study)
+            doc.commitTransaction(); doc.recompute()
+        except Exception as e:
+            try:
+                doc.abortTransaction()
+            except Exception:
+                pass
+            err("Could not build the CFD study tree: %s" % e); return
+        info("Created the CFD study '%s' in the Model panel.\n\nIts simulation "
+             "tree has a node for each setup step (Geometry, Materials, Boundary "
+             "conditions, Numerics, Simulation control, Mesh, Run), SimScale-"
+             "style. Double-click a node to set it up - start with 'Run' to mesh "
+             "and solve the whole study end to end (select the solid first).\n\n"
+             "Physics: %s (%s)." % (study.get("title"), study.get("id"),
+                                    study.get("use", "")))
+
+
 def _cfd_flow_execute(obj, pts, facets, bb, Lm, vals):
     """Build + stage the incompressible-flow case from the collected values and
     report it. Shared by the modal form and the docked Task panel so both paths
@@ -10348,6 +10506,7 @@ _add("DynFrame_PunchingEC2", PunchingEC2)
 _add("DynFrame_WallThermal", WallThermal)
 _add("DynFrame_ThermalBridge2D", ThermalBridge2D)
 _add("DynFrame_FireThermal", FireThermal)
+_add("DynFrame_CfdStudy", CfdStudy)
 _add("DynFrame_CfdCase", CfdCase)
 _add("DynFrame_CfdDomain", CfdDomain)
 _add("DynFrame_CfdMeshFromCad", CfdMeshFromCad)

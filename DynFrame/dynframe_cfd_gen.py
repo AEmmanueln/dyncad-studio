@@ -581,3 +581,90 @@ def bc_field_files(patches, nu=1.5e-5, intensity=0.05, L=1.0):
         "controlDict": control_dict_simple("incompressibleFluid", 1000, 200),
     }
     return files, k0, om0
+
+
+# ---- internal flow through a box solid: blockMesh with user-named patches ----
+# The 6 geometric faces of the body's bounding box, as blockMesh face quads.
+_BOX_FACE_QUADS = {
+    "xmin": "(0 4 7 3)", "xmax": "(2 6 5 1)",
+    "ymin": "(1 5 4 0)", "ymax": "(3 7 6 2)",
+    "zmin": "(0 3 2 1)", "zmax": "(4 5 6 7)",
+}
+# Order the 6 box faces so a Part.makeBox-style face list (Xmin,Xmax,Ymin,Ymax,
+# Zmin,Zmax) maps 1:1 onto them.
+BOX_FACE_ORDER = ("xmin", "xmax", "ymin", "ymax", "zmin", "zmax")
+
+
+def box_blockmesh_named(x0, y0, z0, x1, y1, z1, nx, ny, nz, face_patches):
+    """A single-block hex mesh of the box interior where each of the 6 box faces
+    is given a named patch from `face_patches` ({face_key: (patch_name, type)}).
+    Faces that share a patch_name are merged into one patch, so assigning inlet
+    to one face, outlet to the opposite and wall to the rest yields exactly those
+    three patches - the fluid domain is the box interior (internal flow)."""
+    V = [(x0, y0, z0), (x1, y0, z0), (x1, y1, z0), (x0, y1, z0),
+         (x0, y0, z1), (x1, y0, z1), (x1, y1, z1), (x0, y1, z1)]
+    verts = "\n".join("    " + _pt(*v) for v in V)
+    head = (
+        "/*--------------------------------*- C++ -*----------------------------------*\\\n"
+        "| DynFrame CFD - generated blockMeshDict (internal flow, named patches)        |\n"
+        "\\*---------------------------------------------------------------------------*/\n"
+        "FoamFile\n{\n    format      ascii;\n    class       dictionary;\n"
+        "    object      blockMeshDict;\n}\n\n"
+        "scale   1;\n\n"
+        "vertices\n(\n%s\n);\n\n"
+        "blocks\n(\n    hex (0 1 2 3 4 5 6 7) (%d %d %d) simpleGrading (1 1 1)\n);\n\n"
+        "edges\n(\n);\n\n" % (verts, nx, ny, nz))
+    # group face quads by patch name (preserving first-seen order + type)
+    order = []
+    groups = {}
+    for fk in BOX_FACE_ORDER:
+        name, ptype = face_patches.get(fk, ("walls", "wall"))
+        if name not in groups:
+            groups[name] = [ptype, []]
+            order.append(name)
+        groups[name][1].append(_BOX_FACE_QUADS[fk])
+    boundary = "boundary\n(\n"
+    for name in order:
+        ptype, quads = groups[name]
+        boundary += ("    %s\n    {\n        type %s;\n        faces ( %s );\n    }\n"
+                     % (name, ptype, " ".join(quads)))
+    boundary += ");\n\nmergePatchPairs\n(\n);\n"
+    return head + boundary
+
+
+def build_internal_flow_script(opts):
+    """Bash for an internal-flow case meshed by blockMesh with user-named patches
+    (no snappy): assemble the staged case, blockMesh -> checkMesh -> foamRun
+    (incompressibleFluid) -> VTK. opts: of_env, name, stage_win, win_out, latest."""
+    import dynframe_cfd as cfd
+    of_env = opts.get("of_env", cfd.DEFAULT_OF_ENV)
+    name = opts.get("name", "flowint1")
+    stage = cfd.win_to_wsl(opts["stage_win"])
+    win_out = opts["win_out"]
+    out = cfd.win_to_wsl(win_out)
+    lt = " -latestTime" if opts.get("latest", True) else ""
+    work = cfd.WORK_ROOT
+
+    L = []
+    L.append("# DynFrame CFD - internal-flow case (blockMesh named patches + solve)")
+    L.append(". %s" % of_env)
+    L.append('STAGE=%s' % cfd.shq(stage))
+    L.append('mkdir -p %s' % work)
+    L.append('DST=%s/%s' % (work, name))
+    L.append('rm -rf "$DST"; mkdir -p "$DST/0" "$DST/constant" "$DST/system"')
+    L.append('cd "$DST" || exit 1')
+    L.append('cp "$STAGE"/blockMeshDict "$STAGE"/fvSchemes "$STAGE"/fvSolution '
+             '"$STAGE"/controlDict system/')
+    L.append('cp "$STAGE"/momentumTransport "$STAGE"/physicalProperties constant/')
+    L.append('cp "$STAGE"/U "$STAGE"/p "$STAGE"/k "$STAGE"/omega "$STAGE"/nut 0/')
+    L.append('echo "== blockMesh =="; blockMesh 2>&1 | tee log.blockMesh | tail -3')
+    L.append('echo "== checkMesh =="; checkMesh 2>&1 | tee log.checkMesh | tail -12')
+    L.append('echo "== foamRun (incompressibleFluid) =="; foamRun 2>&1 | '
+             'tee log.foamRun | tail -25')
+    L.append('echo "== foamToVTK =="; foamToVTK%s 2>&1 | tail -3' % lt)
+    L.append('OUT=%s' % cfd.shq(out))
+    L.append('mkdir -p "$OUT"; rm -rf "$OUT/VTK"')
+    L.append('[ -d VTK ] && cp -r VTK "$OUT/" && echo "=== results VTK copied to: %s ==="'
+             % win_out)
+    L.append('echo "=== INTERNAL FLOW DONE: $DST  (colour by U or p) ==="')
+    return "\n".join(L)

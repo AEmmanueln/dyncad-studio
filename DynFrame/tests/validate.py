@@ -1906,6 +1906,66 @@ assert "outlet\n    {\n        type            fixedValue;\n        value       
 assert "walls\n    {\n        type            nutkWallFunction;" in _ff["nut"]
 assert _k0f > 0 and _om0f > 0
 print("  bc_field_files wired face BCs into 0/ fields OK")
+# box internal-flow mesh: user-named patches, walls merged
+_fpB = {"xmin": ("inlet", "patch"), "xmax": ("outlet", "patch"),
+        "ymin": ("walls", "wall"), "ymax": ("walls", "wall"),
+        "zmin": ("walls", "wall"), "zmax": ("walls", "wall")}
+_bmn = CG.box_blockmesh_named(0, 0, 0, 0.1, 0.1, 0.1, 10, 10, 10, _fpB)
+assert _bmn.count("{") == _bmn.count("}")
+assert "(0 4 7 3)" in _bmn and "(2 6 5 1)" in _bmn   # inlet / outlet quads
+_wsec = _bmn.split("walls")[1].split(");")[0]         # the walls patch block
+for _q in ("(1 5 4 0)", "(3 7 6 2)", "(0 3 2 1)", "(4 5 6 7)"):
+    assert _q in _wsec, _q                            # 4 wall faces merged
+_ints = CG.build_internal_flow_script(
+    {"name": "flowint1", "stage_win": r"C:\x", "win_out": r"C:\y"})
+assert "blockMesh" in _ints and "foamRun" in _ints and "snappyHexMesh" not in _ints
+print("  box internal-flow blockMesh (named patches) + script OK")
+# command: selected box + assigned BCs -> staged case + run script
+import tempfile as _tfI
+dFI = Doc(); FreeCAD.ActiveDocument = dFI
+_sldI = dFI.addObject("Part::Box", "Box")
+
+
+def _mkbc(typ, faces, val):
+    o = dFI.addObject("App::FeaturePython", "CfdBC_" + typ)
+    C._cfd_set_str(o, "CfdBCType", typ); C._cfd_set_str(o, "CfdBCSolid", _sldI.Name)
+    C._cfd_set_str(o, "CfdBCFaces", faces); C._cfd_set_str(o, "CfdBCValue", str(val))
+
+
+_mkbc("inlet", "0", 12.0); _mkbc("outlet", "1", 0.0)
+
+
+class _BoxShape:
+    BoundBox = BB([Vec(0, 0, 0), Vec(0.1, 0.1, 0.1)])
+
+    @property
+    def Faces(self):
+        return [1, 2, 3, 4, 5, 6]
+
+    def transformGeometry(self, m):
+        return self
+
+
+FreeCAD.Matrix = _FM
+C.global_shape = lambda o: _BoxShape()
+C.FreeCADGui.Selection = type("S", (), {
+    "getSelection": staticmethod(lambda: [_sldI]),
+    "getSelectionEx": staticmethod(lambda: [])})()
+_tmpI = _tfI.mkdtemp(); C._cfd_outdir = lambda d=_tmpI: d
+C.form_dialog = lambda title, fields, **_k: {
+    "name": "flowint1", "ncells": 10, "iters": 200, "nu": 1.5e-5,
+    "distro": "", "env": "/opt/openfoam14/etc/bashrc", "run": "No"}
+gFI = {}; C.info = lambda m, g=gFI: g.setdefault("msg", m)
+C.CfdFlowInternal().Activated()
+_src = os.path.join(_tmpI, "flowint1_src")
+assert os.path.exists(os.path.join(_src, "blockMeshDict")), "case not staged"
+_bmtxt = open(os.path.join(_src, "blockMeshDict")).read()
+assert "inlet" in _bmtxt and "outlet" in _bmtxt and "wall" in _bmtxt
+_utxt = open(os.path.join(_src, "U")).read()
+assert "inlet" in _utxt and "outlet" in _utxt
+assert os.path.exists(os.path.join(_tmpI, "run_flowint1.sh"))
+FreeCAD.Matrix = _savedM; C.global_shape = _savedGS; C.FreeCADGui.Selection = _savedSel
+print("  CfdFlowInternal staged a case from assigned face BCs OK")
 print("CFD boundary conditions OK")
 
 print("\nALL RUNTIME CHECKS PASSED")

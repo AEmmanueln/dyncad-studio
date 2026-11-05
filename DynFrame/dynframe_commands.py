@@ -7648,6 +7648,163 @@ def _g(v):
     return ("%.6g" % float(v))
 
 
+def _cfd_bc_values(doc, solid_name):
+    """Per-BC-key value for a solid, from its BC objects: {bc_key: value}."""
+    out = {}
+    for o in getattr(doc, "Objects", []):
+        if getattr(o, "CfdBCSolid", "") != solid_name:
+            continue
+        k = getattr(o, "CfdBCType", "") or ""
+        try:
+            out.setdefault(k, float(getattr(o, "CfdBCValue", "0") or 0))
+        except (TypeError, ValueError):
+            out.setdefault(k, 0.0)
+    return out
+
+
+def _cfd_patch_type(bc_key):
+    if bc_key in ("inlet", "outlet"):
+        return "patch"
+    if bc_key == "slip":
+        return "symmetry"
+    return "wall"
+
+
+class CfdFlowInternal:
+    def GetResources(self):
+        return {"Pixmap": _icon("cfd"),
+                "MenuText": "Run Flow from BCs (internal)",
+                "ToolTip": "Solve internal flow through the selected box solid "
+                           "using the boundary conditions you assigned to its "
+                           "faces (Assign Boundary Condition). The box interior is "
+                           "meshed with blockMesh, each face group becomes its "
+                           "named patch, and OpenFOAM solves it - SimScale-style, "
+                           "with exactly your inlet/outlet/wall faces.",
+                "Accel": "C, R"}
+
+    def IsActive(self):
+        return (cfd is not None and cfdgen is not None and cfdbc is not None
+                and FreeCAD.ActiveDocument is not None)
+
+    def Activated(self):
+        if cfd is None or cfdgen is None or cfdbc is None:
+            err("The CFD modules failed to load."); return
+        try:
+            sel = [o for o in FreeCADGui.Selection.getSelection()
+                   if getattr(o, "Shape", None) is not None]
+        except Exception:
+            sel = []
+        if not sel:
+            info("Select the box solid whose faces you assigned BCs to, then run "
+                 "Run Flow from BCs."); return
+        solid = sel[0]
+        doc = FreeCAD.ActiveDocument
+        assigns = _cfd_collect_bc_assignments(doc, getattr(solid, "Name", ""))
+        if not assigns:
+            info("No boundary conditions on '%s' yet. Select faces and use Assign "
+                 "Boundary Condition first (at least an inlet and an outlet)."
+                 % getattr(solid, "Label", "solid")); return
+        try:
+            shp = global_shape(solid)
+            nfaces = len(shp.Faces)
+        except Exception as e:
+            err("Could not read '%s': %s" % (getattr(solid, "Label", "?"), e)); return
+        if nfaces != 6:
+            info("Internal flow from assigned faces currently supports box-shaped "
+                 "solids (6 faces). '%s' has %d faces - arbitrary solids "
+                 "(snappyHexMesh named patches) are the next step."
+                 % (getattr(solid, "Label", "solid"), nfaces)); return
+        # box bounds in metres
+        try:
+            mat = FreeCAD.Matrix(); mat.scale(1e-3, 1e-3, 1e-3)
+            bb = shp.transformGeometry(mat).BoundBox
+        except Exception as e:
+            err("Could not scale geometry: %s" % e); return
+        vals0 = _cfd_bc_values(doc, solid.Name)
+        fields = [
+            {"key": "_i", "kind": "info", "default":
+             "Internal flow through '%s' using your face BCs. The box interior is "
+             "meshed (blockMesh) and solved with incompressibleFluid. Patches: %s."
+             % (getattr(solid, "Label", "solid"),
+                ", ".join(sorted(set(assigns.values()))))},
+            {"key": "name", "label": "Case name", "kind": "text", "default": "flowint1"},
+            {"key": "ncells", "label": "Cells across the box", "kind": "int",
+             "default": 20, "min": 4, "max": 200},
+            {"key": "iters", "label": "Iterations (steady)", "kind": "int",
+             "default": 1000, "min": 50, "max": 100000},
+            {"key": "nu", "label": "Kinematic viscosity nu (m2/s)", "kind": "float",
+             "default": 1.5e-5, "decimals": 9},
+            {"key": "distro", "label": "WSL distro (blank = default)", "kind": "text", "default": ""},
+            {"key": "env", "label": "OpenFOAM env (source)", "kind": "text", "default": cfd.DEFAULT_OF_ENV},
+            {"key": "run", "label": "Try to run now", "kind": "combo",
+             "options": ["No", "Yes"], "default": "No"},
+        ]
+        vals = form_dialog("Run Flow from BCs (internal)", fields,
+                           **_cfd_dialog_kwargs(
+                               "Internal Flow from BCs",
+                               "Mesh the box interior and solve with your assigned "
+                               "inlet/outlet/wall faces."))
+        if not vals:
+            return
+        name = (str(vals.get("name") or "flowint1").strip().replace(" ", "_")) or "flowint1"
+        n = max(4, int(vals["ncells"]))
+        # face index -> box face key (Part::Box face order == BOX_FACE_ORDER)
+        face_patches = {}
+        used = set()
+        for idx, fk in enumerate(cfdgen.BOX_FACE_ORDER):
+            key = assigns.get(idx, "wall")
+            face_patches[fk] = (key, _cfd_patch_type(key))
+            used.add(key)
+        bm = cfdgen.box_blockmesh_named(
+            bb.XMin, bb.YMin, bb.ZMin, bb.XMax, bb.YMax, bb.ZMax, n, n, n, face_patches)
+        patches = [{"name": k, "bc": k, "value": vals0.get(k, 0.0)}
+                   for k in sorted(used)]
+        Lm = max(bb.XLength, bb.YLength, bb.ZLength, 1e-6)
+        casefiles, k0, om0 = cfdgen.bc_field_files(
+            patches, nu=float(vals["nu"]), L=Lm)
+        # honour the requested iteration count
+        casefiles["controlDict"] = cfdgen.control_dict_simple(
+            "incompressibleFluid", int(vals["iters"]),
+            max(1, int(int(vals["iters"]) / 5)))
+        outdir = _cfd_outdir()
+        stage = os.path.join(outdir, name + "_src")
+        try:
+            _write_lf(os.path.join(stage, "blockMeshDict"), bm)
+            for fn, txt in casefiles.items():
+                _write_lf(os.path.join(stage, fn), txt)
+        except Exception as e:
+            err("Could not write the case files to %s:\n%s" % (stage, e)); return
+        of_env = str(vals.get("env") or cfd.DEFAULT_OF_ENV).strip()
+        distro = str(vals.get("distro") or cfd.DEFAULT_DISTRO).strip()
+        win_out = os.path.join(outdir, name)
+        fs = cfdgen.build_internal_flow_script(
+            {"of_env": of_env, "name": name, "stage_win": stage,
+             "win_out": win_out, "latest": True})
+        fpath = os.path.join(outdir, "run_%s.sh" % name)
+        try:
+            _write_lf(fpath, fs)
+        except Exception as e:
+            err("Could not write the run script:\n%s" % e); return
+        flow_cmd = "bash %s" % cfd.win_to_wsl(fpath, distro)
+        _cfd_record(FreeCAD.ActiveDocument, name, [
+            ("Analysis", "Internal flow (RANS kOmegaSST) from assigned faces"),
+            ("Geometry", getattr(solid, "Label", "solid")),
+            ("Patches", ", ".join(sorted(used))),
+            ("Inlet k / omega", "%.4g / %.4g" % (k0, om0)),
+            ("Run (paste in WSL)", flow_cmd),
+            ("Then open in ParaView", os.path.join(win_out, "VTK")),
+            ("Run script", fpath), ("Staged files", stage)])
+        launch = ""
+        if vals.get("run") == "Yes":
+            launch = "\n\nAuto-run: " + _try_launch_terminal(cfd.wsl_run_argv(fs, distro))
+        info("Internal-flow case '%s' from your face BCs on '%s'.\n\nPatches: %s. "
+             "The box interior is meshed with blockMesh and solved with "
+             "incompressibleFluid. In your WSL OpenFOAM terminal:\n\n  %s\n\nIt "
+             "writes VTK to:\n  %s\n\nColour by U or p in ParaView.%s" %
+             (name, getattr(solid, "Label", "solid"), ", ".join(sorted(used)),
+              flow_cmd, os.path.join(win_out, "VTK"), launch))
+
+
 def _cfd_flow_execute(obj, pts, facets, bb, Lm, vals):
     """Build + stage the incompressible-flow case from the collected values and
     report it. Shared by the modal form and the docked Task panel so both paths
@@ -10647,6 +10804,7 @@ _add("DynFrame_ThermalBridge2D", ThermalBridge2D)
 _add("DynFrame_FireThermal", FireThermal)
 _add("DynFrame_CfdStudy", CfdStudy)
 _add("DynFrame_CfdAssignBC", CfdAssignBC)
+_add("DynFrame_CfdFlowInternal", CfdFlowInternal)
 _add("DynFrame_CfdCase", CfdCase)
 _add("DynFrame_CfdDomain", CfdDomain)
 _add("DynFrame_CfdMeshFromCad", CfdMeshFromCad)

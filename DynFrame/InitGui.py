@@ -69,7 +69,8 @@ class DynFrameWorkbench(FreeCADGui.Workbench):
                    "DynFrame_WallThermal", "DynFrame_ThermalBridge2D",
                    "DynFrame_FireThermal",
                    "DynFrame_ShowDiagram", "DynFrame_ClearAnalysis"]
-        cfd = ["DynFrame_CfdStudy", "DynFrame_CfdAssignBC", "DynFrame_CfdDomain",
+        cfd = ["DynFrame_CfdStudy", "DynFrame_CfdAssignBC",
+               "DynFrame_CfdFlowInternal", "DynFrame_CfdDomain",
                "DynFrame_CfdMeshFromCad", "DynFrame_CfdFlow", "DynFrame_CfdCase",
                "DynFrame_CfdView"]
         analysis = panel + structure + loads + results + cfd

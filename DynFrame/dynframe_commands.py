@@ -20,6 +20,10 @@ try:
     import dynframe_cfd_gen as cfdgen     # mesh-from-CAD generators (pure)
 except Exception:
     cfdgen = None
+try:
+    import dynframe_cfd_ui as cfdui       # SimScale-style CFD theme (pure)
+except Exception:
+    cfdui = None
 
 from PySide import QtGui
 try:
@@ -102,15 +106,37 @@ def _dlg_exec(d):
         return bool(res)
 
 
-def form_dialog(title, fields):
+def form_dialog(title, fields, stylesheet=None, header=None):
     """One modal form instead of a chain of pop-ups. `fields` is a list of
     dicts: {key, label, kind, default, options, min, max, decimals}. kind is
     one of 'text', 'float', 'int', 'combo', 'section', 'info'. Returns a
     {key: value} dict, or None if cancelled. 'section' is a profile picker
-    (family + size combos). 'info' is a read-only label row."""
+    (family + size combos). 'info' is a read-only label row.
+
+    Optional SimScale-style theming (used by the CFD panels): `stylesheet` is a
+    QSS string applied to the dialog; `header` is (title, subtitle) drawn as a
+    styled banner at the top. An 'info' field may set 'html': True to render its
+    default as rich text (for the BC colour legend)."""
     d = QW.QDialog(_mw())
+    d.setObjectName("cfdPanel")
     d.setWindowTitle(title)
+    if stylesheet:
+        try:
+            d.setStyleSheet(stylesheet)
+        except Exception:
+            pass
     outer = QW.QVBoxLayout(d)
+    if header:
+        try:
+            htitle, hsub = (header if isinstance(header, (tuple, list))
+                            else (header, ""))
+            hl = QW.QLabel(str(htitle)); hl.setObjectName("cfdHeader")
+            outer.addWidget(hl)
+            if hsub:
+                sl = QW.QLabel(str(hsub)); sl.setObjectName("cfdSub")
+                sl.setWordWrap(True); outer.addWidget(sl)
+        except Exception:
+            pass
     form = QW.QFormLayout()
     widgets = {}
     fam_combo = {}
@@ -119,6 +145,8 @@ def form_dialog(title, fields):
         if kind == "info":
             w = QW.QLabel(str(f.get("default", "")))
             w.setWordWrap(True)
+            # QLabel auto-detects HTML (AutoText); an 'html' info row (e.g. the
+            # BC colour legend) therefore renders as rich text with no extra API.
             form.addRow(w)
             continue
         if kind == "combo":
@@ -168,6 +196,17 @@ def form_dialog(title, fields):
         else:
             out[k] = w.text()
     return out
+
+
+def _cfd_dialog_kwargs(title, subtitle=""):
+    """SimScale-style theming kwargs for a CFD form_dialog (QSS + header banner).
+    Returns {} when the theme module is unavailable, so the dialog still opens."""
+    if cfdui is None:
+        return {}
+    try:
+        return {"stylesheet": cfdui.stylesheet(), "header": (title, subtitle)}
+    except Exception:
+        return {}
 
 
 def selected_edge_dir():
@@ -6950,7 +6989,11 @@ class CfdDomain:
             {"key": "top", "label": "Top margin (x L)", "kind": "float", "default": 3.0},
             {"key": "ground", "label": "Below margin (x L)", "kind": "float", "default": 3.0},
         ]
-        vals = form_dialog("CFD Domain & BCs (preview)", fields)
+        vals = form_dialog("CFD Domain & BCs (preview)", fields,
+                           **_cfd_dialog_kwargs(
+                               "CFD Domain & Boundary Conditions",
+                               "Flow domain + colour-coded BC faces on the "
+                               "selected solid (+X is the flow direction)."))
         if not vals:
             return
         name = (str(vals.get("name") or "flow1").strip().replace(" ", "_")) or "flow1"
@@ -7032,7 +7075,11 @@ class CfdCase:
             {"key": "run", "label": "Try to launch the run now", "kind": "combo",
              "options": ["No", "Yes"], "default": "No"},
         ]
-        vals = form_dialog("CFD Case (OpenFOAM)", fields)
+        vals = form_dialog("CFD Case (OpenFOAM)", fields,
+                           **_cfd_dialog_kwargs(
+                               "CFD Case - OpenFOAM",
+                               "Run any of the 20 OpenFOAM physics modules from "
+                               "its validated tutorial (the engine SimScale runs)."))
         if not vals:
             return
         ent = next((c for c in cfd.CATALOG if c["title"] == vals["phys"]),
@@ -7126,7 +7173,11 @@ class CfdView:
             {"key": "run", "label": "Try to run the conversion now", "kind": "combo",
              "options": ["No", "Yes"], "default": "No"},
         ]
-        vals = form_dialog("CFD View in ParaView", fields)
+        vals = form_dialog("CFD View in ParaView", fields,
+                           **_cfd_dialog_kwargs(
+                               "CFD View in ParaView",
+                               "Convert a case's latest results to VTK and copy "
+                               "them to Windows for ParaView."))
         if not vals:
             return
         name = (str(vals.get("name") or "case1").strip().replace(" ", "_")) or "case1"
@@ -7232,7 +7283,11 @@ class CfdMeshFromCad:
             {"key": "run", "label": "Try to mesh now", "kind": "combo",
              "options": ["No", "Yes"], "default": "No"},
         ]
-        vals = form_dialog("CFD Mesh from CAD (snappyHexMesh)", fields)
+        vals = form_dialog("CFD Mesh from CAD (snappyHexMesh)", fields,
+                           **_cfd_dialog_kwargs(
+                               "CFD Mesh from CAD",
+                               "snappyHexMesh a selected solid: background hex box "
+                               "with the body carved out and boundary-layered."))
         if not vals:
             return
         name = (str(vals.get("name") or "part1").strip().replace(" ", "_")) or "part1"
@@ -7344,6 +7399,8 @@ class CfdFlow:
              "matching boundary conditions + kOmegaSST turbulence, solves with "
              "incompressibleFluid and converts to VTK. Same engine as SimScale." %
              (getattr(obj, "Label", "body"), bb.XLength, bb.YLength, bb.ZLength)},
+            {"key": "_legend", "kind": "info", "html": True,
+             "default": (cfdui.bc_legend_html() if cfdui else "")},
             {"key": "name", "label": "Case name", "kind": "text", "default": "flow1"},
             {"key": "U", "label": "Inlet air speed Ux (m/s)", "kind": "float",
              "default": 10.0, "decimals": 3},
@@ -7371,7 +7428,11 @@ class CfdFlow:
             {"key": "run", "label": "Try to run now", "kind": "combo",
              "options": ["No", "Yes"], "default": "No"},
         ]
-        vals = form_dialog("CFD Flow: wind / air (incompressible)", fields)
+        vals = form_dialog("CFD Flow: wind / air (incompressible)", fields,
+                           **_cfd_dialog_kwargs(
+                               "CFD Flow - Incompressible",
+                               "Wind / air around a solid: auto-mesh, auto-BCs, "
+                               "kOmegaSST RANS solve, VTK for ParaView."))
         if not vals:
             return
         name = (str(vals.get("name") or "flow1").strip().replace(" ", "_")) or "flow1"

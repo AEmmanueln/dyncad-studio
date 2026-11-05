@@ -1593,7 +1593,7 @@ import tempfile as _tf
 _tmp = _tf.mkdtemp()
 C._cfd_outdir = lambda d=_tmp: d
 dCF = Doc(); FreeCAD.ActiveDocument = dCF
-C.form_dialog = lambda title, fields: {"phys": "Conjugate heat transfer (fluid + solid)",
+C.form_dialog = lambda title, fields, **_kw: {"phys": "Conjugate heat transfer (fluid + solid)",
     "name": "cht1", "endTime": 5.0, "deltaT": 0.0, "writeInterval": 0.0,
     "inletU": 0.0, "case": "", "latest": "Yes", "distro": "Ubuntu",
     "env": "/opt/openfoam14/etc/bashrc", "run": "No"}
@@ -1668,7 +1668,7 @@ class _Sel2:
 _savedSel = C.FreeCADGui.Selection; C.FreeCADGui.Selection = _Sel2()
 _tmp2 = _tf.mkdtemp(); C._cfd_outdir = lambda d=_tmp2: d
 dMZ = Doc(); FreeCAD.ActiveDocument = dMZ
-C.form_dialog = lambda title, fields: {"name": "part1", "ncb": 8, "lmin": 2,
+C.form_dialog = lambda title, fields, **_kw: {"name": "part1", "ncb": 8, "lmin": 2,
     "lmax": 4, "nlay": 3, "up": 2.0, "down": 4.0, "side": 2.0, "top": 2.0,
     "ground": 1.0, "distro": "Ubuntu", "env": "/opt/openfoam14/etc/bashrc", "run": "No"}
 gMZ = {}; C.info = lambda m, g=gMZ: g.setdefault("msg", m)
@@ -1730,7 +1730,7 @@ FreeCAD.Matrix = _FM; C.global_shape = lambda o: _FShape()
 C.FreeCADGui.Selection = _Sel2()
 _tmp3 = _tf.mkdtemp(); C._cfd_outdir = lambda d=_tmp3: d
 dFL = Doc(); FreeCAD.ActiveDocument = dFL
-C.form_dialog = lambda title, fields: {"name": "flow1", "U": 10.0, "ti": 5.0,
+C.form_dialog = lambda title, fields, **_kw: {"name": "flow1", "U": 10.0, "ti": 5.0,
     "nu": 1.5e-5, "iters": 800, "ncb": 8, "lmin": 2, "lmax": 4, "nlay": 3,
     "up": 3.0, "down": 6.0, "side": 3.0, "top": 3.0, "ground": 3.0,
     "distro": "Ubuntu", "env": "/opt/openfoam14/etc/bashrc", "run": "No"}
@@ -1769,7 +1769,7 @@ print("  face->BC mapping + colours OK")
 C.global_shape = lambda o: _FShape()       # BoundBox 0..10 x 0..2 x 0..3 (mm)
 C.FreeCADGui.Selection = _Sel2()
 dDM = Doc(); FreeCAD.ActiveDocument = dDM
-C.form_dialog = lambda title, fields: {"name": "flow1", "U": 10.0, "up": 3.0,
+C.form_dialog = lambda title, fields, **_kw: {"name": "flow1", "U": 10.0, "up": 3.0,
     "down": 6.0, "side": 3.0, "top": 3.0, "ground": 3.0}
 gDM = {}; C.info = lambda m, g=gDM: g.setdefault("msg", m)
 C.CfdDomain().Activated()
@@ -1783,5 +1783,43 @@ assert "inlet" in gDM["msg"] and "outlet" in gDM["msg"]
 print("  CfdDomain drew domain box + inlet arrows + BC colours on the part")
 C.global_shape = _savedGS; C.FreeCADGui.Selection = _savedSel
 print("CFD domain preview OK")
+
+# ---------- CFD UI theme (SimScale-style, pure/testable) ----------
+print("\n== CFD UI theme (SimScale-style) ==")
+import dynframe_cfd_ui as CU
+# palette has every key the stylesheet references, and they are hex colours
+for _k in ("bg", "surface", "field", "text", "subtext", "accent", "accent_hi",
+           "accent_text", "border", "border_hi"):
+    assert _k in CU.PALETTE, _k
+    _v = CU.PALETTE[_k]
+    assert isinstance(_v, str) and _v.startswith("#") and len(_v) == 7, (_k, _v)
+# rgb_hex converts 0..1 floats correctly and clamps
+assert CU.rgb_hex((0.0, 0.0, 0.0)) == "#000000"
+assert CU.rgb_hex((1.0, 1.0, 1.0)) == "#ffffff"
+assert CU.rgb_hex((0.85, 0.25, 0.20)) == "#d94033"   # the outlet red
+assert CU.rgb_hex((2.0, -1.0, 0.5)) == "#ff0080"     # clamped
+# stylesheet is a non-trivial QSS string using the accent + key selectors
+_qss = CU.stylesheet()
+assert isinstance(_qss, str) and len(_qss) > 200
+assert CU.PALETTE["accent"] in _qss and "QDialog" in _qss and "QGroupBox" in _qss
+assert "QComboBox" in _qss and "QPushButton:default" in _qss
+# a custom palette overrides the default
+assert "#123456" in CU.stylesheet({"accent": "#123456"})
+# the BC legend colours match the 3D domain preview exactly (inlet/outlet/...)
+_bc_of = {}
+for _bcname, _col in zip(CG.DOMAIN_FACE_BCS, CG.DOMAIN_FACE_COLORS):
+    _bc_of.setdefault(_bcname, CU.rgb_hex(_col))
+for _p in ("inlet", "outlet", "sides", "top", "ground"):
+    assert CU.BC_COLORS[_p] == _bc_of[_p], (_p, CU.BC_COLORS[_p], _bc_of[_p])
+print("  palette + stylesheet + BC legend match the viewport colours OK")
+# legend + header render as escaped rich text (HTML) for the dialog info rows
+_leg = CU.bc_legend_html()
+assert _leg.startswith("<table") and "background:%s" % CU.BC_COLORS["inlet"] in _leg
+for _p in CU.BC_ORDER:
+    assert _p in _leg or CU.BC_LABELS[_p].split(" - ")[0] in _leg
+_hdr = CU.header_html("A & B", "x < y")
+assert "&amp;" in _hdr and "&lt;" in _hdr      # escaped, no raw & or <
+print("  BC legend HTML + header HTML OK")
+print("CFD UI theme OK")
 
 print("\nALL RUNTIME CHECKS PASSED")

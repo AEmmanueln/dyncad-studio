@@ -28,6 +28,10 @@ try:
     import dynframe_cfd_tree as cfdtree    # SimScale-style simulation-tree model
 except Exception:
     cfdtree = None
+try:
+    import dynframe_cfd_bc as cfdbc        # interactive boundary-condition model
+except Exception:
+    cfdbc = None
 
 from PySide import QtGui
 try:
@@ -7509,6 +7513,141 @@ class CfdStudy:
                                     study.get("use", "")))
 
 
+def _cfd_collect_bc_assignments(doc, solid_name):
+    """Gather every face->BC assignment for `solid_name` from the BC objects in
+    the document, as {face_index: bc_key}."""
+    out = {}
+    for o in getattr(doc, "Objects", []):
+        if getattr(o, "CfdBCSolid", "") != solid_name:
+            continue
+        key = getattr(o, "CfdBCType", "") or ""
+        faces = getattr(o, "CfdBCFaces", "") or ""
+        for part in str(faces).split(","):
+            part = part.strip()
+            if part.isdigit():
+                out[int(part)] = key
+    return out
+
+
+def _cfd_recolor_solid(solid, assignments):
+    """Paint a solid's faces by their assigned BC colour (unassigned = base)."""
+    if cfdbc is None:
+        return
+    try:
+        nfaces = len(global_shape(solid).Faces)
+        cols = cfdbc.face_colors(nfaces, assignments)
+        solid.ViewObject.DiffuseColor = [tuple(c) for c in cols]
+    except Exception:
+        pass
+
+
+def _cfd_find_bc_node(doc):
+    """The study tree's 'Boundary conditions' node, if a CFD study exists."""
+    for o in getattr(doc, "Objects", []):
+        if getattr(o, "CfdStep", "") == "bcs":
+            return o
+    return None
+
+
+class CfdAssignBC:
+    def GetResources(self):
+        return {"Pixmap": _icon("cfd"),
+                "MenuText": "Assign Boundary Condition (faces)",
+                "ToolTip": "SimScale-style boundary conditions: select one or more "
+                           "faces of the solid in the 3D view, then run this to "
+                           "assign a BC (velocity inlet, pressure outlet, wall, "
+                           "slip/symmetry). The faces are colour-coded and the "
+                           "assignment is stored as a node under the study's "
+                           "Boundary conditions.",
+                "Accel": "C, B"}
+
+    def IsActive(self):
+        return cfdbc is not None and FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        if cfdbc is None:
+            err("The CFD BC module failed to load."); return
+        # collect the selected faces (must be on a single solid)
+        try:
+            sel = FreeCADGui.Selection.getSelectionEx()
+        except Exception:
+            sel = []
+        solid = None; subs = []
+        for s in sel:
+            o = getattr(s, "Object", None)
+            if o is None:
+                continue
+            if solid is None:
+                solid = o
+            if o is solid:
+                subs += list(getattr(s, "SubElementNames", []) or [])
+        faces = cfdbc.parse_face_indices(subs)
+        if solid is None or not faces:
+            info("Select one or more FACES of the solid in the 3D view, then run "
+                 "Assign Boundary Condition. (Click a face; Ctrl-click for more.)")
+            return
+        fields = [
+            {"key": "_i", "kind": "info", "default":
+             "Assign a boundary condition to the %d selected face(s) of '%s'. The "
+             "faces will be colour-coded in the 3D view." %
+             (len(faces), getattr(solid, "Label", "solid"))},
+            {"key": "type", "label": "Boundary condition", "kind": "combo",
+             "options": cfdbc.bc_labels(), "default": cfdbc.bc_labels()[0]},
+            {"key": "value", "label": "Value (speed m/s or pressure Pa)",
+             "kind": "float", "default": 10.0, "decimals": 4},
+        ]
+        vals = form_dialog("Assign Boundary Condition", fields,
+                           **_cfd_dialog_kwargs(
+                               "Boundary Condition",
+                               "Assign the selected faces to a BC; they are "
+                               "colour-coded like SimScale."))
+        if not vals:
+            return
+        bc = cfdbc.bc_by_label(vals.get("type")) or cfdbc.BC_TYPES[0]
+        doc = FreeCAD.ActiveDocument
+        doc.openTransaction("DynFrame: assign BC")
+        try:
+            node = doc.addObject("App::FeaturePython",
+                                 "CfdBC_%s" % bc["key"])
+            try:
+                node.Label = "%s (%d face%s)" % (bc["label"], len(faces),
+                                                 "" if len(faces) == 1 else "s")
+            except Exception:
+                pass
+            _cfd_set_str(node, "CfdBCType", bc["key"])
+            _cfd_set_str(node, "CfdBCSolid", getattr(solid, "Name", ""))
+            _cfd_set_str(node, "CfdBCFaces",
+                         ",".join(str(i) for i in sorted(set(faces))))
+            _cfd_set_str(node, "CfdBCValue", _g(vals.get("value", 0.0)))
+            parent = _cfd_find_bc_node(doc)
+            if parent is not None:
+                try:
+                    parent.addObject(node)
+                except Exception:
+                    pass
+            # recolour the solid by all its BC assignments
+            _cfd_recolor_solid(solid, _cfd_collect_bc_assignments(doc, solid.Name))
+            doc.commitTransaction(); doc.recompute()
+        except Exception as e:
+            try:
+                doc.abortTransaction()
+            except Exception:
+                pass
+            err("Could not assign the boundary condition: %s" % e); return
+        counts = cfdbc.summarize(_cfd_collect_bc_assignments(doc, solid.Name))
+        summary = ", ".join("%s=%d" % (k, n) for k, n in sorted(counts.items()))
+        info("Assigned %s to %d face(s) of '%s'.\n\nThe faces are colour-coded in "
+             "the 3D view (green inlet, red outlet, grey wall, blue slip). Current "
+             "BCs on this solid: %s.\n\nSelect more faces and repeat to build up "
+             "the boundary conditions, SimScale-style." %
+             (bc["label"], len(faces), getattr(solid, "Label", "solid"), summary))
+
+
+def _g(v):
+    """Compact number format (mirrors dynframe_cfd_gen._g)."""
+    return ("%.6g" % float(v))
+
+
 def _cfd_flow_execute(obj, pts, facets, bb, Lm, vals):
     """Build + stage the incompressible-flow case from the collected values and
     report it. Shared by the modal form and the docked Task panel so both paths
@@ -10507,6 +10646,7 @@ _add("DynFrame_WallThermal", WallThermal)
 _add("DynFrame_ThermalBridge2D", ThermalBridge2D)
 _add("DynFrame_FireThermal", FireThermal)
 _add("DynFrame_CfdStudy", CfdStudy)
+_add("DynFrame_CfdAssignBC", CfdAssignBC)
 _add("DynFrame_CfdCase", CfdCase)
 _add("DynFrame_CfdDomain", CfdDomain)
 _add("DynFrame_CfdMeshFromCad", CfdMeshFromCad)

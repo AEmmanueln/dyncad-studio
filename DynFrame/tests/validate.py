@@ -1852,4 +1852,45 @@ assert getattr(_c.Group[-1], "CfdStep", "") == "run"
 print("  CfdStudy built the simulation tree (container + 7 nodes) OK")
 print("CFD simulation tree OK")
 
+# ---------- CFD interactive boundary conditions ----------
+print("\n== CFD boundary conditions (interactive) ==")
+import dynframe_cfd_bc as CB
+assert len(CB.BC_TYPES) >= 4
+for _b in CB.BC_TYPES:
+    assert "key" in _b and len(_b["color"]) == 3 and "label" in _b
+assert CB.parse_face_indices(["Face3", "Face12", "Edge1", "x"]) == [2, 11]
+_fc = CB.face_colors(6, {0: "inlet", 2: "outlet"})
+assert len(_fc) == 6
+assert _fc[0] == CB.bc_color("inlet") and _fc[2] == CB.bc_color("outlet")
+assert _fc[1] == CB.BASE_FACE_COLOR
+_asg = CB.merge_assignments({0: "inlet"}, [2, 3], "wall")
+assert _asg == {0: "inlet", 2: "wall", 3: "wall"} and CB.summarize(_asg)["wall"] == 2
+print("  BC types + face colouring + assignments OK")
+# command: assign a BC to the selected faces -> BC object + recoloured solid
+
+
+class _SelEx:
+    def __init__(self, obj, names):
+        self.Object = obj; self.SubElementNames = names
+
+
+dBC = Doc(); FreeCAD.ActiveDocument = dBC
+_sld = dBC.addObject("Part::Box", "Cube")
+_savedGS2 = C.global_shape; _savedSel2 = C.FreeCADGui.Selection
+C.global_shape = lambda o: Shape(6)
+C.FreeCADGui.Selection = type("S", (), {"getSelectionEx": staticmethod(
+    lambda: [_SelEx(_sld, ["Face1", "Face2"])])})()
+C.form_dialog = lambda title, fields, **_k: {"type": CB.bc_labels()[0], "value": 7.5}
+gBCm = {}; C.info = lambda m, g=gBCm: g.setdefault("msg", m)
+C.CfdAssignBC().Activated()
+_bcobj = [o for o in dBC.Objects if getattr(o, "CfdBCType", "") == "inlet"]
+assert _bcobj, "BC object not created"
+assert getattr(_bcobj[0], "CfdBCFaces", "") == "0,1"
+assert getattr(_bcobj[0], "CfdBCSolid", "") == _sld.Name
+_dc = getattr(_sld.ViewObject, "DiffuseColor", None)
+assert _dc and len(_dc) == 6 and tuple(_dc[0]) == CB.bc_color("inlet")
+C.global_shape = _savedGS2; C.FreeCADGui.Selection = _savedSel2
+print("  CfdAssignBC assigned + colour-coded the faces OK")
+print("CFD boundary conditions OK")
+
 print("\nALL RUNTIME CHECKS PASSED")

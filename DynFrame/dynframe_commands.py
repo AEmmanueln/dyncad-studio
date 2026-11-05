@@ -7364,23 +7364,39 @@ _CFD_STATUS_GLYPH = {"done": "✓", "todo": "○"}   # check / open circle
 
 
 def _cfd_open_node(node):
-    """Open the setup for a clicked simulation-tree node. Phase 1: the actionable
-    nodes launch the study's end-to-end setup; the rest explain that their own
-    SimScale-style panel is the next phase."""
+    """Drive the workflow from the clicked simulation-tree node - the SimScale way,
+    where each node runs its own step. Reuses the dedicated commands so the tree
+    is the single control centre for the study."""
     panel = getattr(node, "CfdPanel", "") or ""
-    sid = getattr(node, "CfdStudy", "") or ""
-    if panel in ("geometry", "bcs", "mesh", "run"):
-        try:
-            if sid == "incompressibleFluid":
-                CfdFlow().Activated()
-            else:
-                CfdCase().Activated()
-        except Exception as e:
-            err("Could not open the study setup: %s" % e)
-    else:
-        info("The '%s' step gets its own SimScale-style setup panel in the next "
-             "phase. For now, double-click the 'Run' node to set up and solve the "
-             "whole study end to end." % panel)
+    try:
+        if panel == "bcs":
+            CfdAssignBC().Activated()
+        elif panel == "run":
+            CfdFlowInternal().Activated()
+        elif panel == "geometry":
+            info("Geometry: select the solid the flow is in (or around) in the "
+                 "Model tree, then open the 'Boundary conditions' node to tag its "
+                 "faces. The selected solid is this study's geometry.")
+        elif panel == "mesh":
+            info("Mesh: box solids are meshed automatically (blockMesh) when you "
+                 "Run. For an arbitrary solid use 'CFD Mesh from CAD' "
+                 "(snappyHexMesh). Per-node mesh controls are coming.")
+        elif panel in ("materials", "mat_fluid"):
+            info("Material (fluid): air by default (nu = 1.5e-5 m2/s, 20 C). An "
+                 "editable fluids/solids library is coming.")
+        elif panel == "mat_solid":
+            info("Material (solid): for conjugate heat transfer. Coming with the "
+                 "multi-region solver panel.")
+        elif panel == "numerics":
+            info("Numerics: steady kOmegaSST RANS with bounded schemes and SIMPLE "
+                 "(consistent) - SimScale's defaults. An editable panel is coming.")
+        elif panel == "control":
+            info("Simulation control: iteration count and write interval are set "
+                 "on the Run step for now; a dedicated panel is coming.")
+        else:
+            info("This step uses validated defaults; a dedicated panel is coming.")
+    except Exception as e:
+        err("Could not open the '%s' step: %s" % (panel, e))
 
 
 class _CfdNodeVP:

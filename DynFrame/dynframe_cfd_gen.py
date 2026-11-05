@@ -484,3 +484,100 @@ def build_flow_script(opts):
              % win_out)
     L.append('echo "=== FLOW DONE: $DST  (colour by U or p in ParaView) ==="')
     return "\n".join(L)
+
+
+# =============================================================================
+# Face-assigned (SimScale-style) boundary conditions -> OpenFOAM 0/ fields
+# =============================================================================
+# The interactive BC command assigns each patch a type (inlet/outlet/wall/slip/
+# noslip) and a value; this turns that list into the 0/ field files so a case
+# meshed with those named patches solves with exactly the user's BCs.
+def bc_field_files(patches, nu=1.5e-5, intensity=0.05, L=1.0):
+    """0/ fields (U, p, k, omega, nut) + transport/solver dicts whose
+    boundaryField is driven by the user's face-assigned BCs.
+
+    `patches`: list of {"name": patch, "bc": one of inlet/outlet/wall/slip/
+    noslip, "value": speed(m/s) or pressure(Pa)}. Returns ({filename: text},
+    k0, omega0). kOmegaSST turbulence sized from the fastest inlet."""
+    speeds = [abs(float(p.get("value", 0.0)))
+              for p in patches if p.get("bc") == "inlet"]
+    Uref = max(speeds) if speeds else 1.0
+    k0, om0 = inlet_turbulence(Uref, intensity, L)
+    kin = "uniform %s" % _g(k0)
+    oin = "uniform %s" % _g(om0)
+
+    def U_entry(p):
+        bc = p.get("bc"); v = _g(p.get("value", 0.0))
+        if bc == "inlet":
+            return ("        type            fixedValue;\n"
+                    "        value           uniform (%s 0 0);" % v)
+        if bc == "outlet":
+            return ("        type            pressureInletOutletVelocity;\n"
+                    "        value           uniform (0 0 0);")
+        if bc == "slip":
+            return "        type            slip;"
+        if bc == "noslip":
+            return ("        type            fixedValue;\n"
+                    "        value           uniform (%s 0 0);" % v)
+        return "        type            noSlip;"
+
+    def p_entry(p):
+        bc = p.get("bc")
+        if bc == "outlet":
+            return ("        type            fixedValue;\n"
+                    "        value           uniform %s;" % _g(p.get("value", 0.0)))
+        if bc == "slip":
+            return "        type            slip;"
+        return "        type            zeroGradient;"
+
+    def k_entry(p):
+        bc = p.get("bc")
+        if bc == "inlet":
+            return ("        type            fixedValue;\n        value           %s;" % kin)
+        if bc == "outlet":
+            return ("        type            inletOutlet;\n        inletValue      %s;\n"
+                    "        value           %s;" % (kin, kin))
+        if bc == "slip":
+            return "        type            slip;"
+        return "        type            kqRWallFunction;\n        value           %s;" % kin
+
+    def omega_entry(p):
+        bc = p.get("bc")
+        if bc == "inlet":
+            return ("        type            fixedValue;\n        value           %s;" % oin)
+        if bc == "outlet":
+            return ("        type            inletOutlet;\n        inletValue      %s;\n"
+                    "        value           %s;" % (oin, oin))
+        if bc == "slip":
+            return "        type            slip;"
+        return "        type            omegaWallFunction;\n        value           %s;" % oin
+
+    def nut_entry(p):
+        bc = p.get("bc")
+        if bc == "slip":
+            return "        type            slip;"
+        if bc in ("inlet", "outlet"):
+            return "        type            calculated;\n        value           uniform 0;"
+        return "        type            nutkWallFunction;\n        value           uniform 0;"
+
+    def assemble(cls, obj, dims, internal, entry):
+        body = ""
+        for p in patches:
+            body += "    %s\n    {\n%s\n    }\n" % (p.get("name", "patch"), entry(p))
+        return (_foam_header(cls, obj)
+                + "dimensions      %s;\n\ninternalField   %s;\n\n"
+                  "boundaryField\n{\n%s}\n" % (dims, internal, body))
+
+    files = {
+        "U": assemble("volVectorField", "U", "[0 1 -1 0 0 0 0]", "uniform (0 0 0)", U_entry),
+        "p": assemble("volScalarField", "p", "[0 2 -2 0 0 0 0]", "uniform 0", p_entry),
+        "k": assemble("volScalarField", "k", "[0 2 -2 0 0 0 0]", kin, k_entry),
+        "omega": assemble("volScalarField", "omega", "[0 0 -1 0 0 0 0]", oin, omega_entry),
+        "nut": assemble("volScalarField", "nut", "[0 2 -1 0 0 0 0]", "uniform 0", nut_entry),
+        "momentumTransport": momentum_transport_dict("kOmegaSST"),
+        "physicalProperties": physical_properties_dict(nu),
+        "fvSchemes": fv_schemes_simple(),
+        "fvSolution": fv_solution_simple(),
+        "controlDict": control_dict_simple("incompressibleFluid", 1000, 200),
+    }
+    return files, k0, om0

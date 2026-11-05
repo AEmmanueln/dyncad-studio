@@ -1891,6 +1891,21 @@ _dc = getattr(_sld.ViewObject, "DiffuseColor", None)
 assert _dc and len(_dc) == 6 and tuple(_dc[0]) == CB.bc_color("inlet")
 C.global_shape = _savedGS2; C.FreeCADGui.Selection = _savedSel2
 print("  CfdAssignBC assigned + colour-coded the faces OK")
+# wire face-assigned BCs -> OpenFOAM 0/ field files
+_patches = [{"name": "inlet", "bc": "inlet", "value": 12.0},
+            {"name": "outlet", "bc": "outlet", "value": 0.0},
+            {"name": "walls", "bc": "wall", "value": 0.0}]
+_ff, _k0f, _om0f = CG.bc_field_files(_patches, nu=1.5e-5, L=0.1)
+assert set(_ff) >= {"U", "p", "k", "omega", "nut", "controlDict", "physicalProperties"}
+for _nm, _t in _ff.items():
+    assert _t.count("{") == _t.count("}"), _nm
+assert "inlet\n    {\n        type            fixedValue;\n        value           uniform (12 0 0);" in _ff["U"]
+assert "outlet\n    {\n        type            pressureInletOutletVelocity;" in _ff["U"]
+assert "walls\n    {\n        type            noSlip;" in _ff["U"]
+assert "outlet\n    {\n        type            fixedValue;\n        value           uniform 0;" in _ff["p"]
+assert "walls\n    {\n        type            nutkWallFunction;" in _ff["nut"]
+assert _k0f > 0 and _om0f > 0
+print("  bc_field_files wired face BCs into 0/ fields OK")
 print("CFD boundary conditions OK")
 
 print("\nALL RUNTIME CHECKS PASSED")

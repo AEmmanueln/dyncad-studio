@@ -7499,18 +7499,36 @@ class _CfdFlowTaskPanel:
                 root.setStyleSheet(cfdui.stylesheet())
             except Exception:
                 pass
+        pal = (cfdui.PALETTE if cfdui is not None else
+               {"accent": "#17a2b8", "surface": "#2b313a", "text": "#e6edf3",
+                "subtext": "#9aa7b4", "bg": "#21262d", "border": "#3a424d"})
         outer = QW.QVBoxLayout(root)
-        hl = QW.QLabel("CFD Flow \u2013 Incompressible"); hl.setObjectName("cfdHeader")
-        outer.addWidget(hl)
+        outer.setContentsMargins(0, 0, 0, 0); outer.setSpacing(0)
+        # title banner (inline-styled so FreeCAD's global theme can't override it)
+        banner = QW.QLabel("CFD Flow \u2013 Incompressible")
+        banner.setStyleSheet(
+            "background:%s; color:#ffffff; font-size:15px; font-weight:700; "
+            "padding:8px 10px;" % pal["accent"])
+        outer.addWidget(banner)
         sub = QW.QLabel("Wind / air around a solid \u2013 auto-mesh (snappyHexMesh), "
                         "auto-BCs, kOmegaSST RANS, VTK for ParaView.")
-        sub.setObjectName("cfdSub"); sub.setWordWrap(True); outer.addWidget(sub)
+        sub.setWordWrap(True)
+        sub.setStyleSheet("background:%s; color:%s; padding:6px 10px;"
+                          % (pal["bg"], pal["subtext"]))
+        outer.addWidget(sub)
         forms = {}
-        for sec in _CFD_FLOW_SECTIONS:
-            gb = QW.QGroupBox(sec)
-            fl = QW.QFormLayout(gb)
+        for i, sec in enumerate(_CFD_FLOW_SECTIONS, 1):
+            hdr = QW.QLabel("%d \u00b7 %s" % (i, sec))
+            hdr.setStyleSheet(
+                "background:%s; color:#ffffff; font-weight:600; font-size:12px; "
+                "padding:5px 10px; margin-top:6px;" % pal["accent"])
+            outer.addWidget(hdr)
+            cont = QW.QWidget()
+            cont.setStyleSheet("background:%s;" % pal["surface"])
+            fl = QW.QFormLayout(cont)
+            fl.setContentsMargins(12, 8, 12, 10); fl.setSpacing(6)
             forms[sec] = fl
-            outer.addWidget(gb)
+            outer.addWidget(cont)
         for f in fields:
             k = f.get("key"); kind = f.get("kind", "text")
             sec = _CFD_FLOW_KEY_SECTION.get(k, "Mesh & refinement")

@@ -7389,35 +7389,41 @@ def _cfd_pick_material(node):
         info("The material library failed to load."); return
     fields = [
         {"key": "_i", "kind": "info", "default":
-         "Pick the working fluid for this study. Its kinematic viscosity (and "
-         "density) drive the flow solve."},
+         "Pick a fluid from the library, or enter your own viscosity/density "
+         "(leave a custom field at 0 to use the library value)."},
         {"key": "fluid", "label": "Fluid", "kind": "combo",
          "options": cfdmat.fluid_names(), "default": cfdmat.fluid_names()[0]},
+        {"key": "nu", "label": "Custom viscosity nu (m2/s; 0 = library)",
+         "kind": "float", "default": 0.0, "decimals": 9},
+        {"key": "rho", "label": "Custom density rho (kg/m3; 0 = library)",
+         "kind": "float", "default": 0.0, "decimals": 4},
     ]
     vals = form_dialog("Material - fluid", fields,
                        **_cfd_dialog_kwargs(
                            "Material (fluid)",
-                           "Choose the working fluid from the library; its "
-                           "viscosity is used by the solver."))
+                           "Pick a library fluid or type your own viscosity and "
+                           "density; the solver uses these."))
     if not vals:
         return
     f = cfdmat.fluid_by_name(vals.get("fluid")) or cfdmat.FLUIDS[0]
+    nu = float(vals.get("nu") or 0.0) or f["nu"]
+    rho = float(vals.get("rho") or 0.0) or f["rho"]
+    custom = (nu != f["nu"]) or (rho != f["rho"])
     doc = FreeCAD.ActiveDocument
     cont = _cfd_study_container(doc, node)
     for tgt in (node, cont):
         if tgt is not None:
-            _cfd_set_str(tgt, "CfdFluid", f["key"])
-            _cfd_set_str(tgt, "CfdNu", _g(f["nu"]))
-            _cfd_set_str(tgt, "CfdRho", _g(f["rho"]))
+            _cfd_set_str(tgt, "CfdFluid", "custom" if custom else f["key"])
+            _cfd_set_str(tgt, "CfdNu", _g(nu))
+            _cfd_set_str(tgt, "CfdRho", _g(rho))
     _cfd_mark_node_done(node, "Materials")
     try:
         doc.recompute()
     except Exception:
         pass
     info("Fluid set to %s (nu = %g m2/s, rho = %g kg/m3). The flow solve now uses "
-         "this viscosity. (More fluids/solids are in the library; conjugate "
-         "heat-transfer solids come with the multi-region solver.)"
-         % (f["name"], f["nu"], f["rho"]))
+         "this viscosity." %
+         ("custom" if custom else f["name"], nu, rho))
 
 
 def _cfd_study_nu(doc, default=1.5e-5):
@@ -7665,6 +7671,191 @@ def _cfd_find_bc_node(doc):
     return None
 
 
+def _cfd_create_bc(doc, solid, bc, faces, value):
+    """Record a BC on `faces` of `solid` and recolour the solid. Shared by the
+    non-modal panel and the modal fallback."""
+    faces = sorted(set(int(i) for i in faces))
+    node = doc.addObject("App::FeaturePython", "CfdBC_%s" % bc["key"])
+    try:
+        node.Label = "%s (%d face%s)" % (bc["label"], len(faces),
+                                         "" if len(faces) == 1 else "s")
+    except Exception:
+        pass
+    _cfd_set_str(node, "CfdBCType", bc["key"])
+    _cfd_set_str(node, "CfdBCSolid", getattr(solid, "Name", ""))
+    _cfd_set_str(node, "CfdBCFaces", ",".join(str(i) for i in faces))
+    _cfd_set_str(node, "CfdBCValue", _g(value))
+    parent = _cfd_find_bc_node(doc)
+    if parent is not None:
+        try:
+            parent.addObject(node)
+        except Exception:
+            pass
+    _cfd_recolor_solid(solid, _cfd_collect_bc_assignments(doc, getattr(solid, "Name", "")))
+    return node
+
+
+class _CfdBCSelObserver:
+    """Feeds 3D-view face clicks into the open BC panel (live selection)."""
+    def __init__(self, panel):
+        self._panel = panel
+
+    def _ping(self, *a):
+        try:
+            self._panel.refresh_selection()
+        except Exception:
+            pass
+    addSelection = _ping
+    removeSelection = _ping
+    clearSelection = _ping
+    setSelection = _ping
+
+
+class _CfdBCTaskPanel:
+    """Non-modal BC panel (SimScale-style): it stays open while you click faces in
+    the 3D view, pick a type and type your own value, Assign, repeat, Close."""
+    def __init__(self):
+        self._cur_solid = None
+        self._cur_faces = []
+        self.form = self._build()
+        self._obs = _CfdBCSelObserver(self)
+        try:
+            FreeCADGui.Selection.addObserver(self._obs)
+        except Exception:
+            self._obs = None
+        self.refresh_selection()
+
+    def _build(self):
+        w = QW.QWidget(); w.setObjectName("cfdPanel")
+        w.setWindowTitle("Boundary conditions")
+        pal = (cfdui.PALETTE if cfdui is not None else
+               {"accent": "#17a2b8", "subtext": "#9aa7b4"})
+        if cfdui is not None:
+            try:
+                w.setStyleSheet(cfdui.stylesheet())
+            except Exception:
+                pass
+        lay = QW.QVBoxLayout(w)
+        hdr = QW.QLabel("Boundary conditions")
+        hdr.setStyleSheet("background:%s;color:#fff;font-weight:700;font-size:14px;"
+                          "padding:7px 10px;" % pal["accent"])
+        lay.addWidget(hdr)
+        tip = QW.QLabel("Click one or more faces of the solid in the 3D view, pick "
+                        "a type and value, then Assign. Repeat per patch; Close "
+                        "when done.")
+        tip.setWordWrap(True)
+        tip.setStyleSheet("color:%s;padding:4px 2px;" % pal["subtext"])
+        lay.addWidget(tip)
+        form = QW.QFormLayout()
+        self._type = QW.QComboBox(); self._type.addItems(cfdbc.bc_labels())
+        self._type.currentIndexChanged.connect(self._sync_value_label)
+        form.addRow("Type", self._type)
+        self._value = QW.QDoubleSpinBox()
+        self._value.setRange(-1e12, 1e12); self._value.setDecimals(4)
+        self._value.setValue(10.0)
+        self._vrow = QW.QLabel("Inlet speed (m/s)")
+        form.addRow(self._vrow, self._value)
+        lay.addLayout(form)
+        self._facelbl = QW.QLabel("Selected faces: none")
+        lay.addWidget(self._facelbl)
+        self._assign = QW.QPushButton("Assign to selected faces")
+        self._assign.clicked.connect(self._do_assign)
+        lay.addWidget(self._assign)
+        self._status = QW.QLabel(""); self._status.setWordWrap(True)
+        lay.addWidget(self._status)
+        lay.addStretch(1)
+        self._sync_value_label()
+        return w
+
+    def _sync_value_label(self, *a):
+        bc = cfdbc.bc_by_label(self._type.currentText()) or cfdbc.BC_TYPES[0]
+        lab = bc.get("value_label") or "Value (not needed)"
+        self._vrow.setText(lab)
+        self._value.setEnabled(bool(bc.get("value_label")))
+
+    def refresh_selection(self):
+        try:
+            sel = FreeCADGui.Selection.getSelectionEx()
+        except Exception:
+            sel = []
+        solid = None; faces = []
+        for s in sel:
+            o = getattr(s, "Object", None)
+            if o is None:
+                continue
+            if solid is None:
+                solid = o
+            if o is solid:
+                faces += cfdbc.parse_face_indices(getattr(s, "SubElementNames", []) or [])
+        self._cur_solid = solid
+        self._cur_faces = sorted(set(faces))
+        n = len(self._cur_faces)
+        if n:
+            self._facelbl.setText("Selected faces: %d on '%s'"
+                                  % (n, getattr(solid, "Label", "-")))
+        else:
+            self._facelbl.setText("Selected faces: none (click a face)")
+
+    def _do_assign(self):
+        if not self._cur_solid or not self._cur_faces:
+            self._status.setText("Select one or more faces in the 3D view first.")
+            return
+        bc = cfdbc.bc_by_label(self._type.currentText()) or cfdbc.BC_TYPES[0]
+        doc = FreeCAD.ActiveDocument
+        doc.openTransaction("DynFrame: assign BC")
+        try:
+            _cfd_create_bc(doc, self._cur_solid, bc, self._cur_faces,
+                           self._value.value())
+            doc.commitTransaction(); doc.recompute()
+        except Exception as e:
+            try:
+                doc.abortTransaction()
+            except Exception:
+                pass
+            self._status.setText("Could not assign: %s" % e); return
+        counts = cfdbc.summarize(
+            _cfd_collect_bc_assignments(doc, self._cur_solid.Name))
+        self._status.setText(
+            "Assigned %s to %d face(s). Patches so far: %s. Select the next "
+            "faces for another patch." %
+            (bc["label"], len(self._cur_faces),
+             ", ".join("%s=%d" % kv for kv in sorted(counts.items()))))
+
+    def getStandardButtons(self):
+        return int(QW.QDialogButtonBox.Close)
+
+    def accept(self):
+        self._cleanup(); _close_task_dialog(); return True
+
+    def reject(self):
+        self._cleanup(); _close_task_dialog(); return True
+
+    def _cleanup(self):
+        try:
+            if self._obs is not None:
+                FreeCADGui.Selection.removeObserver(self._obs)
+        except Exception:
+            pass
+
+
+def _show_cfd_bc_panel():
+    """Open the non-modal BC panel. Returns True if shown (GUI), else False so the
+    caller falls back to the modal path (headless)."""
+    Ctrl = getattr(FreeCADGui, "Control", None)
+    if Ctrl is None or not hasattr(Ctrl, "showDialog"):
+        return False
+    try:
+        if hasattr(Ctrl, "activeDialog") and Ctrl.activeDialog():
+            return False
+    except Exception:
+        pass
+    try:
+        Ctrl.showDialog(_CfdBCTaskPanel())
+        return True
+    except Exception:
+        return False
+
+
 class CfdAssignBC:
     def GetResources(self):
         return {"Pixmap": _icon("cfd"),
@@ -7683,7 +7874,11 @@ class CfdAssignBC:
     def Activated(self):
         if cfdbc is None:
             err("The CFD BC module failed to load."); return
-        # collect the selected faces (must be on a single solid)
+        # Preferred: the non-modal panel - stays open so you can click faces in
+        # the 3D view while it is up (SimScale-style). Fall back to a modal form
+        # only when the Task-panel control is unavailable (headless / tests).
+        if _show_cfd_bc_panel():
+            return
         try:
             sel = FreeCADGui.Selection.getSelectionEx()
         except Exception:
@@ -7703,46 +7898,19 @@ class CfdAssignBC:
                  "Assign Boundary Condition. (Click a face; Ctrl-click for more.)")
             return
         fields = [
-            {"key": "_i", "kind": "info", "default":
-             "Assign a boundary condition to the %d selected face(s) of '%s'. The "
-             "faces will be colour-coded in the 3D view." %
-             (len(faces), getattr(solid, "Label", "solid"))},
             {"key": "type", "label": "Boundary condition", "kind": "combo",
              "options": cfdbc.bc_labels(), "default": cfdbc.bc_labels()[0]},
             {"key": "value", "label": "Value (speed m/s or pressure Pa)",
              "kind": "float", "default": 10.0, "decimals": 4},
         ]
-        vals = form_dialog("Assign Boundary Condition", fields,
-                           **_cfd_dialog_kwargs(
-                               "Boundary Condition",
-                               "Assign the selected faces to a BC; they are "
-                               "colour-coded like SimScale."))
+        vals = form_dialog("Assign Boundary Condition", fields)
         if not vals:
             return
         bc = cfdbc.bc_by_label(vals.get("type")) or cfdbc.BC_TYPES[0]
         doc = FreeCAD.ActiveDocument
         doc.openTransaction("DynFrame: assign BC")
         try:
-            node = doc.addObject("App::FeaturePython",
-                                 "CfdBC_%s" % bc["key"])
-            try:
-                node.Label = "%s (%d face%s)" % (bc["label"], len(faces),
-                                                 "" if len(faces) == 1 else "s")
-            except Exception:
-                pass
-            _cfd_set_str(node, "CfdBCType", bc["key"])
-            _cfd_set_str(node, "CfdBCSolid", getattr(solid, "Name", ""))
-            _cfd_set_str(node, "CfdBCFaces",
-                         ",".join(str(i) for i in sorted(set(faces))))
-            _cfd_set_str(node, "CfdBCValue", _g(vals.get("value", 0.0)))
-            parent = _cfd_find_bc_node(doc)
-            if parent is not None:
-                try:
-                    parent.addObject(node)
-                except Exception:
-                    pass
-            # recolour the solid by all its BC assignments
-            _cfd_recolor_solid(solid, _cfd_collect_bc_assignments(doc, solid.Name))
+            _cfd_create_bc(doc, solid, bc, faces, vals.get("value", 0.0))
             doc.commitTransaction(); doc.recompute()
         except Exception as e:
             try:
@@ -7752,10 +7920,7 @@ class CfdAssignBC:
             err("Could not assign the boundary condition: %s" % e); return
         counts = cfdbc.summarize(_cfd_collect_bc_assignments(doc, solid.Name))
         summary = ", ".join("%s=%d" % (k, n) for k, n in sorted(counts.items()))
-        info("Assigned %s to %d face(s) of '%s'.\n\nThe faces are colour-coded in "
-             "the 3D view (green inlet, red outlet, grey wall, blue slip). Current "
-             "BCs on this solid: %s.\n\nSelect more faces and repeat to build up "
-             "the boundary conditions, SimScale-style." %
+        info("Assigned %s to %d face(s) of '%s'. BCs so far: %s." %
              (bc["label"], len(faces), getattr(solid, "Label", "solid"), summary))
 
 

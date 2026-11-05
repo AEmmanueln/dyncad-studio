@@ -32,6 +32,10 @@ try:
     import dynframe_cfd_bc as cfdbc        # interactive boundary-condition model
 except Exception:
     cfdbc = None
+try:
+    import dynframe_cfd_materials as cfdmat  # fluid/solid material library
+except Exception:
+    cfdmat = None
 
 from PySide import QtGui
 try:
@@ -7363,6 +7367,71 @@ class CfdMeshFromCad:
 _CFD_STATUS_GLYPH = {"done": "✓", "todo": "○"}   # check / open circle
 
 
+def _cfd_study_container(doc, node):
+    """The study container group that holds `node` (its parent in the tree)."""
+    for o in getattr(doc, "Objects", []):
+        if node in (getattr(o, "Group", []) or []):
+            return o
+    return None
+
+
+def _cfd_mark_node_done(node, label):
+    try:
+        node.Label = "%s %s" % (_CFD_STATUS_GLYPH["done"], label)
+    except Exception:
+        pass
+
+
+def _cfd_pick_material(node):
+    """Materials step: pick the working fluid from the library and store it on the
+    study, so the solve uses its viscosity - SimScale's material assignment."""
+    if cfdmat is None:
+        info("The material library failed to load."); return
+    fields = [
+        {"key": "_i", "kind": "info", "default":
+         "Pick the working fluid for this study. Its kinematic viscosity (and "
+         "density) drive the flow solve."},
+        {"key": "fluid", "label": "Fluid", "kind": "combo",
+         "options": cfdmat.fluid_names(), "default": cfdmat.fluid_names()[0]},
+    ]
+    vals = form_dialog("Material - fluid", fields,
+                       **_cfd_dialog_kwargs(
+                           "Material (fluid)",
+                           "Choose the working fluid from the library; its "
+                           "viscosity is used by the solver."))
+    if not vals:
+        return
+    f = cfdmat.fluid_by_name(vals.get("fluid")) or cfdmat.FLUIDS[0]
+    doc = FreeCAD.ActiveDocument
+    cont = _cfd_study_container(doc, node)
+    for tgt in (node, cont):
+        if tgt is not None:
+            _cfd_set_str(tgt, "CfdFluid", f["key"])
+            _cfd_set_str(tgt, "CfdNu", _g(f["nu"]))
+            _cfd_set_str(tgt, "CfdRho", _g(f["rho"]))
+    _cfd_mark_node_done(node, "Materials")
+    try:
+        doc.recompute()
+    except Exception:
+        pass
+    info("Fluid set to %s (nu = %g m2/s, rho = %g kg/m3). The flow solve now uses "
+         "this viscosity. (More fluids/solids are in the library; conjugate "
+         "heat-transfer solids come with the multi-region solver.)"
+         % (f["name"], f["nu"], f["rho"]))
+
+
+def _cfd_study_nu(doc, default=1.5e-5):
+    """The viscosity chosen in a study's Materials step, if any (else default)."""
+    for o in getattr(doc, "Objects", []):
+        v = getattr(o, "CfdNu", "")
+        if v:
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                pass
+    return default
+
+
 def _cfd_open_node(node):
     """Drive the workflow from the clicked simulation-tree node - the SimScale way,
     where each node runs its own step. Reuses the dedicated commands so the tree
@@ -7382,8 +7451,7 @@ def _cfd_open_node(node):
                  "Run. For an arbitrary solid use 'CFD Mesh from CAD' "
                  "(snappyHexMesh). Per-node mesh controls are coming.")
         elif panel in ("materials", "mat_fluid"):
-            info("Material (fluid): air by default (nu = 1.5e-5 m2/s, 20 C). An "
-                 "editable fluids/solids library is coming.")
+            _cfd_pick_material(node)
         elif panel == "mat_solid":
             info("Material (solid): for conjugate heat transfer. Coming with the "
                  "multi-region solver panel.")
@@ -7781,7 +7849,7 @@ class CfdFlowInternal:
             {"key": "iters", "label": "Iterations (steady)", "kind": "int",
              "default": 1000, "min": 50, "max": 100000},
             {"key": "nu", "label": "Kinematic viscosity nu (m2/s)", "kind": "float",
-             "default": 1.5e-5, "decimals": 9},
+             "default": _cfd_study_nu(doc), "decimals": 9},
             {"key": "distro", "label": "WSL distro (blank = default)", "kind": "text", "default": ""},
             {"key": "env", "label": "OpenFOAM env (source)", "kind": "text", "default": cfd.DEFAULT_OF_ENV},
             {"key": "run", "label": "Try to run now", "kind": "combo",

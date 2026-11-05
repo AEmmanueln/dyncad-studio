@@ -1979,6 +1979,24 @@ _cv2 = CF.parse_convergence(
     "Time = 50\nSolving for Ux, Initial residual = 0.2, Final residual = 0.01, No Iterations 3\n")
 assert _cv2["converged"] is False and _cv2["iterations"] == 50
 print("  convergence parser (job status) OK")
+# material library + fluid assignment on the Materials node
+import dynframe_cfd_materials as CM
+assert len(CM.FLUIDS) >= 4 and len(CM.SOLIDS) >= 4
+for _f in CM.FLUIDS:
+    assert _f["nu"] > 0 and _f["rho"] > 0 and "name" in _f
+assert abs(CM.fluid_by_name("Water (20 C)")["nu"] - 1.0e-6) < 1e-15
+assert "Air (20 C)" in CM.fluid_names()
+dMAT = Doc(); FreeCAD.ActiveDocument = dMAT
+_cont = dMAT.addObject("App::DocumentObjectGroup", "CFD_x")
+_mnode = dMAT.addObject("App::DocumentObjectGroupPython", "Cfd_Materials")
+C._cfd_set_str(_mnode, "CfdPanel", "materials")
+_cont.addObject(_mnode)
+C.form_dialog = lambda title, fields, **_k: {"fluid": "Water (20 C)"}
+gMAT = {}; C.info = lambda m, g=gMAT: g.setdefault("msg", m)
+C._cfd_open_node(_mnode)
+assert abs(float(getattr(_mnode, "CfdNu", "0")) - 1.0e-6) < 1e-12
+assert abs(float(getattr(_cont, "CfdNu", "0")) - 1.0e-6) < 1e-12
+print("  material library + fluid assignment OK")
 print("CFD boundary conditions OK")
 
 print("\nALL RUNTIME CHECKS PASSED")

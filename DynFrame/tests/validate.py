@@ -1941,6 +1941,22 @@ assert "snappyHexMesh" in _sns and "surfaceFeatures" in _sns and "velocity_inlet
 assert "limitedLinear" in CG.fv_schemes_simple(second_order=True)
 assert "upwind" in CG.fv_schemes_simple(second_order=False)
 print("  snappy multi-patch + background box + 2nd-order schemes OK")
+# heat transfer: temperature field + scalarTransport + heat schemes/solution
+_pa = [{"name": "velocity_inlet", "bc": "velocity_inlet", "value": 10.0},
+       {"name": "pressure_outlet", "bc": "pressure_outlet", "value": 0.0},
+       {"name": "wall", "bc": "wall", "value": 0.0}]
+_T = CG.temperature_field(_pa, T_in=300.0, T_wall=350.0, heated=True)
+assert "[0 0 0 1 0 0 0]" in _T and "uniform 300" in _T and "uniform 350" in _T
+assert "velocity_inlet" in _T and "wall" in _T and _T.count("{") == _T.count("}")
+assert "div(phi,T)" in CG.fv_schemes_simple(heat=True)
+assert "div(phi,T)" not in CG.fv_schemes_simple(heat=False)
+_fsh = CG.fv_solution_simple(heat=True)
+assert "\n    T\n" in _fsh and "PBiCGStab" in _fsh
+assert "\n    T\n" not in CG.fv_solution_simple(heat=False)
+_cdh = CG.control_dict_simple("incompressibleFluid", 500, 100,
+                              functions=CG.scalar_transport_functions(2.1e-5))
+assert "functions" in _cdh and "scalarTransport(T" in _cdh
+print("  heat transfer (temperature + scalarTransport) OK")
 # command: selected box + assigned BCs -> staged case + run script
 import tempfile as _tfI
 dFI = Doc(); FreeCAD.ActiveDocument = dFI
@@ -1985,8 +2001,15 @@ assert "inlet" in _bmtxt and "outlet" in _bmtxt and "wall" in _bmtxt
 _utxt = open(os.path.join(_src, "U")).read()
 assert "inlet" in _utxt and "outlet" in _utxt
 assert os.path.exists(os.path.join(_tmpI, "run_flowint1.sh"))
+# heat transfer through the command: enabling heat stages a temperature field
+C._cfd_set_str(_sldI, "CfdHeat", "1")
+C.CfdFlowInternal().Activated()
+assert os.path.exists(os.path.join(_src, "T")), "T field not staged with heat on"
+assert "[0 0 0 1 0 0 0]" in open(os.path.join(_src, "T")).read()
+assert "scalarTransport(T" in open(os.path.join(_src, "controlDict")).read()
+assert "div(phi,T)" in open(os.path.join(_src, "fvSchemes")).read()
 FreeCAD.Matrix = _savedM; C.global_shape = _savedGS; C.FreeCADGui.Selection = _savedSel
-print("  CfdFlowInternal staged a case from assigned face BCs OK")
+print("  CfdFlowInternal staged a case from assigned face BCs (+heat) OK")
 # convergence parser (in-app "job status" so results are trustworthy)
 _log = ("Time = 102s\n"
         "smoothSolver:  Solving for Ux, Initial residual = 9.5e-05, Final residual = 4.7e-06, No Iterations 1\n"

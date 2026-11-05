@@ -7539,8 +7539,8 @@ def _cfd_pick_numerics(node):
     doc = FreeCAD.ActiveDocument
     fields = [
         {"key": "_i", "kind": "info", "default":
-         "Turbulence model and time dependency for the solve (SimScale's "
-         "Numerics). kOmegaSST is a robust default for most flows."},
+         "Turbulence model, accuracy and heat transfer. kOmegaSST is a robust "
+         "default; enable heat transfer to also solve a temperature field."},
         {"key": "turb", "label": "Turbulence model", "kind": "combo",
          "options": ["kOmegaSST", "kEpsilon", "Laminar"], "default":
          _cfd_study_get(doc, "CfdTurbulence", "kOmegaSST")},
@@ -7548,22 +7548,41 @@ def _cfd_pick_numerics(node):
          "options": ["Steady-state", "Transient"], "default": "Steady-state"},
         {"key": "ti", "label": "Turbulence intensity (%)", "kind": "float",
          "default": 5.0, "decimals": 2},
+        {"key": "so", "label": "Second-order schemes (accuracy)", "kind": "combo",
+         "options": ["No", "Yes"],
+         "default": "Yes" if _cfd_study_get(doc, "CfdSecondOrder", "") == "1" else "No"},
+        {"key": "heat", "label": "Heat transfer (solve temperature)", "kind": "combo",
+         "options": ["No", "Yes"],
+         "default": "Yes" if _cfd_study_get(doc, "CfdHeat", "") == "1" else "No"},
+        {"key": "tin", "label": "Inlet temperature (K)", "kind": "float",
+         "default": float(_cfd_study_get(doc, "CfdTin", "300") or 300), "decimals": 2},
+        {"key": "twall", "label": "Heated wall temperature (K)", "kind": "float",
+         "default": float(_cfd_study_get(doc, "CfdTwall", "350") or 350), "decimals": 2},
+        {"key": "pr", "label": "Prandtl number", "kind": "float",
+         "default": float(_cfd_study_get(doc, "CfdPr", "0.71") or 0.71), "decimals": 3},
     ]
     vals = form_dialog("Numerics", fields,
                        **_cfd_dialog_kwargs("Numerics",
-                                            "Turbulence model + time dependency."))
+                                            "Turbulence, accuracy, heat transfer."))
     if not vals:
         return
     _cfd_study_set(doc, node, CfdTurbulence=vals.get("turb", "kOmegaSST"),
                    CfdSteady=("1" if vals.get("time") == "Steady-state" else "0"),
-                   CfdIntensity=_g(vals.get("ti", 5.0)))
+                   CfdIntensity=_g(vals.get("ti", 5.0)),
+                   CfdSecondOrder=("1" if vals.get("so") == "Yes" else "0"),
+                   CfdHeat=("1" if vals.get("heat") == "Yes" else "0"),
+                   CfdTin=_g(vals.get("tin", 300.0)),
+                   CfdTwall=_g(vals.get("twall", 350.0)),
+                   CfdPr=_g(vals.get("pr", 0.71)))
     _cfd_mark_node_done(node, "Numerics")
     try:
         doc.recompute()
     except Exception:
         pass
-    info("Numerics: %s, %s, turbulence intensity %.1f%%."
-         % (vals.get("turb"), vals.get("time"), float(vals.get("ti", 5.0))))
+    info("Numerics: %s, %s, intensity %.1f%%%s%s."
+         % (vals.get("turb"), vals.get("time"), float(vals.get("ti", 5.0)),
+            ", 2nd-order" if vals.get("so") == "Yes" else "",
+            ", heat transfer on" if vals.get("heat") == "Yes" else ""))
 
 
 def _cfd_pick_control(node):
@@ -8292,12 +8311,23 @@ class CfdFlowInternal:
                 patches, nu=float(vals["nu"]), intensity=intensity, L=Lm)
             turb = _cfd_study_get(doc, "CfdTurbulence", "kOmegaSST")
             casefiles["momentumTransport"] = cfdgen.momentum_transport_dict(turb)
-            casefiles["fvSchemes"] = cfdgen.fv_schemes_simple(
-                second_order=(_cfd_study_get(doc, "CfdSecondOrder", "") == "1"))
+            heat = _cfd_study_get(doc, "CfdHeat", "") == "1"
+            so = _cfd_study_get(doc, "CfdSecondOrder", "") == "1"
+            casefiles["fvSchemes"] = cfdgen.fv_schemes_simple(second_order=so, heat=heat)
+            casefiles["fvSolution"] = cfdgen.fv_solution_simple(heat=heat)
             write = int(float(_cfd_study_get(doc, "CfdWrite", "")
                               or max(1, int(int(vals["iters"]) / 5))))
+            funcs = ""
+            if heat:
+                Pr = float(_cfd_study_get(doc, "CfdPr", "0.71") or 0.71)
+                T_in = float(_cfd_study_get(doc, "CfdTin", "300") or 300)
+                T_wall = float(_cfd_study_get(doc, "CfdTwall", "350") or 350)
+                casefiles["T"] = cfdgen.temperature_field(
+                    patches, T_in=T_in, T_wall=T_wall, heated=True)
+                funcs = cfdgen.scalar_transport_functions(float(vals["nu"]) / max(Pr, 1e-6))
             casefiles["controlDict"] = cfdgen.control_dict_simple(
-                "incompressibleFluid", int(vals["iters"]), max(1, write))
+                "incompressibleFluid", int(vals["iters"]), max(1, write),
+                functions=funcs)
             for fn, txt in casefiles.items():
                 _write_lf(os.path.join(stage, fn), txt)
         except Exception as e:

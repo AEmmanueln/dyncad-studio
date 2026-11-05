@@ -379,12 +379,13 @@ def physical_properties_dict(nu=1.5e-5):
         "viscosityModel  constant;\n\nnu              [0 2 -1 0 0 0 0] %s;\n" % _g(nu))
 
 
-def fv_schemes_simple(second_order=False):
+def fv_schemes_simple(second_order=False, heat=False):
     """Steady-state finite-volume schemes. second_order=True raises the turbulence
     transport to limitedLinear (2nd-order, more accurate); the momentum equation
-    is linearUpwind (2nd-order) either way."""
+    is linearUpwind (2nd-order) either way. heat=True adds the temperature scheme."""
     kdiv = ("bounded Gauss limitedLinear 1" if second_order
             else "bounded Gauss upwind")
+    tdiv = "    div(phi,T)      bounded Gauss linearUpwind grad(T);\n" if heat else ""
     return _foam_header("dictionary", "fvSchemes") + (
         "ddtSchemes\n{\n    default         steadyState;\n}\n\n"
         "gradSchemes\n{\n    default         Gauss linear;\n"
@@ -393,30 +394,36 @@ def fv_schemes_simple(second_order=False):
         "    div(phi,U)      bounded Gauss linearUpwind grad(U);\n"
         "    div(phi,k)      %s;\n"
         "    div(phi,omega)  %s;\n"
+        "%s"
         "    div((nuEff*dev2(T(grad(U))))) Gauss linear;\n}\n\n"
         "laplacianSchemes\n{\n    default         Gauss linear corrected;\n}\n\n"
         "interpolationSchemes\n{\n    default         linear;\n}\n\n"
         "snGradSchemes\n{\n    default         corrected;\n}\n\n"
-        "wallDist\n{\n    method          meshWave;\n}\n" % (kdiv, kdiv))
+        "wallDist\n{\n    method          meshWave;\n}\n" % (kdiv, kdiv, tdiv))
 
 
-def fv_solution_simple():
+def fv_solution_simple(heat=False):
+    tsolver = ("    T\n    {\n        solver          PBiCGStab;\n"
+               "        preconditioner  DILU;\n        tolerance       1e-7;\n"
+               "        relTol          0.1;\n    }\n\n") if heat else ""
     return _foam_header("dictionary", "fvSolution") + (
         "solvers\n{\n"
         "    p\n    {\n        solver          GAMG;\n        tolerance       1e-7;\n"
         "        relTol          0.01;\n        smoother        GaussSeidel;\n    }\n\n"
         "    \"(U|k|omega)\"\n    {\n        solver          smoothSolver;\n"
         "        smoother        symGaussSeidel;\n        tolerance       1e-8;\n"
-        "        relTol          0.1;\n    }\n}\n\n"
+        "        relTol          0.1;\n    }\n\n"
+        "%s}\n\n"
         "SIMPLE\n{\n    nNonOrthogonalCorrectors 0;\n    consistent      yes;\n"
         "    residualControl\n    {\n        p               1e-4;\n"
         "        U               1e-4;\n        \"(k|omega)\"     1e-4;\n    }\n}\n\n"
         "relaxationFactors\n{\n    equations\n    {\n        U               0.9;\n"
-        "        \".*\"            0.9;\n    }\n}\n")
+        "        \".*\"            0.9;\n    }\n}\n" % tsolver)
 
 
 def control_dict_simple(solver="incompressibleFluid", end_iter=1000,
-                        write_interval=200, deltaT=1):
+                        write_interval=200, deltaT=1, functions=""):
+    fblock = ("\nfunctions\n{\n%s}\n" % functions) if functions else ""
     return _foam_header("dictionary", "controlDict") + (
         "solver          %s;\n\n"
         "startFrom       startTime;\nstartTime       0;\n"
@@ -425,8 +432,45 @@ def control_dict_simple(solver="incompressibleFluid", end_iter=1000,
         "writeControl    timeStep;\nwriteInterval   %d;\n\n"
         "purgeWrite      0;\nwriteFormat     ascii;\nwritePrecision  7;\n"
         "writeCompression off;\ntimeFormat      general;\ntimePrecision   6;\n"
-        "runTimeModifiable true;\n"
-        % (solver, int(end_iter), _g(deltaT), int(write_interval)))
+        "runTimeModifiable true;\n%s"
+        % (solver, int(end_iter), _g(deltaT), int(write_interval), fblock))
+
+
+def scalar_transport_functions(D):
+    """controlDict 'functions' entry that solves a temperature field T carried by
+    the flow (forced-convection heat transfer), with thermal diffusivity D."""
+    return "    #includeFunc scalarTransport(T, diffusivity=constant, D=%s)\n" % _g(D)
+
+
+def temperature_field(patches, T_in=300.0, T_wall=350.0, heated=True):
+    """0/T for forced-convection heat transfer: inlets fix the inflow temperature,
+    outlets let it advect out, walls are heated (fixedValue T_wall) or adiabatic
+    (zeroGradient). `patches`: the same list of {name, bc} used for the flow."""
+    tin = "uniform %s" % _g(T_in)
+
+    def entry(p):
+        bc = p.get("bc")
+        if bc in ("velocity_inlet", "pressure_inlet"):
+            return ("        type            fixedValue;\n"
+                    "        value           uniform %s;" % _g(T_in))
+        if bc in ("velocity_outlet", "pressure_outlet"):
+            return ("        type            inletOutlet;\n"
+                    "        inletValue      uniform %s;\n"
+                    "        value           uniform %s;" % (_g(T_in), _g(T_in)))
+        if bc == "symmetry":
+            return "        type            symmetry;"
+        if bc == "slip":
+            return "        type            zeroGradient;"
+        if heated:
+            return ("        type            fixedValue;\n"
+                    "        value           uniform %s;" % _g(T_wall))
+        return "        type            zeroGradient;"
+
+    body = "".join("    %s\n    {\n%s\n    }\n" % (p.get("name", "patch"), entry(p))
+                   for p in patches)
+    return (_foam_header("volScalarField", "T")
+            + "dimensions      [0 0 0 1 0 0 0];\n\ninternalField   %s;\n\n"
+              "boundaryField\n{\n%s}\n" % (tin, body))
 
 
 def flow_case_files(Ux, nu=1.5e-5, intensity=0.05, L=1.0,
@@ -473,6 +517,7 @@ def build_flow_script(opts):
              '"$STAGE"/controlDict system/')
     L.append('cp "$STAGE"/momentumTransport "$STAGE"/physicalProperties constant/')
     L.append('cp "$STAGE"/U "$STAGE"/p "$STAGE"/k "$STAGE"/omega "$STAGE"/nut 0/')
+    L.append('[ -f "$STAGE"/T ] && cp "$STAGE"/T 0/ || true')
     L.append('cp "$STAGE"/body.stl constant/triSurface/body.stl')
     L.append('echo "== blockMesh =="; blockMesh 2>&1 | tee log.blockMesh | tail -3')
     L.append('echo "== surfaceFeatures =="; surfaceFeatures 2>&1 | tail -3 || echo "skipped"')
@@ -677,6 +722,7 @@ def build_internal_flow_script(opts):
              '"$STAGE"/controlDict system/')
     L.append('cp "$STAGE"/momentumTransport "$STAGE"/physicalProperties constant/')
     L.append('cp "$STAGE"/U "$STAGE"/p "$STAGE"/k "$STAGE"/omega "$STAGE"/nut 0/')
+    L.append('[ -f "$STAGE"/T ] && cp "$STAGE"/T 0/ || true')
     L.append('echo "== blockMesh =="; blockMesh 2>&1 | tee log.blockMesh | tail -3')
     L.append('echo "== checkMesh =="; checkMesh 2>&1 | tee log.checkMesh | tail -12')
     L.append('echo "== foamRun (incompressibleFluid) =="; foamRun 2>&1 | '
@@ -817,6 +863,7 @@ def build_snappy_flow_script(opts):
              '"$STAGE"/controlDict system/')
     L.append('cp "$STAGE"/momentumTransport "$STAGE"/physicalProperties constant/')
     L.append('cp "$STAGE"/U "$STAGE"/p "$STAGE"/k "$STAGE"/omega "$STAGE"/nut 0/')
+    L.append('[ -f "$STAGE"/T ] && cp "$STAGE"/T 0/ || true')
     for nm in names:
         L.append('cp "$STAGE"/%s.stl constant/triSurface/%s.stl' % (nm, nm))
     L.append('echo "== blockMesh =="; blockMesh 2>&1 | tee log.blockMesh | tail -3')

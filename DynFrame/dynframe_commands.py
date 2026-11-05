@@ -7399,9 +7399,31 @@ def _cfd_open_node(node):
         err("Could not open the '%s' step: %s" % (panel, e))
 
 
+class _CfdNodeObj:
+    """Minimal object proxy for a CFD simulation-tree node. Required so the node
+    is an App::DocumentObjectGroupPython whose Python view provider (and its
+    doubleClicked) is honoured by FreeCAD."""
+    def __init__(self, obj=None):
+        try:
+            if obj is not None:
+                obj.Proxy = self
+        except Exception:
+            pass
+
+    def execute(self, obj):
+        return None
+
+    def __getstate__(self):
+        return None
+
+    def __setstate__(self, state):
+        return None
+
+
 class _CfdNodeVP:
-    """A minimal view provider so double-clicking a simulation-tree node opens its
-    setup (SimScale-style). GUI-only; attached guardedly so headless still loads."""
+    """View provider so double-clicking a simulation-tree node runs its step
+    (SimScale-style). Only a Python-enabled object (DocumentObjectGroupPython)
+    dispatches doubleClicked to this proxy - a plain DocumentObjectGroup does not."""
     def __init__(self, vobj=None):
         try:
             if vobj is not None:
@@ -7421,6 +7443,13 @@ class _CfdNodeVP:
         except Exception:
             pass
         return True
+
+    def setEdit(self, vobj, mode=0):
+        try:
+            _cfd_open_node(vobj.Object)
+        except Exception:
+            pass
+        return False
 
     def __getstate__(self):
         return None
@@ -7452,8 +7481,11 @@ def build_cfd_tree(doc, study):
     _cfd_set_str(container, "CfdStudy", study.get("id", ""))
     steps = cfdtree.study_steps(study.get("id"), study.get("multiRegion"))
     for st in steps:
-        node = doc.addObject("App::DocumentObjectGroup",
+        # DocumentObjectGroupPython (not plain group) so the Python view provider's
+        # doubleClicked actually fires when the node is double-clicked.
+        node = doc.addObject("App::DocumentObjectGroupPython",
                              cfdtree.safe_name(st["label"], prefix="Cfd"))
+        _CfdNodeObj(node)
         try:
             glyph = _CFD_STATUS_GLYPH.get(st.get("status"), "")
             node.Label = ("%s %s" % (glyph, st["label"])).strip()

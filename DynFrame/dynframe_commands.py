@@ -7098,7 +7098,7 @@ class CfdCase:
                    cfd.CATALOG[0])
         name = (str(vals.get("name") or "case1").strip().replace(" ", "_")) or "case1"
         of_env = str(vals.get("env") or cfd.DEFAULT_OF_ENV).strip()
-        distro = str(vals.get("distro") or cfd.DEFAULT_DISTRO).strip()
+        distro = str(vals.get("distro") or "").strip()  # blank => WSL default distro
         edits = cfd.control_edits({"endTime": vals.get("endTime"),
                                    "deltaT": vals.get("deltaT"),
                                    "writeInterval": vals.get("writeInterval")})
@@ -7194,7 +7194,7 @@ class CfdView:
             return
         name = (str(vals.get("name") or "case1").strip().replace(" ", "_")) or "case1"
         of_env = str(vals.get("env") or cfd.DEFAULT_OF_ENV).strip()
-        distro = str(vals.get("distro") or cfd.DEFAULT_DISTRO).strip()
+        distro = str(vals.get("distro") or "").strip()  # blank => WSL default distro
         outdir = _cfd_outdir()
         win_out = os.path.join(outdir, name)
         view_script = cfd.build_view_script(
@@ -7327,7 +7327,7 @@ class CfdMeshFromCad:
         except Exception as e:
             err("Could not write the CFD mesh files to %s:\n%s" % (stage, e)); return
         of_env = str(vals.get("env") or cfd.DEFAULT_OF_ENV).strip()
-        distro = str(vals.get("distro") or cfd.DEFAULT_DISTRO).strip()
+        distro = str(vals.get("distro") or "").strip()  # blank => WSL default distro
         win_out = os.path.join(outdir, name)
         ms = cfdgen.build_mesh_script({"of_env": of_env, "name": name,
                                        "stage_win": stage, "win_out": win_out})
@@ -7619,27 +7619,119 @@ def _cfd_pick_control(node):
 
 
 def _cfd_pick_mesh(node):
-    """Mesh step: base cell count across the domain (blockMesh for box solids)."""
+    """Mesh step: base resolution, surface refinement and boundary layers, plus an
+    option to mesh + checkMesh now to preview the mesh quality (SimScale-style)."""
     doc = FreeCAD.ActiveDocument
     fields = [
         {"key": "_i", "kind": "info", "default":
-         "Mesh resolution: cells across the domain. A box solid is meshed with "
-         "blockMesh; higher = finer (and slower)."},
-        {"key": "cells", "label": "Cells across the domain", "kind": "int",
+         "Mesh controls. A box uses blockMesh; any other solid uses snappyHexMesh "
+         "with surface refinement and boundary layers for near-wall accuracy. "
+         "'Mesh and check now' meshes and reports quality before you solve."},
+        {"key": "cells", "label": "Base cells across domain", "kind": "int",
          "default": int(float(_cfd_study_get(doc, "CfdCells", "20") or 20)),
          "min": 4, "max": 400},
+        {"key": "rmin", "label": "Surface refinement level (min)", "kind": "int",
+         "default": int(float(_cfd_study_get(doc, "CfdRefineMin", "1") or 1)),
+         "min": 0, "max": 6},
+        {"key": "rmax", "label": "Surface refinement level (max)", "kind": "int",
+         "default": int(float(_cfd_study_get(doc, "CfdRefineMax", "2") or 2)),
+         "min": 0, "max": 8},
+        {"key": "layers", "label": "Boundary layers on walls", "kind": "int",
+         "default": int(float(_cfd_study_get(doc, "CfdLayers", "3") or 3)),
+         "min": 0, "max": 12},
+        {"key": "meshnow", "label": "Mesh and check quality now", "kind": "combo",
+         "options": ["No", "Yes"], "default": "No"},
+        {"key": "distro", "label": "WSL distro (blank = default)", "kind": "text", "default": ""},
+        {"key": "env", "label": "OpenFOAM env (source)", "kind": "text", "default": cfd.DEFAULT_OF_ENV},
     ]
     vals = form_dialog("Mesh", fields,
-                       **_cfd_dialog_kwargs("Mesh", "Base mesh resolution."))
+                       **_cfd_dialog_kwargs("Mesh",
+                                            "Resolution, refinement, boundary layers."))
     if not vals:
         return
-    _cfd_study_set(doc, node, CfdCells=str(int(vals.get("cells", 20))))
+    _cfd_study_set(doc, node, CfdCells=str(int(vals.get("cells", 20))),
+                   CfdRefineMin=str(int(vals.get("rmin", 1))),
+                   CfdRefineMax=str(int(vals.get("rmax", 2))),
+                   CfdLayers=str(int(vals.get("layers", 3))))
     _cfd_mark_node_done(node, "Mesh")
     try:
         doc.recompute()
     except Exception:
         pass
-    info("Mesh: %d cells across the domain." % int(vals.get("cells", 20)))
+    if vals.get("meshnow") == "Yes":
+        _cfd_mesh_preview(doc, vals)
+    else:
+        info("Mesh: %d base cells, surface refinement %d-%d, %d boundary layers. "
+             "Set 'Mesh and check now = Yes' to preview quality, or go to Run."
+             % (int(vals.get("cells", 20)), int(vals.get("rmin", 1)),
+                int(vals.get("rmax", 2)), int(vals.get("layers", 3))))
+
+
+def _cfd_mesh_preview(doc, vals):
+    """Mesh the geometry (no solve) and run checkMesh, then report mesh quality -
+    SimScale's separate mesh operation, so you can trust the mesh first."""
+    solid = _cfd_resolve_solid(doc)
+    if solid is None:
+        info("Set the Geometry node first, then preview the mesh."); return
+    assigns = _cfd_collect_bc_assignments(doc, getattr(solid, "Name", ""))
+    if not assigns:
+        info("Assign boundary-condition faces first, so the mesh has named "
+             "patches."); return
+    try:
+        mat = FreeCAD.Matrix(); mat.scale(1e-3, 1e-3, 1e-3)
+        bb = global_shape(solid).transformGeometry(mat).BoundBox
+    except Exception as e:
+        err("Could not read geometry: %s" % e); return
+    Lm = max(bb.XLength, bb.YLength, bb.ZLength, 1e-6)
+    n = max(4, int(vals.get("cells", 20)))
+    nlay = int(vals.get("layers", 3))
+    rmin = int(vals.get("rmin", 1)); rmax = int(vals.get("rmax", 2))
+    outdir = _cfd_outdir(); name = "mesh_preview"
+    stage = os.path.join(outdir, name + "_src"); win_out = os.path.join(outdir, name)
+    try:
+        used, is_box = _cfd_build_mesh_dicts(doc, solid, assigns, bb, Lm, stage,
+                                             n, nlay, rmin, rmax)
+        # the mesh utilities need a minimal controlDict/fvSchemes/fvSolution
+        _write_lf(os.path.join(stage, "controlDict"),
+                  cfdgen.control_dict_simple("incompressibleFluid", 1, 1))
+        _write_lf(os.path.join(stage, "fvSchemes"), cfdgen.fv_schemes_simple())
+        _write_lf(os.path.join(stage, "fvSolution"), cfdgen.fv_solution_simple())
+    except Exception as e:
+        err("Could not build the mesh dictionaries: %s" % e); return
+    of_env = str(vals.get("env") or cfd.DEFAULT_OF_ENV).strip()
+    distro = str(vals.get("distro") or "").strip()  # blank => WSL default distro
+    fs = cfdgen.build_mesh_check_script(
+        {"of_env": of_env, "name": name, "stage_win": stage,
+         "win_out": win_out, "patch_names": sorted(used)})
+    fpath = os.path.join(outdir, "mesh_%s.sh" % name)
+    try:
+        _write_lf(fpath, fs)
+    except Exception as e:
+        err("Could not write the mesh script: %s" % e); return
+    import subprocess
+    try:
+        r = subprocess.run(cfd.wsl_run_argv(fs, distro), capture_output=True,
+                           timeout=1800)
+        out = ((r.stdout or b"").decode("utf-8", "replace")
+               + (r.stderr or b"").decode("utf-8", "replace"))
+    except Exception as e:
+        info("Mesh staged. Run it in your WSL terminal:\n  bash %s\n(%s)"
+             % (cfd.win_to_wsl(fpath, distro), e)); return
+    q = cfd.parse_checkmesh(out)
+    msg = "Mesh %s (%s).\n" % ("OK" if q["ok"] else "has warnings", mesher_name(is_box))
+    if q.get("cells"):
+        msg += "Cells: %d.\n" % q["cells"]
+    if q.get("max_nonortho") is not None:
+        msg += "Max non-orthogonality: %.1f (good < 65).\n" % q["max_nonortho"]
+    if q.get("max_skewness") is not None:
+        msg += "Max skewness: %.2f (good < 4).\n" % q["max_skewness"]
+    msg += "\nMesh written to VTK (open in ParaView to inspect):\n  %s" \
+        % os.path.join(win_out, "VTK")
+    info(msg)
+
+
+def mesher_name(is_box):
+    return "blockMesh" if is_box else "snappyHexMesh + layers"
 
 
 def _cfd_open_node(node):
@@ -8189,6 +8281,43 @@ def _cfd_export_grouped_stls(solid, assigns, stage, scale=1e-3):
     return patch_list
 
 
+def _cfd_build_mesh_dicts(doc, solid, assigns, bb, Lm, stage, n, nlay, rmin, rmax):
+    """Write the mesh dictionaries into `stage`: an exact blockMesh box, or a
+    background box + snappyHexMesh (with STL patches, refinement and boundary
+    layers) for an arbitrary solid. Returns (used_bc_keys, is_box). Shared by the
+    Run and the Mesh-preview commands so the mesh controls apply to both."""
+    is_box = (len(global_shape(solid).Faces) == 6)
+    if is_box:
+        face_patches = {}; used = set()
+        for idx, fk in enumerate(cfdgen.BOX_FACE_ORDER):
+            key = assigns.get(idx, "wall")
+            face_patches[fk] = (key, _cfd_patch_type(key)); used.add(key)
+        _write_lf(os.path.join(stage, "blockMeshDict"),
+                  cfdgen.box_blockmesh_named(
+                      bb.XMin, bb.YMin, bb.ZMin, bb.XMax, bb.YMax, bb.ZMax,
+                      n, n, n, face_patches))
+    else:
+        patch_list = _cfd_export_grouped_stls(solid, assigns, stage)
+        used = set(p["name"] for p in patch_list)
+        mrg = 0.10 * Lm
+        bx0, by0, bz0 = bb.XMin - mrg, bb.YMin - mrg, bb.ZMin - mrg
+        bx1, by1, bz1 = bb.XMax + mrg, bb.YMax + mrg, bb.ZMax + mrg
+        cs = max(bx1 - bx0, by1 - by0, bz1 - bz0) / max(4, n)
+        nx = max(4, int((bx1 - bx0) / cs))
+        ny = max(4, int((by1 - by0) / cs))
+        nz = max(4, int((bz1 - bz0) / cs))
+        loc = (0.5 * (bb.XMin + bb.XMax), 0.5 * (bb.YMin + bb.YMax),
+               0.5 * (bb.ZMin + bb.ZMax))
+        _write_lf(os.path.join(stage, "blockMeshDict"),
+                  cfdgen.background_box_dict(bx0, by0, bz0, bx1, by1, bz1, nx, ny, nz))
+        _write_lf(os.path.join(stage, "snappyHexMeshDict"),
+                  cfdgen.snappy_multipatch_dict(
+                      patch_list, loc, level_min=rmin, level_max=rmax, n_layers=nlay))
+        _write_lf(os.path.join(stage, "surfaceFeaturesDict"),
+                  cfdgen.surface_features_multi(sorted(used)))
+    return used, is_box
+
+
 class CfdFlowInternal:
     def GetResources(self):
         return {"Pixmap": _icon("cfd"),
@@ -8264,47 +8393,21 @@ class CfdFlowInternal:
         Lm = max(bb.XLength, bb.YLength, bb.ZLength, 1e-6)
         intensity = float(_cfd_study_get(doc, "CfdIntensity", "5") or 5) / 100.0
         of_env = str(vals.get("env") or cfd.DEFAULT_OF_ENV).strip()
-        distro = str(vals.get("distro") or cfd.DEFAULT_DISTRO).strip()
+        distro = str(vals.get("distro") or "").strip()  # blank => WSL default distro
         outdir = _cfd_outdir()
         stage = os.path.join(outdir, name + "_src")
         win_out = os.path.join(outdir, name)
         try:
-            if is_box:
-                # box: exact blockMesh of the interior, each face its named patch
-                face_patches = {}; used = set()
-                for idx, fk in enumerate(cfdgen.BOX_FACE_ORDER):
-                    key = assigns.get(idx, "wall")
-                    face_patches[fk] = (key, _cfd_patch_type(key)); used.add(key)
-                _write_lf(os.path.join(stage, "blockMeshDict"),
-                          cfdgen.box_blockmesh_named(
-                              bb.XMin, bb.YMin, bb.ZMin, bb.XMax, bb.YMax, bb.ZMax,
-                              n, n, n, face_patches))
-                mesher = "blockMesh (box)"
-            else:
-                # arbitrary solid: one STL per face group -> snappyHexMesh patches
-                patch_list = _cfd_export_grouped_stls(solid, assigns, stage)
-                if not patch_list:
-                    err("Could not tessellate the solid's faces to STL."); return
-                used = set(p["name"] for p in patch_list)
-                mrg = 0.10 * Lm
-                bx0, by0, bz0 = bb.XMin - mrg, bb.YMin - mrg, bb.ZMin - mrg
-                bx1, by1, bz1 = bb.XMax + mrg, bb.YMax + mrg, bb.ZMax + mrg
-                cs = max(bx1 - bx0, by1 - by0, bz1 - bz0) / max(4, n)
-                nx = max(4, int((bx1 - bx0) / cs))
-                ny = max(4, int((by1 - by0) / cs))
-                nz = max(4, int((bz1 - bz0) / cs))
-                loc = (0.5 * (bb.XMin + bb.XMax), 0.5 * (bb.YMin + bb.YMax),
-                       0.5 * (bb.ZMin + bb.ZMax))
-                nlay = int(float(_cfd_study_get(doc, "CfdLayers", "2") or 2))
-                _write_lf(os.path.join(stage, "blockMeshDict"),
-                          cfdgen.background_box_dict(bx0, by0, bz0, bx1, by1, bz1,
-                                                     nx, ny, nz))
-                _write_lf(os.path.join(stage, "snappyHexMeshDict"),
-                          cfdgen.snappy_multipatch_dict(
-                              patch_list, loc, level_min=1, level_max=2, n_layers=nlay))
-                _write_lf(os.path.join(stage, "surfaceFeaturesDict"),
-                          cfdgen.surface_features_multi(sorted(used)))
-                mesher = "snappyHexMesh (arbitrary solid, boundary layers)"
+            nlay = int(float(_cfd_study_get(doc, "CfdLayers", "3") or 3))
+            rmin = int(float(_cfd_study_get(doc, "CfdRefineMin", "1") or 1))
+            rmax = int(float(_cfd_study_get(doc, "CfdRefineMax", "2") or 2))
+            used, is_box = _cfd_build_mesh_dicts(
+                doc, solid, assigns, bb, Lm, stage, n, nlay, rmin, rmax)
+            if not used:
+                err("Could not build the mesh (no patches)."); return
+            mesher = ("blockMesh (box)" if is_box else
+                      "snappyHexMesh (%d layers, refinement %d-%d)"
+                      % (nlay, rmin, rmax))
             patches = [{"name": k, "bc": k, "value": vals0.get(k, 0.0)}
                        for k in sorted(used)]
             casefiles, k0, om0 = cfdgen.bc_field_files(
@@ -8433,7 +8536,7 @@ def _cfd_flow_execute(obj, pts, facets, bb, Lm, vals):
     except Exception as e:
         err("Could not write the CFD case files to %s:\n%s" % (stage, e)); return
     of_env = str(vals.get("env") or cfd.DEFAULT_OF_ENV).strip()
-    distro = str(vals.get("distro") or cfd.DEFAULT_DISTRO).strip()
+    distro = str(vals.get("distro") or "").strip()  # blank => WSL default distro
     win_out = os.path.join(outdir, name)
     fs = cfdgen.build_flow_script({"of_env": of_env, "name": name,
                                    "stage_win": stage, "win_out": win_out,

@@ -1957,6 +1957,20 @@ _cdh = CG.control_dict_simple("incompressibleFluid", 500, 100,
                               functions=CG.scalar_transport_functions(2.1e-5))
 assert "functions" in _cdh and "scalarTransport(T" in _cdh
 print("  heat transfer (temperature + scalarTransport) OK")
+# mesh quality: checkMesh parser + mesh-only preview script
+_cm = CF.parse_checkmesh(
+    "Mesh OK.\n    cells:           12345\n"
+    "    Mesh non-orthogonality Max: 42.5 average: 6.1\n"
+    "    Max skewness = 1.8 OK.\n")
+assert _cm["ok"] is True and _cm["cells"] == 12345
+assert abs(_cm["max_nonortho"] - 42.5) < 1e-6 and abs(_cm["max_skewness"] - 1.8) < 1e-6
+_cm2 = CF.parse_checkmesh("***Some checks failed.\n")
+assert _cm2["ok"] is False
+_mcs = CG.build_mesh_check_script(
+    {"name": "m1", "stage_win": r"C:\x", "win_out": r"C:\y", "patch_names": ["wall"]})
+assert "blockMesh" in _mcs and "checkMesh" in _mcs and "foamRun" not in _mcs
+assert "wall.stl" in _mcs
+print("  checkMesh parser + mesh-only preview script OK")
 # command: selected box + assigned BCs -> staged case + run script
 import tempfile as _tfI
 dFI = Doc(); FreeCAD.ActiveDocument = dFI

@@ -364,6 +364,30 @@ def native_run_argv(script, login=True):
     return ["bash", "-lc" if login else "-c", inner]
 
 
+def parse_checkmesh(log_text):
+    """Parse a checkMesh log into a mesh-quality report - SimScale shows these so
+    you can trust the mesh before solving. Returns
+        {ok, cells, points, max_nonortho, avg_nonortho, max_skewness, layers}
+    (missing values are None)."""
+    import re
+    t = log_text or ""
+
+    def num(pat, cast=float):
+        m = re.search(pat, t)
+        try:
+            return cast(m.group(1)) if m else None
+        except (TypeError, ValueError):
+            return None
+    return {
+        "ok": "Mesh OK" in t,
+        "cells": num(r"cells:\s+(\d+)", int),
+        "points": num(r"points:\s+(\d+)", int),
+        "max_nonortho": num(r"non-orthogonality Max:\s*([0-9.eE+\-]+)"),
+        "avg_nonortho": num(r"non-orthogonality Max:[^\n]*average:\s*([0-9.eE+\-]+)"),
+        "max_skewness": num(r"[Mm]ax skewness\s*=\s*([0-9.eE+\-]+)"),
+    }
+
+
 def parse_convergence(log_text):
     """Read a foamRun log and report whether the solve converged - OpenFOAM's
     'job status', the way SimScale shows it. Returns

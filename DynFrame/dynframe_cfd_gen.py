@@ -883,3 +883,51 @@ def build_snappy_flow_script(opts):
              % win_out)
     L.append('echo "=== SNAPPY FLOW DONE: $DST  (colour by U or p) ==="')
     return "\n".join(L)
+
+
+def build_mesh_check_script(opts):
+    """Mesh only (no solve) + checkMesh, to preview mesh QUALITY before running.
+    blockMesh, then surfaceFeatures + snappyHexMesh if a snappyHexMeshDict is
+    staged, then checkMesh -allGeometry, and mesh -> VTK for inspection. opts:
+    of_env, name, stage_win, win_out, patch_names (optional STLs)."""
+    import dynframe_cfd as cfd
+    of_env = opts.get("of_env", cfd.DEFAULT_OF_ENV)
+    name = opts.get("name", "mesh1")
+    stage = cfd.win_to_wsl(opts["stage_win"])
+    win_out = opts["win_out"]
+    out = cfd.win_to_wsl(win_out)
+    work = cfd.WORK_ROOT
+    names = opts.get("patch_names", [])
+
+    L = []
+    L.append("# DynFrame CFD - mesh-only + checkMesh (quality preview)")
+    L.append(". %s" % of_env)
+    L.append('STAGE=%s' % cfd.shq(stage))
+    L.append('mkdir -p %s' % work)
+    L.append('DST=%s/%s' % (work, name))
+    L.append('rm -rf "$DST"; mkdir -p "$DST/constant/triSurface" "$DST/system"')
+    L.append('cd "$DST" || exit 1')
+    L.append('cp "$STAGE"/blockMeshDict "$STAGE"/controlDict "$STAGE"/fvSchemes '
+             '"$STAGE"/fvSolution system/')
+    L.append('[ -f "$STAGE"/snappyHexMeshDict ] && cp "$STAGE"/snappyHexMeshDict system/ || true')
+    L.append('[ -f "$STAGE"/surfaceFeaturesDict ] && cp "$STAGE"/surfaceFeaturesDict system/ || true')
+    for nm in names:
+        L.append('[ -f "$STAGE"/%s.stl ] && cp "$STAGE"/%s.stl constant/triSurface/ || true'
+                 % (nm, nm))
+    L.append('echo "== blockMesh =="; blockMesh 2>&1 | tee log.blockMesh | tail -3')
+    L.append('if [ -f system/snappyHexMeshDict ]; then')
+    L.append('  echo "== surfaceFeatures =="; surfaceFeatures 2>&1 | tail -3 || echo skipped')
+    L.append('  if [ -z "$(find constant -name \'*.eMesh\' 2>/dev/null)" ]; then '
+             'foamDictionary -entry castellatedMeshControls/features -set "()" '
+             'system/snappyHexMeshDict 2>/dev/null || true; fi')
+    L.append('  echo "== snappyHexMesh =="; snappyHexMesh -overwrite 2>&1 | '
+             'tee log.snappyHexMesh | tail -6')
+    L.append('fi')
+    L.append('echo "== checkMesh =="; checkMesh 2>&1 | tee log.checkMesh | tail -25')
+    L.append('foamToVTK -constant 2>&1 | tail -2 || foamToVTK 2>&1 | tail -2')
+    L.append('OUT=%s' % cfd.shq(out))
+    L.append('mkdir -p "$OUT"; rm -rf "$OUT/VTK"')
+    L.append('[ -d VTK ] && cp -r VTK "$OUT/" && echo "=== mesh VTK copied to: %s ==="'
+             % win_out)
+    L.append('echo "=== MESH DONE: $DST ==="')
+    return "\n".join(L)

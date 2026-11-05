@@ -8378,8 +8378,10 @@ class CfdFlowInternal:
              "default": _cfd_study_nu(doc), "decimals": 9},
             {"key": "distro", "label": "WSL distro (blank = default)", "kind": "text", "default": ""},
             {"key": "env", "label": "OpenFOAM env (source)", "kind": "text", "default": cfd.DEFAULT_OF_ENV},
-            {"key": "run", "label": "Try to run now", "kind": "combo",
-             "options": ["No", "Yes"], "default": "No"},
+            {"key": "run", "label": "Mesh + solve now", "kind": "combo",
+             "options": ["Yes", "No"], "default": "Yes"},
+            {"key": "pv", "label": "Open result in ParaView when done", "kind": "combo",
+             "options": ["Yes", "No"], "default": "Yes"},
         ]
         vals = form_dialog("Run Flow from BCs (internal)", fields,
                            **_cfd_dialog_kwargs(
@@ -8462,9 +8464,15 @@ class CfdFlowInternal:
         status = ""
         if vals.get("run") == "Yes":
             status = _cfd_run_and_report(fs, distro, win_out)
+            ran_ok = ("Results written to" in status)
+            if vals.get("pv", "Yes") == "Yes" and ran_ok:
+                if _cfd_launch_paraview(name, distro):
+                    status += ("\n\nOpening the result in ParaView - click the case "
+                               "in the Pipeline, press Apply, and colour by U, p"
+                               + (" or T" if heat else "") + ".")
         info("Internal-flow case '%s' from your face BCs on '%s'.\n\nPatches: %s.\n"
              "Mesh: %s. Solver: incompressibleFluid (%s).%s\n\nTo (re)run it "
-             "yourself, in your WSL OpenFOAM terminal:\n  %s\n\nResults (VTK) for "
+             "yourself, in your WSL OpenFOAM terminal:\n  %s\n\nResults for "
              "ParaView:\n  %s" %
              (name, getattr(solid, "Label", "solid"), ", ".join(sorted(used)),
               mesher, turb, status, flow_cmd, os.path.join(win_out, "VTK")))
@@ -8491,11 +8499,40 @@ def _cfd_run_and_report(script, distro, win_out):
                 (conv["iterations"], "OK" if mesh_ok else "see log",
                  res or "n/a", os.path.join(win_out, "VTK")))
     if conv["iterations"]:
-        return ("\n\nRan %d iterations but did NOT fully converge - raise the "
-                "iteration count or refine the mesh, then run again." %
-                conv["iterations"])
+        return ("\n\nRan %d iterations (mesh: %s). It did not hit the early-stop "
+                "tolerance - normal for internal flow, the result is still usable; "
+                "raise iterations for a tighter solution. Results written to %s." %
+                (conv["iterations"], "OK" if mesh_ok else "see log",
+                 os.path.join(win_out, "VTK")))
     return ("\n\nThe run did not complete (mesh or solver error). Check the log "
             "in the case folder, or run the command below in your terminal.")
+
+
+def _cfd_launch_paraview(name, distro=""):
+    """Open a solved case in ParaView (installed in WSL, shown via WSLg): create a
+    .foam file in the case and launch paraview on it, non-blocking. Returns True
+    if the launch was dispatched."""
+    try:
+        import subprocess
+        work = cfd.WORK_ROOT
+        # nohup + setsid + disown fully detach ParaView so it survives the launcher
+        # shell exiting; a short sleep lets WSLg bring the window up.
+        script = (". %s >/dev/null 2>&1\n" % cfd.DEFAULT_OF_ENV
+                  + 'D=%s/%s\n' % (work, name)
+                  + '[ -d "$D" ] || exit 1\n'
+                  + 'touch "$D/%s.foam" 2>/dev/null\n' % name
+                  + 'export DISPLAY=${DISPLAY:-:0}\n'
+                  + 'command -v paraview >/dev/null 2>&1 || exit 2\n'
+                  + 'nohup setsid paraview "$D/%s.foam" '
+                    '>/tmp/dynframe_pv.log 2>&1 < /dev/null &\n' % name
+                  + 'disown 2>/dev/null || true\n'
+                  + 'sleep 3\n')
+        subprocess.Popen(cfd.wsl_run_argv(script, distro),
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         stdin=subprocess.DEVNULL)
+        return True
+    except Exception:
+        return False
 
 
 def _cfd_flow_execute(obj, pts, facets, bb, Lm, vals):

@@ -2036,6 +2036,71 @@ assert "simulationType  laminar" in CG.momentum_transport_dict("Laminar")
 assert "RAS" in CG.momentum_transport_dict("kOmegaSST")
 C.global_shape = _savedGS3; C.FreeCADGui.Selection = _savedSel3
 print("  node panels (geometry/numerics/control/mesh) + laminar OK")
+
+# ---------- full tree workflow end to end -> a complete, solvable case ----------
+import os as _osE, shutil as _shE
+_savedGSe = C.global_shape; _savedSele = C.FreeCADGui.Selection
+dE = Doc(); FreeCAD.ActiveDocument = dE
+_boxE = dE.addObject("Part::Box", "Cube")
+
+
+class _BoxShapeE:
+    BoundBox = BB([Vec(0, 0, 0), Vec(0.1, 0.1, 0.1)])
+
+    @property
+    def Faces(self):
+        return [1, 2, 3, 4, 5, 6]
+
+    def transformGeometry(self, m):
+        return self
+
+
+FreeCAD.Matrix = _FM
+C.global_shape = lambda o: _BoxShapeE()
+C.info = lambda m: None
+# 1) study tree
+C.form_dialog = lambda title, fields, **k: {"phys": CF.CATALOG[0]["title"]}
+C.CfdStudy().Activated()
+_contE = [o for o in dE.Objects
+          if getattr(o, "CfdStudy", "") == CF.CATALOG[0]["id"] and o.Group][0]
+_nodesE = {getattr(n, "CfdStep", ""): n for n in _contE.Group}
+# 2) geometry = the box
+C.FreeCADGui.Selection = type("S", (), {"getSelection": staticmethod(lambda: [_boxE])})()
+C._cfd_open_node(_nodesE["geometry"])
+assert getattr(_contE, "CfdGeometry", "") == _boxE.Name
+# 3) material = water
+C.form_dialog = lambda title, fields, **k: {"fluid": "Water (20 C)"}
+C._cfd_open_node(_nodesE["materials"])
+# 4) numerics, 5) control, 6) mesh
+C.form_dialog = lambda title, fields, **k: {"turb": "kOmegaSST",
+                                            "time": "Steady-state", "ti": 5.0}
+C._cfd_open_node(_nodesE["numerics"])
+C.form_dialog = lambda title, fields, **k: {"iters": 300, "write": 100, "res": 1e-4}
+C._cfd_open_node(_nodesE["control"])
+C.form_dialog = lambda title, fields, **k: {"cells": 12}
+C._cfd_open_node(_nodesE["mesh"])
+# 7) BCs: inlet on face 0, outlet on face 1 (rest default to walls)
+C._cfd_create_bc(dE, _boxE, CB.bc_type("velocity_inlet"), [0], 8.0)
+C._cfd_create_bc(dE, _boxE, CB.bc_type("pressure_outlet"), [1], 0.0)
+# 8) run (stage the case; resolve the solid from Geometry, nothing selected)
+_stgE = "/tmp/dyncad_e2e"
+_shE.rmtree(_stgE, ignore_errors=True); _osE.makedirs(_stgE)
+C._cfd_outdir = lambda d=_stgE: d
+C.FreeCADGui.Selection = type("S", (), {"getSelection": staticmethod(lambda: [])})()
+C.form_dialog = lambda title, fields, **k: {
+    "name": "e2e", "ncells": 12, "iters": 300, "nu": 1e-6,
+    "distro": "", "env": "/opt/openfoam14/etc/bashrc", "run": "No"}
+C.CfdFlowInternal().Activated()
+_srcE = _osE.path.join(_stgE, "e2e_src")
+assert _osE.path.exists(_osE.path.join(_srcE, "blockMeshDict")), "e2e not staged"
+_bmE = open(_osE.path.join(_srcE, "blockMeshDict")).read()
+assert "velocity_inlet" in _bmE and "pressure_outlet" in _bmE and "wall" in _bmE
+_uE = open(_osE.path.join(_srcE, "U")).read()
+assert "fixedValue" in _uE and "pressureInletOutletVelocity" in _uE
+assert "kOmegaSST" in open(_osE.path.join(_srcE, "momentumTransport")).read()
+assert _osE.path.exists(_osE.path.join(_stgE, "run_e2e.sh"))
+C.global_shape = _savedGSe; C.FreeCADGui.Selection = _savedSele
+print("  full tree workflow staged a complete solvable case (/tmp/dyncad_e2e) OK")
 print("CFD boundary conditions OK")
 
 print("\nALL RUNTIME CHECKS PASSED")

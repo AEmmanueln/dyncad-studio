@@ -7467,6 +7467,35 @@ def _cfd_doc_solids(doc):
     return out
 
 
+def _cfd_resolve_solid(doc):
+    """Find the study's geometry solid without needing it selected: a selected
+    solid, else the solid set in the Geometry step, else one that has BC
+    assignments, else the only solid in the document."""
+    try:
+        sel = [o for o in FreeCADGui.Selection.getSelection()
+               if getattr(o, "Shape", None) is not None
+               and getattr(o.Shape, "Faces", None)]
+        if sel:
+            return sel[0]
+    except Exception:
+        pass
+    gname = _cfd_study_get(doc, "CfdGeometry", "")
+    if gname:
+        o = doc.getObject(gname)
+        if o is not None and getattr(o, "Shape", None) is not None:
+            return o
+    for o in getattr(doc, "Objects", []):
+        bs = getattr(o, "CfdBCSolid", "")
+        if bs:
+            s = doc.getObject(bs)
+            if s is not None and getattr(s, "Shape", None) is not None:
+                return s
+    solids = _cfd_doc_solids(doc)
+    if len(solids) == 1:
+        return solids[0]
+    return None
+
+
 def _cfd_pick_geometry(node):
     """Geometry step: choose the solid that is the flow region for this study."""
     doc = FreeCAD.ActiveDocument
@@ -8128,20 +8157,15 @@ class CfdFlowInternal:
     def Activated(self):
         if cfd is None or cfdgen is None or cfdbc is None:
             err("The CFD modules failed to load."); return
-        try:
-            sel = [o for o in FreeCADGui.Selection.getSelection()
-                   if getattr(o, "Shape", None) is not None]
-        except Exception:
-            sel = []
-        if not sel:
-            info("Select the box solid whose faces you assigned BCs to, then run "
-                 "Run Flow from BCs."); return
-        solid = sel[0]
         doc = FreeCAD.ActiveDocument
+        solid = _cfd_resolve_solid(doc)
+        if solid is None:
+            info("No geometry found. Open the 'Geometry' node to choose the solid, "
+                 "or select it in the tree, then Run."); return
         assigns = _cfd_collect_bc_assignments(doc, getattr(solid, "Name", ""))
         if not assigns:
-            info("No boundary conditions on '%s' yet. Select faces and use Assign "
-                 "Boundary Condition first (at least an inlet and an outlet)."
+            info("No boundary conditions on '%s' yet. Open 'Boundary conditions', "
+                 "tag at least an inlet and an outlet face, then Run."
                  % getattr(solid, "Label", "solid")); return
         try:
             shp = global_shape(solid)

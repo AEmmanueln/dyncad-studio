@@ -362,3 +362,31 @@ def native_run_argv(script, login=True):
     b64 = base64.b64encode(script.encode("utf-8")).decode("ascii")
     inner = "echo %s | base64 -d | bash" % b64
     return ["bash", "-lc" if login else "-c", inner]
+
+
+def parse_convergence(log_text):
+    """Read a foamRun log and report whether the solve converged - OpenFOAM's
+    'job status', the way SimScale shows it. Returns
+        {converged: bool, iterations: int, residuals: {field: last_initial}}
+    so the workbench can tell the user in-app if the result is trustworthy."""
+    import re
+    t = log_text or ""
+    converged = "solution converged" in t
+    iters = 0
+    cm = re.search(r"converged in (\d+) iterations", t)
+    if cm:
+        iters = int(cm.group(1))
+    else:
+        times = re.findall(r"(?:^|\n)Time = (\d+)", t)
+        if times:
+            iters = int(times[-1])
+    res = {}
+    for fld in ("Ux", "Uy", "Uz", "p", "k", "omega"):
+        rm = re.findall(
+            r"Solving for %s, Initial residual = ([0-9.eE+\-]+)" % re.escape(fld), t)
+        if rm:
+            try:
+                res[fld] = float(rm[-1])
+            except ValueError:
+                pass
+    return {"converged": converged, "iterations": iters, "residuals": res}

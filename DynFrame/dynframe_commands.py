@@ -7810,15 +7810,45 @@ class CfdFlowInternal:
             ("Run (paste in WSL)", flow_cmd),
             ("Then open in ParaView", os.path.join(win_out, "VTK")),
             ("Run script", fpath), ("Staged files", stage)])
-        launch = ""
+        # Solve now (blocking) and report convergence - the SimScale "job status".
+        # A box solve is seconds; a big case should be run from the terminal cmd.
+        status = ""
         if vals.get("run") == "Yes":
-            launch = "\n\nAuto-run: " + _try_launch_terminal(cfd.wsl_run_argv(fs, distro))
+            status = _cfd_run_and_report(fs, distro, win_out)
         info("Internal-flow case '%s' from your face BCs on '%s'.\n\nPatches: %s. "
              "The box interior is meshed with blockMesh and solved with "
-             "incompressibleFluid. In your WSL OpenFOAM terminal:\n\n  %s\n\nIt "
-             "writes VTK to:\n  %s\n\nColour by U or p in ParaView.%s" %
+             "incompressibleFluid.%s\n\nTo (re)run it yourself, in your WSL "
+             "OpenFOAM terminal:\n  %s\n\nResults (VTK) for ParaView:\n  %s" %
              (name, getattr(solid, "Label", "solid"), ", ".join(sorted(used)),
-              flow_cmd, os.path.join(win_out, "VTK"), launch))
+              status, flow_cmd, os.path.join(win_out, "VTK")))
+
+
+def _cfd_run_and_report(script, distro, win_out):
+    """Run a case script in WSL (blocking) and return a short convergence report
+    - OpenFOAM's job status in-app, so the user can trust the result."""
+    import subprocess
+    try:
+        argv = cfd.wsl_run_argv(script, distro)
+        r = subprocess.run(argv, capture_output=True, timeout=1800)
+        out = (r.stdout or b"").decode("utf-8", "replace")
+        out += (r.stderr or b"").decode("utf-8", "replace")
+    except Exception as e:
+        return ("\n\nAuto-run could not start (%s). Run the command below in your "
+                "WSL OpenFOAM terminal instead." % e)
+    conv = cfd.parse_convergence(out)
+    mesh_ok = "Mesh OK" in out
+    if conv["converged"]:
+        res = ", ".join("%s=%.1e" % (k, v) for k, v in sorted(conv["residuals"].items()))
+        return ("\n\nSOLVED - converged in %d iterations (mesh: %s). Final "
+                "residuals: %s. Results written to %s." %
+                (conv["iterations"], "OK" if mesh_ok else "see log",
+                 res or "n/a", os.path.join(win_out, "VTK")))
+    if conv["iterations"]:
+        return ("\n\nRan %d iterations but did NOT fully converge - raise the "
+                "iteration count or refine the mesh, then run again." %
+                conv["iterations"])
+    return ("\n\nThe run did not complete (mesh or solver error). Check the log "
+            "in the case folder, or run the command below in your terminal.")
 
 
 def _cfd_flow_execute(obj, pts, facets, bb, Lm, vals):

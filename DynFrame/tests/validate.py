@@ -1966,6 +1966,19 @@ assert "inlet" in _utxt and "outlet" in _utxt
 assert os.path.exists(os.path.join(_tmpI, "run_flowint1.sh"))
 FreeCAD.Matrix = _savedM; C.global_shape = _savedGS; C.FreeCADGui.Selection = _savedSel
 print("  CfdFlowInternal staged a case from assigned face BCs OK")
+# convergence parser (in-app "job status" so results are trustworthy)
+_log = ("Time = 102s\n"
+        "smoothSolver:  Solving for Ux, Initial residual = 9.5e-05, Final residual = 4.7e-06, No Iterations 1\n"
+        "GAMG:  Solving for p, Initial residual = 3.6e-05, Final residual = 1.0e-07, No Iterations 2\n"
+        "SIMPLE solution converged in 102 iterations\n")
+_cv = CF.parse_convergence(_log)
+assert _cv["converged"] is True and _cv["iterations"] == 102, _cv
+assert abs(_cv["residuals"]["Ux"] - 9.5e-05) < 1e-12
+assert abs(_cv["residuals"]["p"] - 3.6e-05) < 1e-12
+_cv2 = CF.parse_convergence(
+    "Time = 50\nSolving for Ux, Initial residual = 0.2, Final residual = 0.01, No Iterations 3\n")
+assert _cv2["converged"] is False and _cv2["iterations"] == 50
+print("  convergence parser (job status) OK")
 print("CFD boundary conditions OK")
 
 print("\nALL RUNTIME CHECKS PASSED")

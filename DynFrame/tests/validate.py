@@ -1921,6 +1921,26 @@ _ints = CG.build_internal_flow_script(
     {"name": "flowint1", "stage_win": r"C:\x", "win_out": r"C:\y"})
 assert "blockMesh" in _ints and "foamRun" in _ints and "snappyHexMesh" not in _ints
 print("  box internal-flow blockMesh (named patches) + script OK")
+# arbitrary solid: snappyHexMesh named patches + boundary layers + 2nd order
+_pl = [{"name": "velocity_inlet", "type": "patch"},
+       {"name": "pressure_outlet", "type": "patch"},
+       {"name": "wall", "type": "wall"}]
+_sn = CG.snappy_multipatch_dict(_pl, (0, 0, 0.02), level_min=1, level_max=2, n_layers=2)
+assert _sn.count("{") == _sn.count("}")
+assert 'file "velocity_inlet.stl"' in _sn and 'file "wall.stl"' in _sn
+assert "addLayers       true" in _sn and '"wall"' in _sn        # layers on walls
+assert "patchInfo { type patch; }" in _sn and "patchInfo { type wall; }" in _sn
+_bg = CG.background_box_dict(0, 0, 0, 0.1, 0.1, 0.2, 10, 10, 20)
+assert "outer" in _bg and _bg.count("{") == _bg.count("}")
+_sfm = CG.surface_features_multi(["velocity_inlet", "wall"])
+assert '"velocity_inlet.stl"' in _sfm and '"wall.stl"' in _sfm
+_sns = CG.build_snappy_flow_script(
+    {"name": "s1", "stage_win": r"C:\x", "win_out": r"C:\y",
+     "patch_names": ["velocity_inlet", "wall"]})
+assert "snappyHexMesh" in _sns and "surfaceFeatures" in _sns and "velocity_inlet.stl" in _sns
+assert "limitedLinear" in CG.fv_schemes_simple(second_order=True)
+assert "upwind" in CG.fv_schemes_simple(second_order=False)
+print("  snappy multi-patch + background box + 2nd-order schemes OK")
 # command: selected box + assigned BCs -> staged case + run script
 import tempfile as _tfI
 dFI = Doc(); FreeCAD.ActiveDocument = dFI

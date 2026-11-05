@@ -379,20 +379,25 @@ def physical_properties_dict(nu=1.5e-5):
         "viscosityModel  constant;\n\nnu              [0 2 -1 0 0 0 0] %s;\n" % _g(nu))
 
 
-def fv_schemes_simple():
+def fv_schemes_simple(second_order=False):
+    """Steady-state finite-volume schemes. second_order=True raises the turbulence
+    transport to limitedLinear (2nd-order, more accurate); the momentum equation
+    is linearUpwind (2nd-order) either way."""
+    kdiv = ("bounded Gauss limitedLinear 1" if second_order
+            else "bounded Gauss upwind")
     return _foam_header("dictionary", "fvSchemes") + (
         "ddtSchemes\n{\n    default         steadyState;\n}\n\n"
         "gradSchemes\n{\n    default         Gauss linear;\n"
         "    grad(U)         cellLimited Gauss linear 1;\n}\n\n"
         "divSchemes\n{\n    default         none;\n"
         "    div(phi,U)      bounded Gauss linearUpwind grad(U);\n"
-        "    div(phi,k)      bounded Gauss upwind;\n"
-        "    div(phi,omega)  bounded Gauss upwind;\n"
+        "    div(phi,k)      %s;\n"
+        "    div(phi,omega)  %s;\n"
         "    div((nuEff*dev2(T(grad(U))))) Gauss linear;\n}\n\n"
         "laplacianSchemes\n{\n    default         Gauss linear corrected;\n}\n\n"
         "interpolationSchemes\n{\n    default         linear;\n}\n\n"
         "snGradSchemes\n{\n    default         corrected;\n}\n\n"
-        "wallDist\n{\n    method          meshWave;\n}\n")
+        "wallDist\n{\n    method          meshWave;\n}\n" % (kdiv, kdiv))
 
 
 def fv_solution_simple():
@@ -682,4 +687,152 @@ def build_internal_flow_script(opts):
     L.append('[ -d VTK ] && cp -r VTK "$OUT/" && echo "=== results VTK copied to: %s ==="'
              % win_out)
     L.append('echo "=== INTERNAL FLOW DONE: $DST  (colour by U or p) ==="')
+    return "\n".join(L)
+
+
+# =============================================================================
+# Arbitrary solid: snappyHexMesh with a named patch per BC face-group
+# =============================================================================
+# For a non-box CAD part, each boundary-condition face group is exported as its
+# own STL; snappyHexMesh snaps the background mesh to the surfaces and names one
+# patch per STL, with boundary layers on the walls for near-wall accuracy.
+def background_box_dict(x0, y0, z0, x1, y1, z1, nx, ny, nz, patch="outer"):
+    """A plain background hex box with a single outer patch; snappyHexMesh snaps
+    the real geometry inside it and discards the cells outside the fluid region."""
+    V = [(x0, y0, z0), (x1, y0, z0), (x1, y1, z0), (x0, y1, z0),
+         (x0, y0, z1), (x1, y0, z1), (x1, y1, z1), (x0, y1, z1)]
+    verts = "\n".join("    " + _pt(*v) for v in V)
+    return (
+        "/*--------------------------------*- C++ -*----------------------------------*\\\n"
+        "| DynFrame CFD - background blockMeshDict for snappyHexMesh                    |\n"
+        "\\*---------------------------------------------------------------------------*/\n"
+        "FoamFile\n{\n    format      ascii;\n    class       dictionary;\n"
+        "    object      blockMeshDict;\n}\n\n"
+        "scale   1;\n\n"
+        "vertices\n(\n%s\n);\n\n"
+        "blocks\n(\n    hex (0 1 2 3 4 5 6 7) (%d %d %d) simpleGrading (1 1 1)\n);\n\n"
+        "edges\n(\n);\n\n"
+        "boundary\n(\n    %s\n    {\n        type patch;\n        faces\n        (\n"
+        "            (0 4 7 3) (2 6 5 1) (1 5 4 0) (3 7 6 2) (0 3 2 1) (4 5 6 7)\n"
+        "        );\n    }\n);\n\nmergePatchPairs\n(\n);\n"
+        % (verts, nx, ny, nz, patch))
+
+
+def surface_features_multi(names, angle=150.0):
+    """surfaceFeaturesDict extracting sharp edges from every patch STL, so snappy
+    can snap to the part's real edges (accuracy on corners)."""
+    surfs = " ".join("\"%s.stl\"" % n for n in names)
+    return (
+        "FoamFile\n{\n    format      ascii;\n    class       dictionary;\n"
+        "    object      surfaceFeaturesDict;\n}\n\n"
+        "surfaces ( %s );\n\nincludedAngle   %s;\n" % (surfs, _g(angle)))
+
+
+def snappy_multipatch_dict(patches, location, level_min=1, level_max=2,
+                           n_layers=3, expansion=1.2, final_layer=0.4,
+                           resolve_angle=45.0):
+    """snappyHexMesh for an arbitrary solid given as one STL per BC patch.
+
+    `patches`: list of {"name": patch, "type": patch|wall|symmetry}. Each becomes
+    a named patch; boundary layers are grown on the wall patches. `location` is a
+    point inside the fluid region to keep. Returns the dictionary text."""
+    lx, ly, lz = location
+    geom = "".join(
+        "    %s\n    {\n        type triSurfaceMesh;\n        file \"%s.stl\";\n    }\n"
+        % (p["name"], p["name"]) for p in patches)
+    feats = "".join(
+        "        { file \"%s.eMesh\"; level %d; }\n" % (p["name"], level_max)
+        for p in patches)
+    refs = "".join(
+        "        %s\n        {\n            level (%d %d);\n"
+        "            patchInfo { type %s; }\n        }\n"
+        % (p["name"], level_min, level_max, p.get("type", "wall"))
+        for p in patches)
+    walls = [p["name"] for p in patches if p.get("type", "wall") == "wall"]
+    layer_block = "".join(
+        "        \"%s\"\n        {\n            nSurfaceLayers %d;\n        }\n"
+        % (w, n_layers) for w in walls)
+    add_layers = "true" if (n_layers > 0 and walls) else "false"
+    return (
+        "/*--------------------------------*- C++ -*----------------------------------*\\\n"
+        "| DynFrame CFD - snappyHexMeshDict (arbitrary solid, named patches)           |\n"
+        "\\*---------------------------------------------------------------------------*/\n"
+        "FoamFile\n{\n    format      ascii;\n    class       dictionary;\n"
+        "    object      snappyHexMeshDict;\n}\n\n"
+        "castellatedMesh true;\nsnap            true;\naddLayers       %s;\n\n"
+        "geometry\n{\n%s}\n\n"
+        "castellatedMeshControls\n{\n"
+        "    maxLocalCells 2000000;\n    maxGlobalCells 10000000;\n"
+        "    minRefinementCells 10;\n    maxLoadUnbalance 0.10;\n"
+        "    nCellsBetweenLevels 3;\n\n"
+        "    features\n    (\n%s    );\n\n"
+        "    refinementSurfaces\n    {\n%s    }\n\n"
+        "    resolveFeatureAngle %s;\n\n    refinementRegions\n    {\n    }\n\n"
+        "    locationInMesh (%s %s %s);\n    allowFreeStandingZoneFaces true;\n}\n\n"
+        "snapControls\n{\n    nSmoothPatch 3;\n    tolerance 2.0;\n    nSolveIter 30;\n"
+        "    nRelaxIter 5;\n    nFeatureSnapIter 10;\n    implicitFeatureSnap false;\n"
+        "    explicitFeatureSnap true;\n    multiRegionFeatureSnap false;\n}\n\n"
+        "addLayersControls\n{\n    relativeSizes true;\n    layers\n    {\n%s    }\n"
+        "    expansionRatio %s;\n    finalLayerThickness %s;\n    minThickness 0.1;\n"
+        "    nGrow 0;\n    featureAngle 60;\n    nRelaxIter 5;\n"
+        "    nSmoothSurfaceNormals 1;\n    nSmoothNormals 3;\n    nSmoothThickness 10;\n"
+        "    maxFaceThicknessRatio 0.5;\n    maxThicknessToMedialRatio 0.3;\n"
+        "    minMedialAxisAngle 90;\n    nBufferCellsNoExtrude 0;\n    nLayerIter 50;\n}\n\n"
+        "meshQualityControls\n{\n    maxNonOrtho 65;\n    maxBoundarySkewness 20;\n"
+        "    maxInternalSkewness 4;\n    maxConcave 80;\n    minVol 1e-13;\n"
+        "    minTetQuality 1e-15;\n    minArea -1;\n    minTwist 0.02;\n"
+        "    minDeterminant 0.001;\n    minFaceWeight 0.02;\n    minVolRatio 0.01;\n"
+        "    minTriangleTwist -1;\n    nSmoothScale 4;\n    errorReduction 0.75;\n}\n\n"
+        "mergeTolerance 1e-6;\n"
+        % (add_layers, geom, feats, refs, _g(resolve_angle),
+           _g(lx), _g(ly), _g(lz), layer_block, _g(expansion), _g(final_layer)))
+
+
+def build_snappy_flow_script(opts):
+    """Internal flow through an ARBITRARY solid: one STL per BC patch ->
+    snappyHexMesh named patches (+ boundary layers) -> solve. opts: of_env, name,
+    stage_win (holds <patch>.stl, blockMeshDict, snappyHexMeshDict,
+    surfaceFeaturesDict, the 0/ fields and constant/system dicts), win_out,
+    patch_names (list), latest."""
+    import dynframe_cfd as cfd
+    of_env = opts.get("of_env", cfd.DEFAULT_OF_ENV)
+    name = opts.get("name", "flowsnap1")
+    stage = cfd.win_to_wsl(opts["stage_win"])
+    win_out = opts["win_out"]
+    out = cfd.win_to_wsl(win_out)
+    lt = " -latestTime" if opts.get("latest", True) else ""
+    work = cfd.WORK_ROOT
+    names = opts.get("patch_names", [])
+
+    L = []
+    L.append("# DynFrame CFD - arbitrary-solid internal flow (snappyHexMesh + solve)")
+    L.append(". %s" % of_env)
+    L.append('STAGE=%s' % cfd.shq(stage))
+    L.append('mkdir -p %s' % work)
+    L.append('DST=%s/%s' % (work, name))
+    L.append('rm -rf "$DST"; mkdir -p "$DST/0" "$DST/constant/triSurface" "$DST/system"')
+    L.append('cd "$DST" || exit 1')
+    L.append('cp "$STAGE"/blockMeshDict "$STAGE"/snappyHexMeshDict '
+             '"$STAGE"/surfaceFeaturesDict "$STAGE"/fvSchemes "$STAGE"/fvSolution '
+             '"$STAGE"/controlDict system/')
+    L.append('cp "$STAGE"/momentumTransport "$STAGE"/physicalProperties constant/')
+    L.append('cp "$STAGE"/U "$STAGE"/p "$STAGE"/k "$STAGE"/omega "$STAGE"/nut 0/')
+    for nm in names:
+        L.append('cp "$STAGE"/%s.stl constant/triSurface/%s.stl' % (nm, nm))
+    L.append('echo "== blockMesh =="; blockMesh 2>&1 | tee log.blockMesh | tail -3')
+    L.append('echo "== surfaceFeatures =="; surfaceFeatures 2>&1 | tail -3 || echo skipped')
+    L.append('if [ -z "$(find constant -name \'*.eMesh\' 2>/dev/null)" ]; then '
+             'foamDictionary -entry castellatedMeshControls/features -set "()" '
+             'system/snappyHexMeshDict 2>/dev/null || true; fi')
+    L.append('echo "== snappyHexMesh =="; snappyHexMesh -overwrite 2>&1 | '
+             'tee log.snappyHexMesh | tail -5')
+    L.append('echo "== checkMesh =="; checkMesh 2>&1 | tee log.checkMesh | tail -12')
+    L.append('echo "== foamRun (incompressibleFluid) =="; foamRun 2>&1 | '
+             'tee log.foamRun | tail -25')
+    L.append('echo "== foamToVTK =="; foamToVTK%s 2>&1 | tail -3' % lt)
+    L.append('OUT=%s' % cfd.shq(out))
+    L.append('mkdir -p "$OUT"; rm -rf "$OUT/VTK"')
+    L.append('[ -d VTK ] && cp -r VTK "$OUT/" && echo "=== results VTK copied to: %s ==="'
+             % win_out)
+    L.append('echo "=== SNAPPY FLOW DONE: $DST  (colour by U or p) ==="')
     return "\n".join(L)

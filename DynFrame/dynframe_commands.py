@@ -8138,6 +8138,38 @@ def _cfd_patch_type(bc_key):
     return b.get("patch", "wall") if b else "wall"
 
 
+def _cfd_export_grouped_stls(solid, assigns, stage, scale=1e-3):
+    """Tessellate the solid's faces grouped by assigned BC, and write one STL per
+    group (scaled to metres) into `stage`. Faces with no BC default to a wall.
+    Returns a list of {"name": bc_key, "type": patch_type} for snappyHexMesh."""
+    shp = global_shape(solid)
+    faces = list(shp.Faces)
+    try:
+        diag = shp.BoundBox.DiagonalLength
+    except Exception:
+        diag = 100.0
+    tol = max(diag / 250.0, 1e-4)        # tessellation chord tolerance (mm)
+    groups = {}
+    for i, f in enumerate(faces):
+        key = assigns.get(i, "wall")
+        try:
+            pts, facets = f.tessellate(tol)
+        except Exception:
+            continue
+        g = groups.setdefault(key, ([], []))
+        base = len(g[0])
+        g[0].extend([(p.x * scale, p.y * scale, p.z * scale) for p in pts])
+        g[1].extend([(a + base, b + base, c + base) for (a, b, c) in facets])
+    patch_list = []
+    for key, (pts, facets) in groups.items():
+        if not facets:
+            continue
+        _write_lf(os.path.join(stage, key + ".stl"),
+                  cfdgen.ascii_stl(key, pts, facets))
+        patch_list.append({"name": key, "type": _cfd_patch_type(key)})
+    return patch_list
+
+
 class CfdFlowInternal:
     def GetResources(self):
         return {"Pixmap": _icon("cfd"),
@@ -8172,11 +8204,7 @@ class CfdFlowInternal:
             nfaces = len(shp.Faces)
         except Exception as e:
             err("Could not read '%s': %s" % (getattr(solid, "Label", "?"), e)); return
-        if nfaces != 6:
-            info("Internal flow from assigned faces currently supports box-shaped "
-                 "solids (6 faces). '%s' has %d faces - arbitrary solids "
-                 "(snappyHexMesh named patches) are the next step."
-                 % (getattr(solid, "Label", "solid"), nfaces)); return
+        is_box = (nfaces == 6)
         # box bounds in metres
         try:
             mat = FreeCAD.Matrix(); mat.scale(1e-3, 1e-3, 1e-3)
@@ -8186,12 +8214,13 @@ class CfdFlowInternal:
         vals0 = _cfd_bc_values(doc, solid.Name)
         fields = [
             {"key": "_i", "kind": "info", "default":
-             "Internal flow through '%s' using your face BCs. The box interior is "
-             "meshed (blockMesh) and solved with incompressibleFluid. Patches: %s."
+             "Internal flow through '%s' using your face BCs. A box is meshed with "
+             "blockMesh; any other solid with snappyHexMesh (named patches + "
+             "boundary layers). Solved with incompressibleFluid. Patches: %s."
              % (getattr(solid, "Label", "solid"),
                 ", ".join(sorted(set(assigns.values()))))},
             {"key": "name", "label": "Case name", "kind": "text", "default": "flowint1"},
-            {"key": "ncells", "label": "Cells across the box", "kind": "int",
+            {"key": "ncells", "label": "Cells across the domain", "kind": "int",
              "default": int(float(_cfd_study_get(doc, "CfdCells", "20") or 20)),
              "min": 4, "max": 400},
             {"key": "iters", "label": "Iterations (steady)", "kind": "int",
@@ -8207,48 +8236,80 @@ class CfdFlowInternal:
         vals = form_dialog("Run Flow from BCs (internal)", fields,
                            **_cfd_dialog_kwargs(
                                "Internal Flow from BCs",
-                               "Mesh the box interior and solve with your assigned "
-                               "inlet/outlet/wall faces."))
+                               "Mesh the solid interior (blockMesh for a box, "
+                               "snappyHexMesh otherwise) and solve."))
         if not vals:
             return
         name = (str(vals.get("name") or "flowint1").strip().replace(" ", "_")) or "flowint1"
         n = max(4, int(vals["ncells"]))
-        # face index -> box face key (Part::Box face order == BOX_FACE_ORDER)
-        face_patches = {}
-        used = set()
-        for idx, fk in enumerate(cfdgen.BOX_FACE_ORDER):
-            key = assigns.get(idx, "wall")
-            face_patches[fk] = (key, _cfd_patch_type(key))
-            used.add(key)
-        bm = cfdgen.box_blockmesh_named(
-            bb.XMin, bb.YMin, bb.ZMin, bb.XMax, bb.YMax, bb.ZMax, n, n, n, face_patches)
-        patches = [{"name": k, "bc": k, "value": vals0.get(k, 0.0)}
-                   for k in sorted(used)]
         Lm = max(bb.XLength, bb.YLength, bb.ZLength, 1e-6)
         intensity = float(_cfd_study_get(doc, "CfdIntensity", "5") or 5) / 100.0
-        casefiles, k0, om0 = cfdgen.bc_field_files(
-            patches, nu=float(vals["nu"]), intensity=intensity, L=Lm)
-        # apply the study's Numerics (turbulence model) and run controls
-        turb = _cfd_study_get(doc, "CfdTurbulence", "kOmegaSST")
-        casefiles["momentumTransport"] = cfdgen.momentum_transport_dict(turb)
-        write = int(float(_cfd_study_get(doc, "CfdWrite", "")
-                          or max(1, int(int(vals["iters"]) / 5))))
-        casefiles["controlDict"] = cfdgen.control_dict_simple(
-            "incompressibleFluid", int(vals["iters"]), max(1, write))
+        of_env = str(vals.get("env") or cfd.DEFAULT_OF_ENV).strip()
+        distro = str(vals.get("distro") or cfd.DEFAULT_DISTRO).strip()
         outdir = _cfd_outdir()
         stage = os.path.join(outdir, name + "_src")
+        win_out = os.path.join(outdir, name)
         try:
-            _write_lf(os.path.join(stage, "blockMeshDict"), bm)
+            if is_box:
+                # box: exact blockMesh of the interior, each face its named patch
+                face_patches = {}; used = set()
+                for idx, fk in enumerate(cfdgen.BOX_FACE_ORDER):
+                    key = assigns.get(idx, "wall")
+                    face_patches[fk] = (key, _cfd_patch_type(key)); used.add(key)
+                _write_lf(os.path.join(stage, "blockMeshDict"),
+                          cfdgen.box_blockmesh_named(
+                              bb.XMin, bb.YMin, bb.ZMin, bb.XMax, bb.YMax, bb.ZMax,
+                              n, n, n, face_patches))
+                mesher = "blockMesh (box)"
+            else:
+                # arbitrary solid: one STL per face group -> snappyHexMesh patches
+                patch_list = _cfd_export_grouped_stls(solid, assigns, stage)
+                if not patch_list:
+                    err("Could not tessellate the solid's faces to STL."); return
+                used = set(p["name"] for p in patch_list)
+                mrg = 0.10 * Lm
+                bx0, by0, bz0 = bb.XMin - mrg, bb.YMin - mrg, bb.ZMin - mrg
+                bx1, by1, bz1 = bb.XMax + mrg, bb.YMax + mrg, bb.ZMax + mrg
+                cs = max(bx1 - bx0, by1 - by0, bz1 - bz0) / max(4, n)
+                nx = max(4, int((bx1 - bx0) / cs))
+                ny = max(4, int((by1 - by0) / cs))
+                nz = max(4, int((bz1 - bz0) / cs))
+                loc = (0.5 * (bb.XMin + bb.XMax), 0.5 * (bb.YMin + bb.YMax),
+                       0.5 * (bb.ZMin + bb.ZMax))
+                nlay = int(float(_cfd_study_get(doc, "CfdLayers", "2") or 2))
+                _write_lf(os.path.join(stage, "blockMeshDict"),
+                          cfdgen.background_box_dict(bx0, by0, bz0, bx1, by1, bz1,
+                                                     nx, ny, nz))
+                _write_lf(os.path.join(stage, "snappyHexMeshDict"),
+                          cfdgen.snappy_multipatch_dict(
+                              patch_list, loc, level_min=1, level_max=2, n_layers=nlay))
+                _write_lf(os.path.join(stage, "surfaceFeaturesDict"),
+                          cfdgen.surface_features_multi(sorted(used)))
+                mesher = "snappyHexMesh (arbitrary solid, boundary layers)"
+            patches = [{"name": k, "bc": k, "value": vals0.get(k, 0.0)}
+                       for k in sorted(used)]
+            casefiles, k0, om0 = cfdgen.bc_field_files(
+                patches, nu=float(vals["nu"]), intensity=intensity, L=Lm)
+            turb = _cfd_study_get(doc, "CfdTurbulence", "kOmegaSST")
+            casefiles["momentumTransport"] = cfdgen.momentum_transport_dict(turb)
+            casefiles["fvSchemes"] = cfdgen.fv_schemes_simple(
+                second_order=(_cfd_study_get(doc, "CfdSecondOrder", "") == "1"))
+            write = int(float(_cfd_study_get(doc, "CfdWrite", "")
+                              or max(1, int(int(vals["iters"]) / 5))))
+            casefiles["controlDict"] = cfdgen.control_dict_simple(
+                "incompressibleFluid", int(vals["iters"]), max(1, write))
             for fn, txt in casefiles.items():
                 _write_lf(os.path.join(stage, fn), txt)
         except Exception as e:
             err("Could not write the case files to %s:\n%s" % (stage, e)); return
-        of_env = str(vals.get("env") or cfd.DEFAULT_OF_ENV).strip()
-        distro = str(vals.get("distro") or cfd.DEFAULT_DISTRO).strip()
-        win_out = os.path.join(outdir, name)
-        fs = cfdgen.build_internal_flow_script(
-            {"of_env": of_env, "name": name, "stage_win": stage,
-             "win_out": win_out, "latest": True})
+        if is_box:
+            fs = cfdgen.build_internal_flow_script(
+                {"of_env": of_env, "name": name, "stage_win": stage,
+                 "win_out": win_out, "latest": True})
+        else:
+            fs = cfdgen.build_snappy_flow_script(
+                {"of_env": of_env, "name": name, "stage_win": stage,
+                 "win_out": win_out, "patch_names": sorted(used), "latest": True})
         fpath = os.path.join(outdir, "run_%s.sh" % name)
         try:
             _write_lf(fpath, fs)
@@ -8268,12 +8329,12 @@ class CfdFlowInternal:
         status = ""
         if vals.get("run") == "Yes":
             status = _cfd_run_and_report(fs, distro, win_out)
-        info("Internal-flow case '%s' from your face BCs on '%s'.\n\nPatches: %s. "
-             "The box interior is meshed with blockMesh and solved with "
-             "incompressibleFluid.%s\n\nTo (re)run it yourself, in your WSL "
-             "OpenFOAM terminal:\n  %s\n\nResults (VTK) for ParaView:\n  %s" %
+        info("Internal-flow case '%s' from your face BCs on '%s'.\n\nPatches: %s.\n"
+             "Mesh: %s. Solver: incompressibleFluid (%s).%s\n\nTo (re)run it "
+             "yourself, in your WSL OpenFOAM terminal:\n  %s\n\nResults (VTK) for "
+             "ParaView:\n  %s" %
              (name, getattr(solid, "Label", "solid"), ", ".join(sorted(used)),
-              status, flow_cmd, os.path.join(win_out, "VTK")))
+              mesher, turb, status, flow_cmd, os.path.join(win_out, "VTK")))
 
 
 def _cfd_run_and_report(script, distro, win_out):

@@ -1026,20 +1026,25 @@ def mpl_render_block(name):
 
 # ---- OpenFOAM tutorial / example gallery (run any case, tweak parameters) ----
 def tutorials_find_script(of_env=None):
-    """Bash that lists every runnable OpenFOAM tutorial as 'category|relpath|abspath'
-    (one per case with a system/controlDict). Parsed by the Examples browser."""
+    """Bash that lists EVERY runnable OpenFOAM example as 'category|relpath|abspath'.
+    A case is any directory with an Allrun script (its canonical runner - catches
+    motorBike, drivaerFastback, wingMotion, the legacy cases, etc.) OR a
+    system/controlDict (the standard layout). The union, de-duplicated, is the full
+    tutorial set. Parsed by the Examples browser."""
     import dynframe_cfd as cfd
     env = of_env or cfd.DEFAULT_OF_ENV
     return (". %s >/dev/null 2>&1\n" % env
             + 'T="${FOAM_TUTORIALS:-$WM_PROJECT_DIR/tutorials}"\n'
             + '[ -d "$T" ] || { echo "NO_TUTORIALS"; exit 0; }\n'
-            + 'find "$T" -type f -name controlDict -path "*/system/*" 2>/dev/null '
-              '| while read f; do\n'
-            + '  c="${f%/system/controlDict}"\n'
+            + '{ find "$T" -mindepth 2 -type f -name Allrun -printf "%h\\n" '
+              '2>/dev/null; '
+              'find "$T" -type f -name controlDict -path "*/system/*" 2>/dev/null '
+              '| sed "s#/system/controlDict##"; } | sort -u | while read c; do\n'
+            + '  [ "$c" = "$T" ] && continue\n'
             + '  rel="${c#$T/}"\n'
             + '  cat="${rel%%/*}"\n'
             + '  printf "%s|%s|%s\\n" "$cat" "$rel" "$c"\n'
-            + 'done | sort\n')
+            + 'done\n')
 
 
 def build_tutorial_run_script(opts):

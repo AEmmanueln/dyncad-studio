@@ -6960,7 +6960,7 @@ def _draw_cfd_domain(doc, dom_mm, Ux=0.0, name="part1"):
 
 class CfdDomain:
     def GetResources(self):
-        return {"Pixmap": _icon("cfd"),
+        return {"Pixmap": _icon("cfd_domain"),
                 "MenuText": "CFD Domain & BCs (preview)",
                 "ToolTip": "Show the CFD setup on the selected solid, SimScale-"
                            "style: draw the flow domain as a box with its faces "
@@ -7159,7 +7159,7 @@ class CfdCase:
 
 class CfdView:
     def GetResources(self):
-        return {"Pixmap": _icon("cfd"), "MenuText": "CFD View in ParaView",
+        return {"Pixmap": _icon("cfd_view"), "MenuText": "CFD View (export VTK)",
                 "ToolTip": "Convert an existing OpenFOAM case's latest results to "
                            "VTK (all regions) and copy them to a Windows folder, "
                            "ready to open in ParaView. Use after a run, or to "
@@ -7986,7 +7986,7 @@ def build_cfd_tree(doc, study):
 
 class CfdStudy:
     def GetResources(self):
-        return {"Pixmap": _icon("cfd"),
+        return {"Pixmap": _icon("cfd_study"),
                 "MenuText": "CFD Study (new simulation)",
                 "ToolTip": "Start a SimScale-style CFD study: pick the physics "
                            "(any OpenFOAM module) and DynFrame builds the "
@@ -8536,7 +8536,7 @@ def _cfd_edit_bc(node):
 
 class CfdAssignBC:
     def GetResources(self):
-        return {"Pixmap": _icon("cfd"),
+        return {"Pixmap": _icon("cfd_bc"),
                 "MenuText": "Assign Boundary Condition (faces)",
                 "ToolTip": "SimScale-style boundary conditions: select one or more "
                            "faces of the solid in the 3D view, then run this to "
@@ -8845,7 +8845,7 @@ def _cfd_run_internal_flow(doc, solid, assigns, bb, vals0, vals):
 
 class CfdFlowInternal:
     def GetResources(self):
-        return {"Pixmap": _icon("cfd"),
+        return {"Pixmap": _icon("cfd_run"),
                 "MenuText": "Run Flow from BCs (internal)",
                 "ToolTip": "Solve internal flow through the selected box solid "
                            "using the boundary conditions you assigned to its "
@@ -9256,7 +9256,7 @@ class _CfdGalleryPanel:
 
 class CfdGallery:
     def GetResources(self):
-        return {"Pixmap": _icon("cfd"),
+        return {"Pixmap": _icon("cfd_gallery"),
                 "MenuText": "CFD Examples (templates)",
                 "ToolTip": "Curated, parameterised CFD examples - lid-driven "
                            "cavity, channel flow, backward-facing step - built and "
@@ -9290,9 +9290,9 @@ class CfdGallery:
 
 class CfdExamples:
     def GetResources(self):
-        return {"Pixmap": _icon("cfd"),
-                "MenuText": "OpenFOAM Tutorials (all)",
-                "ToolTip": "Browse every built-in OpenFOAM tutorial case (260+), "
+        return {"Pixmap": _icon("cfd_examples"),
+                "MenuText": "OpenFOAM Examples (all cases)",
+                "ToolTip": "Browse every built-in OpenFOAM example/tutorial case, "
                            "change its time controls, run it on OpenFOAM and open "
                            "it in ParaView. For curated, richly-parameterised "
                            "cases use 'CFD Examples (templates)' instead.",
@@ -9752,7 +9752,7 @@ def _cfd_report(title, text):
 
 class CfdFlow:
     def GetResources(self):
-        return {"Pixmap": _icon("cfd"),
+        return {"Pixmap": _icon("cfd_extflow"),
                 "MenuText": "CFD Flow: wind / air (incompressible)",
                 "ToolTip": "Full incompressible-flow CFD on a selected solid, end "
                            "to end: auto-mesh with snappyHexMesh, generate the "

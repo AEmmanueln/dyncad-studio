@@ -9076,6 +9076,10 @@ class _CfdResultWatcher:
         self._name = name; self._distro = distro; self._win_out = win_out
         self._ticks = 0
         try:
+            os.remove(os.path.join(win_out, ".dynframe_done"))   # drop a stale marker
+        except Exception:
+            pass
+        try:
             from PySide import QtCore
         except Exception:
             from PySide2 import QtCore
@@ -9088,7 +9092,7 @@ class _CfdResultWatcher:
         self._ticks += 1
         done = False
         try:
-            done = os.path.exists(os.path.join(self._win_out, "images", "U.png"))
+            done = os.path.exists(os.path.join(self._win_out, ".dynframe_done"))
         except Exception:
             done = False
         if done or self._ticks > 1200:             # ~50 min safety cap

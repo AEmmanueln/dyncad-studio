@@ -1088,11 +1088,19 @@ def build_tutorial_run_script(opts):
     L.append('echo "== DynFrame: running $DST ==" > log.dynframe')
     L.append('if [ -f ./Allrun ]; then chmod +x ./Allrun >/dev/null 2>&1 || true; '
              './Allrun >> log.dynframe 2>&1; else foamRunTutorials >> log.dynframe 2>&1; fi')
+    # parallel cases decompose into processor*/ - reconstruct before converting,
+    # otherwise foamToVTK finds no results and nothing can be shown.
+    L.append('if [ -d processor0 ]; then echo "== reconstructPar ==" >> log.dynframe; '
+             'reconstructPar -latestTime >> log.dynframe 2>&1 || '
+             'reconstructPar >> log.dynframe 2>&1 || true; fi')
     L.append('foamToVTK -latestTime >> log.dynframe 2>&1 || '
              'foamToVTK >> log.dynframe 2>&1 || true')
     L.append('if [ -n "$OUT" ]; then mkdir -p "$OUT"; rm -rf "$OUT/VTK"; '
              '[ -d VTK ] && cp -r VTK "$OUT/" 2>/dev/null || true; fi')
     L.append(mpl_render_block(name, opts.get("open_image", True)))
+    # 'done' marker the Windows-side watcher polls for, so ParaView opens as soon
+    # as results exist (independent of whether the image rendered).
+    L.append('[ -n "$OUT" ] && [ -d VTK ] && touch "$OUT/.dynframe_done" 2>/dev/null || true')
     L.append('echo "== DynFrame: DONE ==" >> log.dynframe')
     return "\n".join(L)
 
@@ -1129,5 +1137,6 @@ def build_example_run_script(opts):
     L.append('if [ -n "$OUT" ]; then mkdir -p "$OUT"; rm -rf "$OUT/VTK"; '
              '[ -d VTK ] && cp -r VTK "$OUT/" 2>/dev/null || true; fi')
     L.append(mpl_render_block(name, opts.get("open_image", True)))
+    L.append('[ -n "$OUT" ] && [ -d VTK ] && touch "$OUT/.dynframe_done" 2>/dev/null || true')
     L.append('echo "== DynFrame: DONE ==" >> log.dynframe')
     return "\n".join(L)

@@ -989,18 +989,65 @@ def build_tutorial_run_script(opts):
         if v != "":
             L.append('foamDictionary system/controlDict -entry %s -set %s '
                      '>/dev/null 2>&1 || true' % (entry, cfd.shq(v)))
-    # run: the case's own Allrun if present, else the standard tutorial sequence
-    L.append('echo "== DynFrame: running $DST ==" > log.dynframe')
-    L.append('if [ -f ./Allrun ]; then chmod +x ./Allrun >/dev/null 2>&1 || true; '
-             './Allrun >> log.dynframe 2>&1; '
-             'else foamRunTutorials >> log.dynframe 2>&1; fi')
-    L.append('echo "== foamToVTK ==" >> log.dynframe')
-    L.append('foamToVTK -latestTime >> log.dynframe 2>&1 || '
-             'foamToVTK >> log.dynframe 2>&1 || true')
+    # Run the case in the background (its own Allrun, else the standard tutorial
+    # sequence) then convert to VTK. ParaView does NOT wait for the whole solve:
+    # it opens as soon as the mesh exists, so even a long case shows up promptly
+    # and fills in as it writes time steps (press Reload in ParaView).
+    out_copy = ""
     if win_out:
-        L.append('OUT=%s' % cfd.shq(win_out))
-        L.append('mkdir -p "$OUT"; rm -rf "$OUT/VTK"; [ -d VTK ] && cp -r VTK "$OUT/"')
-    # open the finished case in ParaView (WSLg), detached
+        out_copy = ('; OUT=%s; mkdir -p "$OUT"; rm -rf "$OUT/VTK"; '
+                    '[ -d VTK ] && cp -r VTK "$OUT/"' % cfd.shq(win_out))
+    L.append('echo "== DynFrame: running $DST ==" > log.dynframe')
+    L.append('( if [ -f ./Allrun ]; then chmod +x ./Allrun >/dev/null 2>&1 || true; '
+             './Allrun; else foamRunTutorials; fi; '
+             'foamToVTK -latestTime >/dev/null 2>&1 || foamToVTK >/dev/null 2>&1 '
+             '|| true%s; echo "== DynFrame: DONE ==" ) >> log.dynframe 2>&1 &'
+             % out_copy)
+    L.append('RUNPID=$!')
+    L.append('if command -v paraview >/dev/null 2>&1; then')
+    L.append('  export DISPLAY=${DISPLAY:-:0}')
+    L.append('  for i in $(seq 1 240); do [ -f constant/polyMesh/points ] && break; '
+             'kill -0 $RUNPID 2>/dev/null || break; sleep 1; done')
+    L.append('  touch %s' % foam)
+    L.append('  nohup setsid paraview %s >/tmp/dynframe_pv.log 2>&1 </dev/null &'
+             % foam)
+    L.append('  disown 2>/dev/null || true')
+    L.append('fi')
+    L.append('wait $RUNPID 2>/dev/null || true')
+    return "\n".join(L)
+
+
+def build_example_run_script(opts):
+    """Run a curated example case: stage the generated files, blockMesh, solve on
+    OpenFOAM (incompressibleFluid), convert to VTK and open ParaView through WSLg.
+    The curated cases are small and fast, so ParaView opens when the solve
+    finishes and the result is ready. opts: of_env, name, stage_win, win_out."""
+    import dynframe_cfd as cfd
+    env = opts.get("of_env", cfd.DEFAULT_OF_ENV)
+    name = opts["name"]; work = cfd.WORK_ROOT
+    stage = cfd.win_to_wsl(opts["stage_win"])
+    win_out = opts.get("win_out", "")
+    if win_out:
+        win_out = cfd.win_to_wsl(win_out)
+    foam = '"$DST/%s.foam"' % name
+    L = []
+    L.append(". %s >/dev/null 2>&1" % env)
+    L.append("STAGE=%s" % cfd.shq(stage))
+    L.append("mkdir -p %s" % work)
+    L.append("DST=%s/%s" % (work, name))
+    L.append('rm -rf "$DST"; mkdir -p "$DST/0" "$DST/constant" "$DST/system"')
+    L.append('cd "$DST" || exit 1')
+    L.append('cp "$STAGE"/blockMeshDict "$STAGE"/fvSchemes "$STAGE"/fvSolution '
+             '"$STAGE"/controlDict system/')
+    L.append('cp "$STAGE"/momentumTransport "$STAGE"/physicalProperties constant/')
+    L.append('cp "$STAGE"/U "$STAGE"/p "$STAGE"/k "$STAGE"/omega "$STAGE"/nut 0/')
+    L.append('( echo "== blockMesh =="; blockMesh; echo "== checkMesh =="; '
+             'checkMesh | tail -12; echo "== foamRun =="; foamRun; '
+             'echo "== foamToVTK =="; foamToVTK -latestTime; echo "== DONE ==" ) '
+             '> log.dynframe 2>&1')
+    if win_out:
+        L.append('OUT=%s; mkdir -p "$OUT"; rm -rf "$OUT/VTK"; '
+                 '[ -d VTK ] && cp -r VTK "$OUT/"' % cfd.shq(win_out))
     L.append('if command -v paraview >/dev/null 2>&1; then')
     L.append('  touch %s' % foam)
     L.append('  export DISPLAY=${DISPLAY:-:0}')
@@ -1008,5 +1055,4 @@ def build_tutorial_run_script(opts):
              % foam)
     L.append('  disown 2>/dev/null || true')
     L.append('fi')
-    L.append('echo "== DynFrame: DONE ==" >> log.dynframe')
     return "\n".join(L)

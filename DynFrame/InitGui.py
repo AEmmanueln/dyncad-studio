@@ -70,9 +70,10 @@ class DynFrameWorkbench(FreeCADGui.Workbench):
                    "DynFrame_FireThermal",
                    "DynFrame_ShowDiagram", "DynFrame_ClearAnalysis"]
         cfd = ["DynFrame_CfdStudy", "DynFrame_CfdAssignBC",
-               "DynFrame_CfdFlowInternal", "DynFrame_CfdExamples",
-               "DynFrame_CfdDomain", "DynFrame_CfdMeshFromCad",
-               "DynFrame_CfdFlow", "DynFrame_CfdCase", "DynFrame_CfdView"]
+               "DynFrame_CfdFlowInternal", "DynFrame_CfdGallery",
+               "DynFrame_CfdExamples", "DynFrame_CfdDomain",
+               "DynFrame_CfdMeshFromCad", "DynFrame_CfdFlow",
+               "DynFrame_CfdCase", "DynFrame_CfdView"]
         analysis = panel + structure + loads + results + cfd
         io = ["DynFrame_ExportStep", "DynFrame_ExportStl"]
         setup = ["DynFrame_InventorNav"]

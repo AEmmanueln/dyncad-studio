@@ -36,6 +36,10 @@ try:
     import dynframe_cfd_materials as cfdmat  # fluid/solid material library
 except Exception:
     cfdmat = None
+try:
+    import dynframe_cfd_examples as cfdex   # curated parameterised example cases
+except Exception:
+    cfdex = None
 
 from PySide import QtGui
 try:
@@ -9025,6 +9029,12 @@ class _CfdExamplesPanel:
         lay.addWidget(tip)
         form = QW.QFormLayout()
         self._cat = QW.QComboBox(); self._cat.addItems(sorted(self._by_cat.keys()))
+        try:                           # start on a fast, visual category, not XiFluid
+            for pref in ("incompressibleFluid", "fluid", "incompressibleVoF"):
+                if pref in self._by_cat:
+                    self._cat.setCurrentText(pref); break
+        except Exception:
+            pass
         self._cat.currentIndexChanged.connect(self._fill_cases)
         form.addRow("Category", self._cat)
         self._case = QW.QComboBox()
@@ -9105,13 +9115,184 @@ class _CfdExamplesPanel:
         _close_task_dialog(); return True
 
 
+class _CfdGalleryPanel:
+    """Curated, fully-parameterised CFD examples (SimScale-style templates): pick a
+    case, set its *physical* parameters (speeds, viscosity, size, mesh, turbulence)
+    and Run - it meshes + solves on OpenFOAM and opens in ParaView. Non-modal."""
+    def __init__(self, catalog):
+        self._catalog = catalog
+        self._cur = None
+        self._widgets = {}
+        self.form = self._build()
+
+    def _build(self):
+        w = QW.QWidget(); w.setObjectName("cfdPanel")
+        w.setWindowTitle("CFD examples")
+        pal = (cfdui.PALETTE if cfdui is not None else
+               {"accent": "#17a2b8", "subtext": "#9aa7b4"})
+        if cfdui is not None:
+            try:
+                w.setStyleSheet(cfdui.stylesheet())
+            except Exception:
+                pass
+        lay = QW.QVBoxLayout(w)
+        hdr = QW.QLabel("CFD examples (templates)")
+        hdr.setStyleSheet("background:%s;color:#fff;font-weight:700;font-size:14px;"
+                          "padding:7px 10px;" % pal["accent"])
+        lay.addWidget(hdr)
+        top = QW.QFormLayout()
+        self._pick = QW.QComboBox()
+        self._pick.addItems([e["title"] for e in self._catalog])
+        self._pick.currentIndexChanged.connect(self._load_params)
+        top.addRow("Example", self._pick)
+        lay.addLayout(top)
+        self._help = QW.QLabel(""); self._help.setWordWrap(True)
+        self._help.setStyleSheet("color:%s;padding:4px 2px;" % pal["subtext"])
+        lay.addWidget(self._help)
+        self._host = QW.QWidget()
+        self._pform = QW.QFormLayout(self._host)
+        self._pform.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(self._host)
+        eng = QW.QFormLayout()
+        self._distro = QW.QLineEdit(); self._distro.setPlaceholderText("default")
+        eng.addRow("WSL distro", self._distro)
+        self._env = QW.QLineEdit(); self._env.setText(cfd.DEFAULT_OF_ENV)
+        eng.addRow("OpenFOAM env", self._env)
+        lay.addLayout(eng)
+        run = QW.QPushButton("Run on OpenFOAM + open in ParaView")
+        run.clicked.connect(self._run)
+        lay.addWidget(run)
+        self._status = QW.QLabel(""); self._status.setWordWrap(True)
+        lay.addWidget(self._status)
+        lay.addStretch(1)
+        self._load_params()
+        return w
+
+    def _mk(self, pp):
+        if pp.get("kind") == "combo":
+            c = QW.QComboBox(); c.addItems([str(o) for o in pp.get("options", [])])
+            c.setCurrentText(str(pp.get("default")))
+            return c
+        e = QW.QLineEdit(); e.setText(str(pp.get("default")))
+        return e
+
+    def _load_params(self, *a):
+        i = self._pick.currentIndex()
+        if i < 0 or i >= len(self._catalog):
+            return
+        spec = self._catalog[i]; self._cur = spec
+        self._help.setText(spec.get("help", ""))
+        while self._pform.count():                 # clear old rows + widgets
+            item = self._pform.takeAt(0)
+            wd = item.widget()
+            if wd is not None:
+                wd.deleteLater()
+        self._widgets = {}
+        for pp in spec.get("params", []):
+            widget = self._mk(pp)
+            self._pform.addRow(pp.get("label", pp["key"]), widget)
+            self._widgets[pp["key"]] = (pp, widget)
+
+    def _collect(self):
+        out = {}
+        for key, (pp, widget) in self._widgets.items():
+            if pp.get("kind") == "combo":
+                out[key] = widget.currentText()
+                continue
+            txt = widget.text().strip()
+            try:
+                out[key] = int(txt) if pp.get("kind") == "int" else float(txt)
+            except (TypeError, ValueError):
+                out[key] = pp.get("default")
+        return out
+
+    def _run(self):
+        if self._cur is None or cfdex is None:
+            self._status.setText("Examples module not available."); return
+        key = self._cur["key"]
+        params = self._collect()
+        name = "cfdex_" + key
+        of_env = str(self._env.text() or cfd.DEFAULT_OF_ENV).strip()
+        distro = str(self._distro.text() or "").strip()
+        try:
+            files = cfdex.build_example(key, params)
+        except Exception as e:
+            self._status.setText("Could not build the case: %s" % e); return
+        outdir = _cfd_outdir()
+        stage = os.path.join(outdir, name + "_src")
+        try:
+            for fn, txt in files.items():
+                _write_lf(os.path.join(stage, fn), txt)
+        except Exception as e:
+            self._status.setText("Could not stage files: %s" % e); return
+        win_out = os.path.join(outdir, name)
+        try:
+            script = cfdgen.build_example_run_script(
+                {"of_env": of_env, "name": name, "stage_win": stage,
+                 "win_out": win_out})
+            import subprocess
+            subprocess.Popen(cfd.wsl_run_argv(script, distro),
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             stdin=subprocess.DEVNULL)
+        except Exception as e:
+            self._status.setText("Could not start: %s" % e); return
+        self._status.setText(
+            "Running '%s' on OpenFOAM - ParaView opens when it finishes (usually "
+            "seconds). Change any parameter and Run again to compare. Log: "
+            "~/dynframe_cfd/%s/log.dynframe" % (self._cur["title"], name))
+
+    def getStandardButtons(self):
+        return int(QW.QDialogButtonBox.Close)
+
+    def accept(self):
+        _close_task_dialog(); return True
+
+    def reject(self):
+        _close_task_dialog(); return True
+
+
+class CfdGallery:
+    def GetResources(self):
+        return {"Pixmap": _icon("cfd"),
+                "MenuText": "CFD Examples (templates)",
+                "ToolTip": "Curated, parameterised CFD examples - lid-driven "
+                           "cavity, channel flow, backward-facing step - built and "
+                           "solved on OpenFOAM and opened in ParaView. Change the "
+                           "physical parameters (speed, viscosity, size, mesh, "
+                           "turbulence) and re-run, SimScale-style.",
+                "Accel": "C, G"}
+
+    def IsActive(self):
+        return cfd is not None and cfdgen is not None and cfdex is not None
+
+    def Activated(self):
+        if cfd is None or cfdgen is None or cfdex is None:
+            err("The CFD example modules failed to load."); return
+        catalog = cfdex.example_catalog()
+        Ctrl = getattr(FreeCADGui, "Control", None)
+        if Ctrl is not None and hasattr(Ctrl, "showDialog"):
+            busy = False
+            try:
+                busy = bool(hasattr(Ctrl, "activeDialog") and Ctrl.activeDialog())
+            except Exception:
+                busy = False
+            if not busy:
+                try:
+                    Ctrl.showDialog(_CfdGalleryPanel(catalog)); return
+                except Exception:
+                    pass
+        info("Open CFD Examples from the FreeCAD GUI (it needs the Task panel). "
+             "%d curated templates are available." % len(catalog))
+
+
 class CfdExamples:
     def GetResources(self):
         return {"Pixmap": _icon("cfd"),
-                "MenuText": "OpenFOAM Examples (tutorials)",
-                "ToolTip": "Browse the built-in OpenFOAM tutorial cases, change "
-                           "their time controls, run one on OpenFOAM and open it "
-                           "in ParaView - a parameterisable example gallery.",
+                "MenuText": "OpenFOAM Tutorials (all)",
+                "ToolTip": "Browse every built-in OpenFOAM tutorial case (260+), "
+                           "change its time controls, run it on OpenFOAM and open "
+                           "it in ParaView. For curated, richly-parameterised "
+                           "cases use 'CFD Examples (templates)' instead.",
                 "Accel": "C, E"}
 
     def IsActive(self):
@@ -12323,6 +12504,7 @@ _add("DynFrame_CfdDomain", CfdDomain)
 _add("DynFrame_CfdMeshFromCad", CfdMeshFromCad)
 _add("DynFrame_CfdFlow", CfdFlow)
 _add("DynFrame_CfdView", CfdView)
+_add("DynFrame_CfdGallery", CfdGallery)
 _add("DynFrame_CfdExamples", CfdExamples)
 _add("DynFrame_RunAnalysis", RunAnalysis)
 _add("DynFrame_ModalAnalysis", ModalAnalysis)

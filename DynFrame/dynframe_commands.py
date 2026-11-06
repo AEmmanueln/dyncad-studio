@@ -7398,32 +7398,31 @@ def _cfd_pick_material(node):
         {"key": "rho", "label": "Custom density rho (kg/m3; 0 = library)",
          "kind": "float", "default": 0.0, "decimals": 4},
     ]
-    vals = form_dialog("Material - fluid", fields,
-                       **_cfd_dialog_kwargs(
-                           "Material (fluid)",
-                           "Pick a library fluid or type your own viscosity and "
-                           "density; the solver uses these."))
-    if not vals:
-        return
-    f = cfdmat.fluid_by_name(vals.get("fluid")) or cfdmat.FLUIDS[0]
-    nu = float(vals.get("nu") or 0.0) or f["nu"]
-    rho = float(vals.get("rho") or 0.0) or f["rho"]
-    custom = (nu != f["nu"]) or (rho != f["rho"])
-    doc = FreeCAD.ActiveDocument
-    cont = _cfd_study_container(doc, node)
-    for tgt in (node, cont):
-        if tgt is not None:
-            _cfd_set_str(tgt, "CfdFluid", "custom" if custom else f["key"])
-            _cfd_set_str(tgt, "CfdNu", _g(nu))
-            _cfd_set_str(tgt, "CfdRho", _g(rho))
-    _cfd_mark_node_done(node, "Materials")
-    try:
-        doc.recompute()
-    except Exception:
-        pass
-    info("Fluid set to %s (nu = %g m2/s, rho = %g kg/m3). The flow solve now uses "
-         "this viscosity." %
-         ("custom" if custom else f["name"], nu, rho))
+    def _apply(vals):
+        f = cfdmat.fluid_by_name(vals.get("fluid")) or cfdmat.FLUIDS[0]
+        nu = float(vals.get("nu") or 0.0) or f["nu"]
+        rho = float(vals.get("rho") or 0.0) or f["rho"]
+        custom = (nu != f["nu"]) or (rho != f["rho"])
+        doc = FreeCAD.ActiveDocument
+        cont = _cfd_study_container(doc, node)
+        for tgt in (node, cont):
+            if tgt is not None:
+                _cfd_set_str(tgt, "CfdFluid", "custom" if custom else f["key"])
+                _cfd_set_str(tgt, "CfdNu", _g(nu))
+                _cfd_set_str(tgt, "CfdRho", _g(rho))
+        _cfd_mark_node_done(node, "Materials")
+        try:
+            doc.recompute()
+        except Exception:
+            pass
+        info("Fluid set to %s (nu = %g m2/s, rho = %g kg/m3). The flow solve now "
+             "uses this viscosity." %
+             ("custom" if custom else f["name"], nu, rho))
+
+    _cfd_show_step_panel(
+        "Material (fluid)",
+        "Pick a library fluid or type your own viscosity and density; the solver "
+        "uses these.", fields, _apply)
 
 
 def _cfd_study_nu(doc, default=1.5e-5):
@@ -7496,42 +7495,142 @@ def _cfd_resolve_solid(doc):
     return None
 
 
-def _cfd_pick_geometry(node):
-    """Geometry step: choose the solid that is the flow region for this study."""
-    doc = FreeCAD.ActiveDocument
-    solid = None
+def _cfd_zoom_selection():
+    """Zoom the 3D view to the current selection (SimScale 'zoom to part'); falls
+    back to fit-all. Safe with no GUI."""
     try:
-        sel = [o for o in FreeCADGui.Selection.getSelection()
-               if getattr(o, "Shape", None) is not None]
-        if sel:
-            solid = sel[0]
+        FreeCADGui.SendMsgToActiveView("ViewSelection")
     except Exception:
-        pass
-    if solid is None:
-        solids = _cfd_doc_solids(doc)
-        if not solids:
-            info("Create or import a solid first (Part workbench -> Cube, or your "
-                 "CAD part), then open Geometry."); return
-        names = [getattr(o, "Label", o.Name) for o in solids]
-        vals = form_dialog("Geometry", [
-            {"key": "_i", "kind": "info", "default":
-             "Choose the solid that is the flow region (the part the fluid flows "
-             "through or around). Tip: select it in the tree first."},
-            {"key": "g", "label": "Solid", "kind": "combo",
-             "options": names, "default": names[0]}],
-            **_cfd_dialog_kwargs("Geometry", "Pick the simulation geometry."))
-        if not vals:
-            return
-        solid = next((o for o in solids
-                      if getattr(o, "Label", o.Name) == vals.get("g")), solids[0])
-    _cfd_study_set(doc, node, CfdGeometry=getattr(solid, "Name", ""))
-    _cfd_mark_node_done(node, "Geometry")
+        try:
+            FreeCADGui.SendMsgToActiveView("ViewFit")
+        except Exception:
+            pass
+
+
+_CFD_IMPORT_LABEL = "⬏  Import a CAD file (STEP / IGES / BREP)…"
+
+
+def _cfd_import_cad(doc):
+    """Import a CAD file (STEP / IGES / BREP) into `doc` so it can be the flow
+    geometry - lets you bring in complex / specific parts, as SimScale does.
+    Returns the imported solid (the largest new solid body), or None."""
+    path = ""
+    try:
+        r = QW.QFileDialog.getOpenFileName(
+            _mw(), "Import CAD geometry", "",
+            "CAD files (*.step *.stp *.iges *.igs *.brep *.brp);;"
+            "STEP (*.step *.stp);;IGES (*.iges *.igs);;BREP (*.brep *.brp);;"
+            "All files (*)")
+        path = r[0] if isinstance(r, (tuple, list)) else r
+    except Exception:
+        path = ""
+    if not path:
+        return None
+    before = set(id(o) for o in getattr(doc, "Objects", []))
+    try:
+        import Part
+        Part.insert(path, doc.Name)
+    except Exception:
+        try:
+            import Import
+            Import.insert(path, doc.Name)
+        except Exception as e:
+            err("Could not import '%s':\n%s" % (path, e)); return None
     try:
         doc.recompute()
     except Exception:
         pass
-    info("Geometry set to '%s'. Next: open Boundary conditions and tag its faces."
-         % getattr(solid, "Label", "solid"))
+    new = [o for o in getattr(doc, "Objects", [])
+           if id(o) not in before and getattr(o, "Shape", None) is not None
+           and getattr(o.Shape, "Faces", None)]
+    if not new:
+        info("Imported '%s', but it has no solid body to simulate. Use a STEP / "
+             "IGES / BREP file that contains a solid." % os.path.basename(path))
+        return None
+
+    def _vol(o):
+        try:
+            return float(getattr(global_shape(o), "Volume", 0.0) or 0.0)
+        except Exception:
+            return 0.0
+    new.sort(key=_vol, reverse=True)       # the main body of an assembly first
+    return new[0]
+
+
+def _cfd_apply_geometry(node, solid):
+    """Store `solid` as the study geometry, mark the step done, then select and
+    zoom to it so the chosen part fills the 3D view (SimScale 'focus on part')."""
+    doc = FreeCAD.ActiveDocument
+    _cfd_study_set(doc, node, CfdGeometry=getattr(solid, "Name", ""))
+    _cfd_mark_node_done(node, "Geometry")
+    try:
+        FreeCADGui.Selection.clearSelection()
+        FreeCADGui.Selection.addSelection(solid)
+    except Exception:
+        pass
+    _cfd_zoom_selection()
+    try:
+        doc.recompute()
+    except Exception:
+        pass
+    info("Geometry set to '%s'. Next: open Boundary conditions and click its faces "
+         "in the 3D view to tag inlet / outlet / walls." %
+         getattr(solid, "Label", "solid"))
+
+
+def _cfd_pick_geometry(node):
+    """Geometry step (docked, SimScale-style): use the part you have selected, pick
+    an already-imported solid, or import your own complex / specific CAD. The
+    chosen part is selected and zoomed so you can inspect it."""
+    doc = FreeCAD.ActiveDocument
+    # 1) a solid selected in the 3D view or tree wins - immediate, like clicking
+    #    the part in SimScale.
+    try:
+        sel = [o for o in FreeCADGui.Selection.getSelection()
+               if getattr(o, "Shape", None) is not None]
+        if sel:
+            _cfd_apply_geometry(node, sel[0]); return
+    except Exception:
+        pass
+    # 2) nothing in the document yet -> go straight to CAD import.
+    solids = _cfd_doc_solids(doc)
+    if not solids:
+        imported = _cfd_import_cad(doc)
+        if imported is None:
+            info("Create a solid (Part workbench -> Cube) or import your CAD "
+                 "(STEP / IGES / BREP), then open Geometry."); return
+        _cfd_apply_geometry(node, imported); return
+    # 3) a docked panel: pick an existing solid or import a new one.
+    names = [getattr(o, "Label", o.Name) for o in solids]
+    options = names + [_CFD_IMPORT_LABEL]
+    fields = [
+        {"key": "_i", "kind": "info", "default":
+         "Choose the solid that is the flow region (the part the fluid flows "
+         "through or around), or import your own complex CAD. Tip: select a part "
+         "in the 3D view or tree before opening Geometry and it is used directly."},
+        {"key": "g", "label": "Geometry (solid)", "kind": "combo",
+         "options": options, "default": names[0]},
+    ]
+
+    def _apply(vals):
+        d = FreeCAD.ActiveDocument
+        choice = vals.get("g") or names[0]
+        if choice == _CFD_IMPORT_LABEL:
+            solid = _cfd_import_cad(d)
+            if solid is None:
+                info("No geometry imported. Open Geometry again to pick or import "
+                     "a part."); return
+        else:
+            cur = _cfd_doc_solids(d)
+            solid = next((o for o in cur
+                          if getattr(o, "Label", o.Name) == choice), None)
+        if solid is None:
+            info("Could not find '%s'. Open Geometry again." % choice); return
+        _cfd_apply_geometry(node, solid)
+
+    _cfd_show_step_panel(
+        "Geometry", "Pick the simulation geometry, or import your own CAD.",
+        fields, _apply)
 
 
 def _cfd_pick_numerics(node):
@@ -7561,28 +7660,28 @@ def _cfd_pick_numerics(node):
         {"key": "pr", "label": "Prandtl number", "kind": "float",
          "default": float(_cfd_study_get(doc, "CfdPr", "0.71") or 0.71), "decimals": 3},
     ]
-    vals = form_dialog("Numerics", fields,
-                       **_cfd_dialog_kwargs("Numerics",
-                                            "Turbulence, accuracy, heat transfer."))
-    if not vals:
-        return
-    _cfd_study_set(doc, node, CfdTurbulence=vals.get("turb", "kOmegaSST"),
-                   CfdSteady=("1" if vals.get("time") == "Steady-state" else "0"),
-                   CfdIntensity=_g(vals.get("ti", 5.0)),
-                   CfdSecondOrder=("1" if vals.get("so") == "Yes" else "0"),
-                   CfdHeat=("1" if vals.get("heat") == "Yes" else "0"),
-                   CfdTin=_g(vals.get("tin", 300.0)),
-                   CfdTwall=_g(vals.get("twall", 350.0)),
-                   CfdPr=_g(vals.get("pr", 0.71)))
-    _cfd_mark_node_done(node, "Numerics")
-    try:
-        doc.recompute()
-    except Exception:
-        pass
-    info("Numerics: %s, %s, intensity %.1f%%%s%s."
-         % (vals.get("turb"), vals.get("time"), float(vals.get("ti", 5.0)),
-            ", 2nd-order" if vals.get("so") == "Yes" else "",
-            ", heat transfer on" if vals.get("heat") == "Yes" else ""))
+    def _apply(vals):
+        d = FreeCAD.ActiveDocument
+        _cfd_study_set(d, node, CfdTurbulence=vals.get("turb", "kOmegaSST"),
+                       CfdSteady=("1" if vals.get("time") == "Steady-state" else "0"),
+                       CfdIntensity=_g(vals.get("ti", 5.0)),
+                       CfdSecondOrder=("1" if vals.get("so") == "Yes" else "0"),
+                       CfdHeat=("1" if vals.get("heat") == "Yes" else "0"),
+                       CfdTin=_g(vals.get("tin", 300.0)),
+                       CfdTwall=_g(vals.get("twall", 350.0)),
+                       CfdPr=_g(vals.get("pr", 0.71)))
+        _cfd_mark_node_done(node, "Numerics")
+        try:
+            d.recompute()
+        except Exception:
+            pass
+        info("Numerics: %s, %s, intensity %.1f%%%s%s."
+             % (vals.get("turb"), vals.get("time"), float(vals.get("ti", 5.0)),
+                ", 2nd-order" if vals.get("so") == "Yes" else "",
+                ", heat transfer on" if vals.get("heat") == "Yes" else ""))
+
+    _cfd_show_step_panel("Numerics", "Turbulence, accuracy, heat transfer.",
+                         fields, _apply)
 
 
 def _cfd_pick_control(node):
@@ -7600,22 +7699,22 @@ def _cfd_pick_control(node):
         {"key": "res", "label": "Convergence residual", "kind": "float",
          "default": 1e-4, "decimals": 8},
     ]
-    vals = form_dialog("Simulation control", fields,
-                       **_cfd_dialog_kwargs("Simulation control",
-                                            "Iterations, output and convergence."))
-    if not vals:
-        return
-    _cfd_study_set(doc, node, CfdIters=str(int(vals.get("iters", 1000))),
-                   CfdWrite=str(int(vals.get("write", 200))),
-                   CfdResidual=_g(vals.get("res", 1e-4)))
-    _cfd_mark_node_done(node, "Simulation control")
-    try:
-        doc.recompute()
-    except Exception:
-        pass
-    info("Simulation control: %d iterations, write every %d, converge at %g."
-         % (int(vals.get("iters", 1000)), int(vals.get("write", 200)),
-            float(vals.get("res", 1e-4))))
+    def _apply(vals):
+        d = FreeCAD.ActiveDocument
+        _cfd_study_set(d, node, CfdIters=str(int(vals.get("iters", 1000))),
+                       CfdWrite=str(int(vals.get("write", 200))),
+                       CfdResidual=_g(vals.get("res", 1e-4)))
+        _cfd_mark_node_done(node, "Simulation control")
+        try:
+            d.recompute()
+        except Exception:
+            pass
+        info("Simulation control: %d iterations, write every %d, converge at %g."
+             % (int(vals.get("iters", 1000)), int(vals.get("write", 200)),
+                float(vals.get("res", 1e-4))))
+
+    _cfd_show_step_panel("Simulation control",
+                         "Iterations, output and convergence.", fields, _apply)
 
 
 def _cfd_pick_mesh(node):
@@ -7641,30 +7740,34 @@ def _cfd_pick_mesh(node):
          "min": 0, "max": 12},
         {"key": "meshnow", "label": "Mesh and check quality now", "kind": "combo",
          "options": ["No", "Yes"], "default": "No"},
+        {"key": "showmesh", "label": "Show the mesh in ParaView", "kind": "combo",
+         "options": ["Yes", "No"], "default": "Yes"},
         {"key": "distro", "label": "WSL distro (blank = default)", "kind": "text", "default": ""},
         {"key": "env", "label": "OpenFOAM env (source)", "kind": "text", "default": cfd.DEFAULT_OF_ENV},
     ]
-    vals = form_dialog("Mesh", fields,
-                       **_cfd_dialog_kwargs("Mesh",
-                                            "Resolution, refinement, boundary layers."))
-    if not vals:
-        return
-    _cfd_study_set(doc, node, CfdCells=str(int(vals.get("cells", 20))),
-                   CfdRefineMin=str(int(vals.get("rmin", 1))),
-                   CfdRefineMax=str(int(vals.get("rmax", 2))),
-                   CfdLayers=str(int(vals.get("layers", 3))))
-    _cfd_mark_node_done(node, "Mesh")
-    try:
-        doc.recompute()
-    except Exception:
-        pass
-    if vals.get("meshnow") == "Yes":
-        _cfd_mesh_preview(doc, vals)
-    else:
-        info("Mesh: %d base cells, surface refinement %d-%d, %d boundary layers. "
-             "Set 'Mesh and check now = Yes' to preview quality, or go to Run."
-             % (int(vals.get("cells", 20)), int(vals.get("rmin", 1)),
-                int(vals.get("rmax", 2)), int(vals.get("layers", 3))))
+
+    def _apply(vals):
+        d = FreeCAD.ActiveDocument
+        _cfd_study_set(d, node, CfdCells=str(int(vals.get("cells", 20))),
+                       CfdRefineMin=str(int(vals.get("rmin", 1))),
+                       CfdRefineMax=str(int(vals.get("rmax", 2))),
+                       CfdLayers=str(int(vals.get("layers", 3))))
+        _cfd_mark_node_done(node, "Mesh")
+        try:
+            d.recompute()
+        except Exception:
+            pass
+        if vals.get("meshnow") == "Yes":
+            _cfd_mesh_preview(d, vals)
+        else:
+            info("Mesh: %d base cells, surface refinement %d-%d, %d boundary "
+                 "layers. Set 'Mesh and check quality now = Yes' to build it and "
+                 "see it in ParaView, or go to Run."
+                 % (int(vals.get("cells", 20)), int(vals.get("rmin", 1)),
+                    int(vals.get("rmax", 2)), int(vals.get("layers", 3))))
+
+    _cfd_show_step_panel("Mesh", "Resolution, refinement, boundary layers.",
+                         fields, _apply)
 
 
 def _cfd_mesh_preview(doc, vals):
@@ -7725,8 +7828,16 @@ def _cfd_mesh_preview(doc, vals):
         msg += "Max non-orthogonality: %.1f (good < 65).\n" % q["max_nonortho"]
     if q.get("max_skewness") is not None:
         msg += "Max skewness: %.2f (good < 4).\n" % q["max_skewness"]
-    msg += "\nMesh written to VTK (open in ParaView to inspect):\n  %s" \
-        % os.path.join(win_out, "VTK")
+    msg += "\nMesh written to VTK:\n  %s" % os.path.join(win_out, "VTK")
+    # Show the mesh in ParaView (SimScale-style) unless the user opted out.
+    if str(vals.get("showmesh", "Yes")) == "Yes" and q.get("cells"):
+        if _cfd_launch_paraview(name, distro):
+            msg += ("\n\nOpening the mesh in ParaView - click the case in the "
+                    "Pipeline, press Apply, then set the representation to "
+                    "'Surface With Edges' to see the cells.")
+        else:
+            msg += ("\n\nInstall ParaView in WSL (sudo apt install paraview) to "
+                    "view the mesh, or open the VTK folder above.")
     info(msg)
 
 
@@ -7897,32 +8008,30 @@ class CfdStudy:
             {"key": "phys", "label": "Study type (OpenFOAM physics)", "kind": "combo",
              "options": titles, "default": titles[0]},
         ]
-        vals = form_dialog("New CFD Study", fields,
-                           **_cfd_dialog_kwargs(
-                               "New CFD Study",
-                               "Pick the physics; DynFrame builds the SimScale-"
-                               "style simulation tree."))
-        if not vals:
-            return
-        study = cfdtree.find_study(vals.get("phys")) or cfdtree.study_types()[0]
-        doc = FreeCAD.ActiveDocument
-        doc.openTransaction("DynFrame: new CFD study")
-        try:
-            container = build_cfd_tree(doc, study)
-            doc.commitTransaction(); doc.recompute()
-        except Exception as e:
+        def _build(vals):
+            study = cfdtree.find_study(vals.get("phys")) or cfdtree.study_types()[0]
+            doc = FreeCAD.ActiveDocument
+            doc.openTransaction("DynFrame: new CFD study")
             try:
-                doc.abortTransaction()
-            except Exception:
-                pass
-            err("Could not build the CFD study tree: %s" % e); return
-        info("Created the CFD study '%s' in the Model panel.\n\nIts simulation "
-             "tree has a node for each setup step (Geometry, Materials, Boundary "
-             "conditions, Numerics, Simulation control, Mesh, Run), SimScale-"
-             "style. Double-click a node to set it up - start with 'Run' to mesh "
-             "and solve the whole study end to end (select the solid first).\n\n"
-             "Physics: %s (%s)." % (study.get("title"), study.get("id"),
-                                    study.get("use", "")))
+                build_cfd_tree(doc, study)
+                doc.commitTransaction(); doc.recompute()
+            except Exception as e:
+                try:
+                    doc.abortTransaction()
+                except Exception:
+                    pass
+                err("Could not build the CFD study tree: %s" % e); return
+            info("Created the CFD study '%s' in the Model panel.\n\nIts simulation "
+                 "tree has a node for each setup step (Geometry, Materials, "
+                 "Boundary conditions, Numerics, Simulation control, Mesh, Run), "
+                 "SimScale-style. Double-click a node to set it up - start with "
+                 "Geometry to pick or import your part.\n\nPhysics: %s (%s)." %
+                 (study.get("title"), study.get("id"), study.get("use", "")))
+
+        _cfd_show_step_panel(
+            "New CFD Study",
+            "Pick the physics; DynFrame builds the SimScale-style simulation "
+            "tree.", fields, _build)
 
 
 def _cfd_collect_bc_assignments(doc, solid_name):
@@ -8318,6 +8427,98 @@ def _cfd_build_mesh_dicts(doc, solid, assigns, bb, Lm, stage, n, nlay, rmin, rma
     return used, is_box
 
 
+def _cfd_run_internal_flow(doc, solid, assigns, bb, vals0, vals):
+    """Stage and (optionally) solve the internal-flow case from the collected
+    panel values, then report. Shared by the docked Run panel and its modal
+    fallback so both run exactly the same validated OpenFOAM pipeline."""
+    name = (str(vals.get("name") or "flowint1").strip().replace(" ", "_")) or "flowint1"
+    n = max(4, int(vals["ncells"]))
+    Lm = max(bb.XLength, bb.YLength, bb.ZLength, 1e-6)
+    intensity = float(_cfd_study_get(doc, "CfdIntensity", "5") or 5) / 100.0
+    of_env = str(vals.get("env") or cfd.DEFAULT_OF_ENV).strip()
+    distro = str(vals.get("distro") or "").strip()  # blank => WSL default distro
+    outdir = _cfd_outdir()
+    stage = os.path.join(outdir, name + "_src")
+    win_out = os.path.join(outdir, name)
+    try:
+        nlay = int(float(_cfd_study_get(doc, "CfdLayers", "3") or 3))
+        rmin = int(float(_cfd_study_get(doc, "CfdRefineMin", "1") or 1))
+        rmax = int(float(_cfd_study_get(doc, "CfdRefineMax", "2") or 2))
+        used, is_box = _cfd_build_mesh_dicts(
+            doc, solid, assigns, bb, Lm, stage, n, nlay, rmin, rmax)
+        if not used:
+            err("Could not build the mesh (no patches)."); return
+        mesher = ("blockMesh (box)" if is_box else
+                  "snappyHexMesh (%d layers, refinement %d-%d)"
+                  % (nlay, rmin, rmax))
+        patches = [{"name": k, "bc": k, "value": vals0.get(k, 0.0)}
+                   for k in sorted(used)]
+        casefiles, k0, om0 = cfdgen.bc_field_files(
+            patches, nu=float(vals["nu"]), intensity=intensity, L=Lm)
+        turb = _cfd_study_get(doc, "CfdTurbulence", "kOmegaSST")
+        casefiles["momentumTransport"] = cfdgen.momentum_transport_dict(turb)
+        heat = _cfd_study_get(doc, "CfdHeat", "") == "1"
+        so = _cfd_study_get(doc, "CfdSecondOrder", "") == "1"
+        casefiles["fvSchemes"] = cfdgen.fv_schemes_simple(second_order=so, heat=heat)
+        casefiles["fvSolution"] = cfdgen.fv_solution_simple(heat=heat)
+        write = int(float(_cfd_study_get(doc, "CfdWrite", "")
+                          or max(1, int(int(vals["iters"]) / 5))))
+        funcs = ""
+        if heat:
+            Pr = float(_cfd_study_get(doc, "CfdPr", "0.71") or 0.71)
+            T_in = float(_cfd_study_get(doc, "CfdTin", "300") or 300)
+            T_wall = float(_cfd_study_get(doc, "CfdTwall", "350") or 350)
+            casefiles["T"] = cfdgen.temperature_field(
+                patches, T_in=T_in, T_wall=T_wall, heated=True)
+            funcs = cfdgen.scalar_transport_functions(float(vals["nu"]) / max(Pr, 1e-6))
+        casefiles["controlDict"] = cfdgen.control_dict_simple(
+            "incompressibleFluid", int(vals["iters"]), max(1, write),
+            functions=funcs)
+        for fn, txt in casefiles.items():
+            _write_lf(os.path.join(stage, fn), txt)
+    except Exception as e:
+        err("Could not write the case files to %s:\n%s" % (stage, e)); return
+    if is_box:
+        fs = cfdgen.build_internal_flow_script(
+            {"of_env": of_env, "name": name, "stage_win": stage,
+             "win_out": win_out, "latest": True})
+    else:
+        fs = cfdgen.build_snappy_flow_script(
+            {"of_env": of_env, "name": name, "stage_win": stage,
+             "win_out": win_out, "patch_names": sorted(used), "latest": True})
+    fpath = os.path.join(outdir, "run_%s.sh" % name)
+    try:
+        _write_lf(fpath, fs)
+    except Exception as e:
+        err("Could not write the run script:\n%s" % e); return
+    flow_cmd = "bash %s" % cfd.win_to_wsl(fpath, distro)
+    _cfd_record(FreeCAD.ActiveDocument, name, [
+        ("Analysis", "Internal flow (RANS kOmegaSST) from assigned faces"),
+        ("Geometry", getattr(solid, "Label", "solid")),
+        ("Patches", ", ".join(sorted(used))),
+        ("Inlet k / omega", "%.4g / %.4g" % (k0, om0)),
+        ("Run (paste in WSL)", flow_cmd),
+        ("Then open in ParaView", os.path.join(win_out, "VTK")),
+        ("Run script", fpath), ("Staged files", stage)])
+    # Solve now (blocking) and report convergence - the SimScale "job status".
+    # A box solve is seconds; a big case should be run from the terminal cmd.
+    status = ""
+    if vals.get("run") == "Yes":
+        status = _cfd_run_and_report(fs, distro, win_out)
+        ran_ok = ("Results written to" in status)
+        if vals.get("pv", "Yes") == "Yes" and ran_ok:
+            if _cfd_launch_paraview(name, distro):
+                status += ("\n\nOpening the result in ParaView - click the case "
+                           "in the Pipeline, press Apply, and colour by U, p"
+                           + (" or T" if heat else "") + ".")
+    info("Internal-flow case '%s' from your face BCs on '%s'.\n\nPatches: %s.\n"
+         "Mesh: %s. Solver: incompressibleFluid (%s).%s\n\nTo (re)run it "
+         "yourself, in your WSL OpenFOAM terminal:\n  %s\n\nResults for "
+         "ParaView:\n  %s" %
+         (name, getattr(solid, "Label", "solid"), ", ".join(sorted(used)),
+          mesher, turb, status, flow_cmd, os.path.join(win_out, "VTK")))
+
+
 class CfdFlowInternal:
     def GetResources(self):
         return {"Pixmap": _icon("cfd"),
@@ -8383,99 +8584,12 @@ class CfdFlowInternal:
             {"key": "pv", "label": "Open result in ParaView when done", "kind": "combo",
              "options": ["Yes", "No"], "default": "Yes"},
         ]
-        vals = form_dialog("Run Flow from BCs (internal)", fields,
-                           **_cfd_dialog_kwargs(
-                               "Internal Flow from BCs",
-                               "Mesh the solid interior (blockMesh for a box, "
-                               "snappyHexMesh otherwise) and solve."))
-        if not vals:
-            return
-        name = (str(vals.get("name") or "flowint1").strip().replace(" ", "_")) or "flowint1"
-        n = max(4, int(vals["ncells"]))
-        Lm = max(bb.XLength, bb.YLength, bb.ZLength, 1e-6)
-        intensity = float(_cfd_study_get(doc, "CfdIntensity", "5") or 5) / 100.0
-        of_env = str(vals.get("env") or cfd.DEFAULT_OF_ENV).strip()
-        distro = str(vals.get("distro") or "").strip()  # blank => WSL default distro
-        outdir = _cfd_outdir()
-        stage = os.path.join(outdir, name + "_src")
-        win_out = os.path.join(outdir, name)
-        try:
-            nlay = int(float(_cfd_study_get(doc, "CfdLayers", "3") or 3))
-            rmin = int(float(_cfd_study_get(doc, "CfdRefineMin", "1") or 1))
-            rmax = int(float(_cfd_study_get(doc, "CfdRefineMax", "2") or 2))
-            used, is_box = _cfd_build_mesh_dicts(
-                doc, solid, assigns, bb, Lm, stage, n, nlay, rmin, rmax)
-            if not used:
-                err("Could not build the mesh (no patches)."); return
-            mesher = ("blockMesh (box)" if is_box else
-                      "snappyHexMesh (%d layers, refinement %d-%d)"
-                      % (nlay, rmin, rmax))
-            patches = [{"name": k, "bc": k, "value": vals0.get(k, 0.0)}
-                       for k in sorted(used)]
-            casefiles, k0, om0 = cfdgen.bc_field_files(
-                patches, nu=float(vals["nu"]), intensity=intensity, L=Lm)
-            turb = _cfd_study_get(doc, "CfdTurbulence", "kOmegaSST")
-            casefiles["momentumTransport"] = cfdgen.momentum_transport_dict(turb)
-            heat = _cfd_study_get(doc, "CfdHeat", "") == "1"
-            so = _cfd_study_get(doc, "CfdSecondOrder", "") == "1"
-            casefiles["fvSchemes"] = cfdgen.fv_schemes_simple(second_order=so, heat=heat)
-            casefiles["fvSolution"] = cfdgen.fv_solution_simple(heat=heat)
-            write = int(float(_cfd_study_get(doc, "CfdWrite", "")
-                              or max(1, int(int(vals["iters"]) / 5))))
-            funcs = ""
-            if heat:
-                Pr = float(_cfd_study_get(doc, "CfdPr", "0.71") or 0.71)
-                T_in = float(_cfd_study_get(doc, "CfdTin", "300") or 300)
-                T_wall = float(_cfd_study_get(doc, "CfdTwall", "350") or 350)
-                casefiles["T"] = cfdgen.temperature_field(
-                    patches, T_in=T_in, T_wall=T_wall, heated=True)
-                funcs = cfdgen.scalar_transport_functions(float(vals["nu"]) / max(Pr, 1e-6))
-            casefiles["controlDict"] = cfdgen.control_dict_simple(
-                "incompressibleFluid", int(vals["iters"]), max(1, write),
-                functions=funcs)
-            for fn, txt in casefiles.items():
-                _write_lf(os.path.join(stage, fn), txt)
-        except Exception as e:
-            err("Could not write the case files to %s:\n%s" % (stage, e)); return
-        if is_box:
-            fs = cfdgen.build_internal_flow_script(
-                {"of_env": of_env, "name": name, "stage_win": stage,
-                 "win_out": win_out, "latest": True})
-        else:
-            fs = cfdgen.build_snappy_flow_script(
-                {"of_env": of_env, "name": name, "stage_win": stage,
-                 "win_out": win_out, "patch_names": sorted(used), "latest": True})
-        fpath = os.path.join(outdir, "run_%s.sh" % name)
-        try:
-            _write_lf(fpath, fs)
-        except Exception as e:
-            err("Could not write the run script:\n%s" % e); return
-        flow_cmd = "bash %s" % cfd.win_to_wsl(fpath, distro)
-        _cfd_record(FreeCAD.ActiveDocument, name, [
-            ("Analysis", "Internal flow (RANS kOmegaSST) from assigned faces"),
-            ("Geometry", getattr(solid, "Label", "solid")),
-            ("Patches", ", ".join(sorted(used))),
-            ("Inlet k / omega", "%.4g / %.4g" % (k0, om0)),
-            ("Run (paste in WSL)", flow_cmd),
-            ("Then open in ParaView", os.path.join(win_out, "VTK")),
-            ("Run script", fpath), ("Staged files", stage)])
-        # Solve now (blocking) and report convergence - the SimScale "job status".
-        # A box solve is seconds; a big case should be run from the terminal cmd.
-        status = ""
-        if vals.get("run") == "Yes":
-            status = _cfd_run_and_report(fs, distro, win_out)
-            ran_ok = ("Results written to" in status)
-            if vals.get("pv", "Yes") == "Yes" and ran_ok:
-                if _cfd_launch_paraview(name, distro):
-                    status += ("\n\nOpening the result in ParaView - click the case "
-                               "in the Pipeline, press Apply, and colour by U, p"
-                               + (" or T" if heat else "") + ".")
-        info("Internal-flow case '%s' from your face BCs on '%s'.\n\nPatches: %s.\n"
-             "Mesh: %s. Solver: incompressibleFluid (%s).%s\n\nTo (re)run it "
-             "yourself, in your WSL OpenFOAM terminal:\n  %s\n\nResults for "
-             "ParaView:\n  %s" %
-             (name, getattr(solid, "Label", "solid"), ", ".join(sorted(used)),
-              mesher, turb, status, flow_cmd, os.path.join(win_out, "VTK")))
+        _cfd_show_step_panel(
+            "Internal Flow from BCs",
+            "Mesh the solid interior (blockMesh for a box, snappyHexMesh "
+            "otherwise) and solve on OpenFOAM, then open the result in ParaView.",
+            fields,
+            lambda vals: _cfd_run_internal_flow(doc, solid, assigns, bb, vals0, vals))
 
 
 def _cfd_run_and_report(script, distro, win_out):
@@ -8781,6 +8895,119 @@ def _show_cfd_flow_panel(obj, pts, facets, bb, Lm, fields):
         return True
     except Exception:
         return False
+
+
+class _CfdStepTaskPanel:
+    """Generic docked Task panel for one CFD setup step - the SimScale / Autodesk-
+    CFD inline left-dock experience (a themed panel in the Tasks tab you can leave
+    open while you orbit, zoom and click in the 3D view) instead of a floating
+    modal pop-up that blocks everything. Renders the same `fields` spec as
+    form_dialog and calls on_accept(vals) when you click OK, so every setup step
+    shares one validated path."""
+
+    def __init__(self, title, subtitle, fields, on_accept):
+        self._title = title or "CFD"
+        self._subtitle = subtitle or ""
+        self._fields = fields or []
+        self._on_accept = on_accept
+        self._getters = {}
+        self.form = self._build()
+
+    def _build(self):
+        pal = (cfdui.PALETTE if cfdui is not None else
+               {"accent": "#17a2b8", "surface": "#2b313a", "subtext": "#9aa7b4",
+                "bg": "#21262d"})
+        root = QW.QWidget(); root.setObjectName("cfdPanel")
+        root.setWindowTitle(self._title)
+        if cfdui is not None:
+            try:
+                root.setStyleSheet(cfdui.stylesheet())
+            except Exception:
+                pass
+        outer = QW.QVBoxLayout(root)
+        outer.setContentsMargins(0, 0, 0, 0); outer.setSpacing(0)
+        banner = QW.QLabel(self._title)
+        banner.setStyleSheet("background:%s; color:#ffffff; font-size:15px; "
+                             "font-weight:700; padding:8px 10px;" % pal["accent"])
+        outer.addWidget(banner)
+        if self._subtitle:
+            sub = QW.QLabel(self._subtitle); sub.setWordWrap(True)
+            sub.setStyleSheet("background:%s; color:%s; padding:6px 10px;"
+                              % (pal["bg"], pal["subtext"]))
+            outer.addWidget(sub)
+        cont = QW.QWidget()
+        cont.setStyleSheet("background:%s;" % pal["surface"])
+        fl = QW.QFormLayout(cont)
+        fl.setContentsMargins(12, 10, 12, 12); fl.setSpacing(6)
+        for f in self._fields:
+            k = f.get("key"); kind = f.get("kind", "text")
+            w, getter = _cfd_make_widget(f)
+            if kind == "info":
+                try:
+                    w.setWordWrap(True)
+                except Exception:
+                    pass
+                fl.addRow(w)
+            else:
+                fl.addRow(f.get("label", k or ""), w)
+            if getter is not None:
+                self._getters[k] = getter
+        outer.addWidget(cont)
+        outer.addStretch(1)
+        return root
+
+    def getStandardButtons(self):
+        return int(QW.QDialogButtonBox.Ok | QW.QDialogButtonBox.Cancel)
+
+    def isAllowedAlterDocument(self):
+        return True
+
+    def _collect(self):
+        vals = {}
+        for k, g in self._getters.items():
+            try:
+                vals[k] = g()
+            except Exception:
+                pass
+        return vals
+
+    def accept(self):
+        vals = self._collect()
+        _close_task_dialog()
+        try:
+            if self._on_accept is not None:
+                self._on_accept(vals)
+        except Exception as e:
+            err("Could not apply this step: %s" % e)
+        return True
+
+    def reject(self):
+        _close_task_dialog()
+        return True
+
+
+def _cfd_show_step_panel(title, subtitle, fields, on_accept):
+    """Show one setup step as a docked Task panel (SimScale-style). Falls back to
+    the themed modal form only when the Task-panel control is unavailable (headless
+    / another dialog already open), so both paths run the SAME on_accept. Always
+    returns True - the step is handled here."""
+    Ctrl = getattr(FreeCADGui, "Control", None)
+    if Ctrl is not None and hasattr(Ctrl, "showDialog"):
+        busy = False
+        try:
+            busy = bool(hasattr(Ctrl, "activeDialog") and Ctrl.activeDialog())
+        except Exception:
+            busy = False
+        if not busy:
+            try:
+                Ctrl.showDialog(_CfdStepTaskPanel(title, subtitle, fields, on_accept))
+                return True
+            except Exception:
+                pass
+    vals = form_dialog(title, fields, **_cfd_dialog_kwargs(title, subtitle))
+    if vals:
+        on_accept(vals)
+    return True
 
 
 class CfdFlow:

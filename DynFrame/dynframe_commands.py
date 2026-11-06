@@ -7838,7 +7838,7 @@ def _cfd_mesh_preview(doc, vals):
         else:
             msg += ("\n\nInstall ParaView in WSL (sudo apt install paraview) to "
                     "view the mesh, or open the VTK folder above.")
-    info(msg)
+    _cfd_report("Mesh preview", msg)
 
 
 def mesher_name(is_box):
@@ -7868,6 +7868,8 @@ def _cfd_open_node(node):
             _cfd_pick_numerics(node)
         elif panel == "control":
             _cfd_pick_control(node)
+        elif panel == "bcedit":
+            _cfd_edit_bc(node)
         else:
             info("This step uses validated defaults; a dedicated panel is coming.")
     except Exception as e:
@@ -8084,6 +8086,15 @@ def _cfd_create_bc(doc, solid, bc, faces, value):
     _cfd_set_str(node, "CfdBCSolid", getattr(solid, "Name", ""))
     _cfd_set_str(node, "CfdBCFaces", ",".join(str(i) for i in faces))
     _cfd_set_str(node, "CfdBCValue", _g(value))
+    # Make the node double-click editable (SimScale-style: open it to change the
+    # type, value or faces, or delete it).
+    _cfd_set_str(node, "CfdPanel", "bcedit")
+    _CfdNodeObj(node)
+    try:
+        if getattr(node, "ViewObject", None) is not None:
+            _CfdNodeVP(node.ViewObject)
+    except Exception:
+        pass
     parent = _cfd_find_bc_node(doc)
     if parent is not None:
         try:
@@ -8264,6 +8275,259 @@ def _show_cfd_bc_panel():
         return True
     except Exception:
         return False
+
+
+def _cfd_node_faces(node):
+    """0-based face indices stored on a BC node."""
+    out = []
+    for x in str(getattr(node, "CfdBCFaces", "") or "").split(","):
+        x = x.strip()
+        if x.isdigit():
+            out.append(int(x))
+    return out
+
+
+def _cfd_update_bc_node(node, bc, faces, value):
+    """Apply an edit to an existing BC node: new type/value and (optionally) new
+    faces, then relabel and recolour the solid. `faces` None keeps the faces."""
+    doc = FreeCAD.ActiveDocument
+    doc.openTransaction("DynFrame: edit BC")
+    try:
+        _cfd_set_str(node, "CfdBCType", bc["key"])
+        _cfd_set_str(node, "CfdBCValue", _g(value))
+        if faces is not None:
+            fs = sorted(set(int(i) for i in faces))
+            _cfd_set_str(node, "CfdBCFaces", ",".join(str(i) for i in fs))
+        else:
+            fs = _cfd_node_faces(node)
+        try:
+            node.Label = "%s (%d face%s)" % (bc["label"], len(fs),
+                                             "" if len(fs) == 1 else "s")
+        except Exception:
+            pass
+        solid = doc.getObject(getattr(node, "CfdBCSolid", "") or "")
+        if solid is not None:
+            _cfd_recolor_solid(
+                solid, _cfd_collect_bc_assignments(doc, solid.Name))
+        doc.commitTransaction(); doc.recompute()
+        return True
+    except Exception as e:
+        try:
+            doc.abortTransaction()
+        except Exception:
+            pass
+        err("Could not update the boundary condition: %s" % e)
+        return False
+
+
+def _cfd_delete_bc_node(node):
+    """Remove a BC node and recolour its solid."""
+    doc = FreeCAD.ActiveDocument
+    solid_name = getattr(node, "CfdBCSolid", "") or ""
+    name = getattr(node, "Name", "")
+    doc.openTransaction("DynFrame: delete BC")
+    try:
+        doc.removeObject(name)
+        solid = doc.getObject(solid_name)
+        if solid is not None:
+            _cfd_recolor_solid(
+                solid, _cfd_collect_bc_assignments(doc, solid_name))
+        doc.commitTransaction(); doc.recompute()
+        return True
+    except Exception as e:
+        try:
+            doc.abortTransaction()
+        except Exception:
+            pass
+        err("Could not delete the boundary condition: %s" % e)
+        return False
+
+
+class _CfdBCEditPanel:
+    """Non-modal editor for an existing BC node (double-click it): change the
+    type, type any value (presets provided), optionally re-pick its faces from the
+    3D view, Apply - or Delete it. Keeps the SimScale docked-panel feel."""
+    def __init__(self, node):
+        self._node = node
+        self._picked = None          # None => keep the node's current faces
+        self.form = self._build()
+        self._obs = _CfdBCSelObserver(self)
+        try:
+            FreeCADGui.Selection.addObserver(self._obs)
+        except Exception:
+            self._obs = None
+
+    def _build(self):
+        w = QW.QWidget(); w.setObjectName("cfdPanel")
+        w.setWindowTitle("Edit boundary condition")
+        pal = (cfdui.PALETTE if cfdui is not None else
+               {"accent": "#17a2b8", "subtext": "#9aa7b4"})
+        if cfdui is not None:
+            try:
+                w.setStyleSheet(cfdui.stylesheet())
+            except Exception:
+                pass
+        lay = QW.QVBoxLayout(w)
+        hdr = QW.QLabel("Edit boundary condition")
+        hdr.setStyleSheet("background:%s;color:#fff;font-weight:700;font-size:14px;"
+                          "padding:7px 10px;" % pal["accent"])
+        lay.addWidget(hdr)
+        tip = QW.QLabel("Change the type or value (pick a preset or type your own). "
+                        "To move it, select new faces in the 3D view and click "
+                        "'Use selected faces'. Apply to save, or Delete to remove.")
+        tip.setWordWrap(True)
+        tip.setStyleSheet("color:%s;padding:4px 2px;" % pal["subtext"])
+        lay.addWidget(tip)
+        form = QW.QFormLayout()
+        self._type = QW.QComboBox(); self._type.addItems(cfdbc.bc_labels())
+        cur = cfdbc.bc_type(getattr(self._node, "CfdBCType", "") or "")
+        if cur is not None:
+            self._type.setCurrentText(cur.get("label", ""))
+        self._type.currentIndexChanged.connect(self._sync_value_label)
+        form.addRow("Type", self._type)
+        self._value = QW.QComboBox(); self._value.setEditable(True)
+        self._vrow = QW.QLabel("Value")
+        form.addRow(self._vrow, self._value)
+        lay.addLayout(form)
+        self._facelbl = QW.QLabel("")
+        lay.addWidget(self._facelbl)
+        pick = QW.QPushButton("Use selected faces (from 3D view)")
+        pick.clicked.connect(self._use_selection)
+        lay.addWidget(pick)
+        dele = QW.QPushButton("Delete this boundary condition")
+        dele.clicked.connect(self._do_delete)
+        lay.addWidget(dele)
+        self._status = QW.QLabel(""); self._status.setWordWrap(True)
+        lay.addWidget(self._status)
+        lay.addStretch(1)
+        self._sync_value_label(initial=True)
+        self._update_face_label()
+        return w
+
+    def _sync_value_label(self, *a, **k):
+        bc = cfdbc.bc_by_label(self._type.currentText()) or cfdbc.BC_TYPES[0]
+        self._vrow.setText(bc.get("value_label") or "Value (not needed)")
+        needs = bool(bc.get("value_label"))
+        self._value.setEnabled(needs)
+        try:
+            self._value.clear()
+            if needs:
+                self._value.addItems([str(v) for v in
+                                      (bc.get("presets") or [bc.get("value", 0.0)])])
+                # On first build keep the node's stored value; after a type change
+                # fall back to that type's default.
+                if k.get("initial"):
+                    self._value.setEditText(str(getattr(self._node, "CfdBCValue", "0")))
+                else:
+                    self._value.setEditText(str(bc.get("value", 0.0)))
+        except Exception:
+            pass
+
+    def refresh_selection(self):
+        # Just note how many faces are currently selected; the user clicks
+        # 'Use selected faces' to actually move the BC onto them.
+        try:
+            sel = FreeCADGui.Selection.getSelectionEx()
+        except Exception:
+            sel = []
+        faces = []
+        for s in sel:
+            faces += cfdbc.parse_face_indices(getattr(s, "SubElementNames", []) or [])
+        self._sel_faces = sorted(set(faces))
+        self._update_face_label()
+
+    def _update_face_label(self):
+        cur = _cfd_node_faces(self._node)
+        tgt = self._picked if self._picked is not None else cur
+        extra = ""
+        sf = getattr(self, "_sel_faces", [])
+        if sf:
+            extra = "  (%d face(s) selected in view)" % len(sf)
+        self._facelbl.setText("Faces: %d%s" % (len(tgt), extra))
+
+    def _use_selection(self):
+        sf = getattr(self, "_sel_faces", [])
+        if not sf:
+            self._status.setText("Select one or more faces in the 3D view first.")
+            return
+        self._picked = list(sf)
+        self._status.setText("Will move this BC onto %d selected face(s) on Apply."
+                             % len(sf))
+        self._update_face_label()
+
+    def _value_num(self):
+        try:
+            return float(self._value.currentText())
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _do_delete(self):
+        self._cleanup()
+        _cfd_delete_bc_node(self._node)
+        _close_task_dialog()
+
+    def getStandardButtons(self):
+        return int(QW.QDialogButtonBox.Ok | QW.QDialogButtonBox.Cancel)
+
+    def isAllowedAlterDocument(self):
+        return True
+
+    def accept(self):
+        bc = cfdbc.bc_by_label(self._type.currentText()) or cfdbc.BC_TYPES[0]
+        _cfd_update_bc_node(self._node, bc, self._picked, self._value_num())
+        self._cleanup(); _close_task_dialog(); return True
+
+    def reject(self):
+        self._cleanup(); _close_task_dialog(); return True
+
+    def _cleanup(self):
+        try:
+            if self._obs is not None:
+                FreeCADGui.Selection.removeObserver(self._obs)
+        except Exception:
+            pass
+
+
+def _show_cfd_bc_edit_panel(node):
+    """Open the non-modal BC editor; False if unavailable (headless fallback)."""
+    Ctrl = getattr(FreeCADGui, "Control", None)
+    if Ctrl is None or not hasattr(Ctrl, "showDialog"):
+        return False
+    try:
+        if hasattr(Ctrl, "activeDialog") and Ctrl.activeDialog():
+            return False
+    except Exception:
+        pass
+    try:
+        Ctrl.showDialog(_CfdBCEditPanel(node))
+        return True
+    except Exception:
+        return False
+
+
+def _cfd_edit_bc(node):
+    """Double-click handler for a BC node: edit its type/value/faces or delete it."""
+    if cfdbc is None:
+        err("The CFD BC module failed to load."); return
+    if _show_cfd_bc_edit_panel(node):
+        return
+    # Modal fallback (headless / tests).
+    cur = cfdbc.bc_type(getattr(node, "CfdBCType", "") or "") or cfdbc.BC_TYPES[0]
+    try:
+        cur_val = float(getattr(node, "CfdBCValue", "0") or 0)
+    except (TypeError, ValueError):
+        cur_val = 0.0
+    fields = [
+        {"key": "type", "label": "Boundary condition", "kind": "combo",
+         "options": cfdbc.bc_labels(), "default": cur.get("label")},
+        {"key": "value", "label": "Value (speed m/s or pressure Pa)",
+         "kind": "float", "default": cur_val, "decimals": 6},
+    ]
+    vals = form_dialog("Edit Boundary Condition", fields)
+    if not vals:
+        return
+    nb = cfdbc.bc_by_label(vals.get("type")) or cur
+    _cfd_update_bc_node(node, nb, None, vals.get("value", cur_val))
 
 
 class CfdAssignBC:
@@ -8566,7 +8830,8 @@ def _cfd_run_internal_flow(doc, solid, assigns, bb, vals0, vals):
                            "in the Pipeline, press Apply, and colour by U, p"
                            + (" or T" if heat else "") + ".")
     status += pref_note
-    info("Internal-flow case '%s' from your face BCs on '%s'.\n\nPatches: %s.\n"
+    _cfd_report("Internal flow result",
+         "Internal-flow case '%s' from your face BCs on '%s'.\n\nPatches: %s.\n"
          "Mesh: %s. Solver: incompressibleFluid (%s).%s\n\nTo (re)run it "
          "yourself, in your WSL OpenFOAM terminal:\n  %s\n\nResults for "
          "ParaView:\n  %s" %
@@ -9063,6 +9328,70 @@ def _cfd_show_step_panel(title, subtitle, fields, on_accept):
     if vals:
         on_accept(vals)
     return True
+
+
+class _CfdResultPanel:
+    """Read-only docked panel that shows a run report (SimScale 'job finished'
+    feel) instead of a modal pop-up. Close when done."""
+    def __init__(self, title, text):
+        self._title = title or "Result"
+        self._text = text or ""
+        self.form = self._build()
+
+    def _build(self):
+        w = QW.QWidget(); w.setObjectName("cfdPanel")
+        w.setWindowTitle(self._title)
+        pal = (cfdui.PALETTE if cfdui is not None else
+               {"accent": "#17a2b8", "subtext": "#9aa7b4"})
+        if cfdui is not None:
+            try:
+                w.setStyleSheet(cfdui.stylesheet())
+            except Exception:
+                pass
+        lay = QW.QVBoxLayout(w)
+        hdr = QW.QLabel(self._title)
+        hdr.setStyleSheet("background:%s;color:#fff;font-weight:700;font-size:14px;"
+                          "padding:7px 10px;" % pal["accent"])
+        lay.addWidget(hdr)
+        box = QW.QTextEdit(); box.setReadOnly(True); box.setPlainText(self._text)
+        try:
+            box.setStyleSheet("border:none;")
+        except Exception:
+            pass
+        lay.addWidget(box)
+        return w
+
+    def getStandardButtons(self):
+        return int(QW.QDialogButtonBox.Close)
+
+    def isAllowedAlterDocument(self):
+        return False
+
+    def accept(self):
+        _close_task_dialog(); return True
+
+    def reject(self):
+        _close_task_dialog(); return True
+
+
+def _cfd_report(title, text):
+    """Show a run report in a non-modal docked Task panel (SimScale feel). Falls
+    back to a modal message box only when the Task control is unavailable
+    (headless / tests), so both paths surface the same text."""
+    Ctrl = getattr(FreeCADGui, "Control", None)
+    if Ctrl is not None and hasattr(Ctrl, "showDialog"):
+        busy = False
+        try:
+            busy = bool(hasattr(Ctrl, "activeDialog") and Ctrl.activeDialog())
+        except Exception:
+            busy = False
+        if not busy:
+            try:
+                Ctrl.showDialog(_CfdResultPanel(title, text))
+                return
+            except Exception:
+                pass
+    info(text)
 
 
 class CfdFlow:

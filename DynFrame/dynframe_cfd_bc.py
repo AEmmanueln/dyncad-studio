@@ -19,7 +19,8 @@ BC_TYPES = [
      "color": (0.20, 0.70, 0.30), "patch": "patch",
      "value_label": "Inlet speed (m/s)", "value": 10.0,
      "presets": [1, 2, 5, 10, 20, 50],
-     "help": "Fixed velocity into the domain (+X). k/omega set from turbulence."},
+     "help": "Fixed velocity into the domain, along the inlet face normal. "
+             "k/omega set from turbulence."},
     {"key": "pressure_inlet", "label": "Pressure inlet",
      "color": (0.30, 0.78, 0.55), "patch": "patch",
      "value_label": "Total pressure (Pa)", "value": 0.0,

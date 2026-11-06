@@ -8427,6 +8427,45 @@ def _cfd_build_mesh_dicts(doc, solid, assigns, bb, Lm, stage, n, nlay, rmin, rma
     return used, is_box
 
 
+def _cfd_patch_flow_dirs(solid, assigns):
+    """Unit flow direction per BC key, taken from geometry so it is correct for
+    any face orientation (not just +X): into the fluid domain for inlets, out of
+    it for outlets. Direction = face-centre -> domain-centre, area-weighted over
+    the faces that carry the BC, which for a box is exactly the inward normal.
+    Faces and centre both come from the same global shape (same mm frame as the
+    mesh), so the unit direction is frame- and unit-consistent."""
+    import math
+    out = {}
+    try:
+        shp = global_shape(solid)
+        faces = shp.Faces
+        c = shp.BoundBox.Center
+        cx, cy, cz = float(c.x), float(c.y), float(c.z)
+    except Exception:
+        return out
+    acc = {}
+    for idx, key in (assigns or {}).items():
+        try:
+            f = faces[int(idx)]
+            fc = f.CenterOfMass
+            a = float(f.Area)
+        except Exception:
+            continue
+        v = acc.setdefault(key, [0.0, 0.0, 0.0])
+        v[0] += (cx - float(fc.x)) * a
+        v[1] += (cy - float(fc.y)) * a
+        v[2] += (cz - float(fc.z)) * a
+    for key, v in acc.items():
+        m = math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2])
+        if m < 1e-12:
+            continue
+        ux, uy, uz = v[0] / m, v[1] / m, v[2] / m          # inward (toward centre)
+        if key in ("velocity_outlet", "pressure_outlet"):
+            ux, uy, uz = -ux, -uy, -uz                     # outlets point outward
+        out[key] = (ux, uy, uz)
+    return out
+
+
 def _cfd_run_internal_flow(doc, solid, assigns, bb, vals0, vals):
     """Stage and (optionally) solve the internal-flow case from the collected
     panel values, then report. Shared by the docked Run panel and its modal
@@ -8451,8 +8490,23 @@ def _cfd_run_internal_flow(doc, solid, assigns, bb, vals0, vals):
         mesher = ("blockMesh (box)" if is_box else
                   "snappyHexMesh (%d layers, refinement %d-%d)"
                   % (nlay, rmin, rmax))
-        patches = [{"name": k, "bc": k, "value": vals0.get(k, 0.0)}
-                   for k in sorted(used)]
+        dirs = _cfd_patch_flow_dirs(solid, assigns)
+        patches = [{"name": k, "bc": k, "value": vals0.get(k, 0.0),
+                    "dir": dirs.get(k)} for k in sorted(used)]
+        # Incompressible flow needs one fixed-pressure reference. If the user
+        # tagged no pressure inlet/outlet, solve the (velocity) outlet as a 0 Pa
+        # pressure outlet so the case is well-posed - otherwise OpenFOAM's
+        # adjustPhi fails (no adjustable outflow) and no results are written.
+        pref_note = ""
+        if not any(p["bc"] in ("pressure_outlet", "pressure_inlet")
+                   for p in patches):
+            outp = next((p for p in patches if p["bc"] == "velocity_outlet"), None)
+            if outp is not None:
+                outp["bc"] = "pressure_outlet"; outp["value"] = 0.0
+                pref_note = ("\n\nNote: no pressure boundary was assigned, so the "
+                             "outlet '%s' was solved as a 0 Pa pressure outlet - "
+                             "an incompressible case needs one pressure reference."
+                             % outp["name"])
         casefiles, k0, om0 = cfdgen.bc_field_files(
             patches, nu=float(vals["nu"]), intensity=intensity, L=Lm)
         turb = _cfd_study_get(doc, "CfdTurbulence", "kOmegaSST")
@@ -8511,6 +8565,7 @@ def _cfd_run_internal_flow(doc, solid, assigns, bb, vals0, vals):
                 status += ("\n\nOpening the result in ParaView - click the case "
                            "in the Pipeline, press Apply, and colour by U, p"
                            + (" or T" if heat else "") + ".")
+    status += pref_note
     info("Internal-flow case '%s' from your face BCs on '%s'.\n\nPatches: %s.\n"
          "Mesh: %s. Solver: incompressibleFluid (%s).%s\n\nTo (re)run it "
          "yourself, in your WSL OpenFOAM terminal:\n  %s\n\nResults for "

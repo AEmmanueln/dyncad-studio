@@ -415,6 +415,7 @@ def fv_solution_simple(heat=False):
         "        relTol          0.1;\n    }\n\n"
         "%s}\n\n"
         "SIMPLE\n{\n    nNonOrthogonalCorrectors 0;\n    consistent      yes;\n"
+        "    pRefCell        0;\n    pRefValue       0;\n"
         "    residualControl\n    {\n        p               1e-4;\n"
         "        U               1e-4;\n        \"(k|omega)\"     1e-4;\n    }\n}\n\n"
         "relaxationFactors\n{\n    equations\n    {\n        U               0.9;\n"
@@ -562,8 +563,16 @@ def bc_field_files(patches, nu=1.5e-5, intensity=0.05, L=1.0):
     oin = "uniform %s" % _g(om0)
 
     def U_entry(p):
-        bc = p.get("bc"); v = _g(p.get("value", 0.0))
-        if bc in ("velocity_inlet", "velocity_outlet", "moving_wall"):
+        bc = p.get("bc"); vv = float(p.get("value", 0.0)); v = _g(vv)
+        if bc in ("velocity_inlet", "velocity_outlet"):
+            d = p.get("dir")
+            if d:
+                vec = "(%s %s %s)" % (_g(vv * d[0]), _g(vv * d[1]), _g(vv * d[2]))
+            else:
+                vec = "(%s 0 0)" % v
+            return ("        type            fixedValue;\n"
+                    "        value           uniform %s;" % vec)
+        if bc == "moving_wall":
             return ("        type            fixedValue;\n"
                     "        value           uniform (%s 0 0);" % v)
         if bc == "pressure_inlet":

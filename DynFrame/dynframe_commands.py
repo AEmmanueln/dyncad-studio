@@ -9054,9 +9054,12 @@ class _CfdExamplesPanel:
         self._desc = QW.QLabel(""); self._desc.setWordWrap(True)
         self._desc.setStyleSheet("color:%s;padding:2px;" % pal["subtext"])
         lay.addWidget(self._desc)
-        run = QW.QPushButton("Run on OpenFOAM + open in ParaView")
+        run = QW.QPushButton("Run now (mesh + solve + result image)")
         run.clicked.connect(self._run)
         lay.addWidget(run)
+        edit = QW.QPushButton("Open as editable study (geometry, BCs, mesh, numerics)")
+        edit.clicked.connect(self._open_study)
+        lay.addWidget(edit)
         self._status = QW.QLabel(""); self._status.setWordWrap(True)
         lay.addWidget(self._status)
         lay.addStretch(1)
@@ -9116,10 +9119,91 @@ class _CfdExamplesPanel:
         _close_task_dialog(); return True
 
 
+def _cfd_open_template_as_study(doc, key, params):
+    """Load a curated example as a fully EDITABLE CFD study: create the box
+    geometry, build the SimScale-style tree, assign the boundary conditions to its
+    faces and store the study settings. The user can then resize the box (Data
+    panel), double-click BC nodes to change type/value/faces, edit Mesh/Numerics/
+    Simulation control, and double-click Run - the same validated internal-flow
+    solver. Non-box examples fall back to a message."""
+    if cfdex is None or cfdtree is None or cfdbc is None:
+        err("The CFD modules failed to load."); return
+    spec = cfdex.example_study_spec(key, params)
+    if spec is None:
+        info("'Open as editable study' isn't available for this example yet (its "
+             "geometry isn't a simple box). Use Run to solve it directly, or pick "
+             "the cavity or channel template."); return
+    doc.openTransaction("DynFrame: open CFD example as study")
+    try:
+        Lx, Ly, Lz = spec["dims"]
+        box = doc.addObject("Part::Box", "CfdExample")
+        box.Length = float(Lx); box.Width = float(Ly); box.Height = float(Lz)
+        try:
+            box.Label = spec.get("label", "CFD example")
+        except Exception:
+            pass
+        doc.recompute()
+        studies = cfdtree.study_types()
+        study = next((s for s in studies
+                      if "incompressible" in str(s.get("id", "")).lower()),
+                     studies[0] if studies else {"id": "incompressibleFluid",
+                                                 "title": "Incompressible flow"})
+        container = build_cfd_tree(doc, study)
+        _cfd_set_str(container, "CfdGeometry", box.Name)
+        for k, v in spec.get("study", {}).items():
+            _cfd_set_str(container, k, v)
+        bb = box.Shape.BoundBox
+        faces = box.Shape.Faces
+
+        def _side(f):
+            c = f.CenterOfMass
+            d = {"xmin": abs(c.x - bb.XMin), "xmax": abs(c.x - bb.XMax),
+                 "ymin": abs(c.y - bb.YMin), "ymax": abs(c.y - bb.YMax),
+                 "zmin": abs(c.z - bb.ZMin), "zmax": abs(c.z - bb.ZMax)}
+            return min(d, key=d.get)
+
+        bcs = spec.get("bcs", {})
+        groups = {}
+        for i, f in enumerate(faces):
+            s = _side(f)
+            if s in bcs:
+                groups.setdefault(bcs[s], []).append(i)
+        for (bc_key, value), idxs in groups.items():
+            b = cfdbc.bc_type(bc_key)
+            if b is not None:
+                _cfd_create_bc(doc, box, b, idxs, value)
+        doc.commitTransaction(); doc.recompute()
+    except Exception as e:
+        try:
+            doc.abortTransaction()
+        except Exception:
+            pass
+        err("Could not open the example as a study: %s" % e); return
+    try:
+        FreeCADGui.Selection.clearSelection()
+        FreeCADGui.Selection.addSelection(box)
+        _cfd_zoom_selection()
+    except Exception:
+        pass
+    _cfd_report(
+        "Editable study",
+        "Loaded '%s' as an EDITABLE CFD study - change anything, then run.\n\n"
+        "- Geometry: the box '%s'. Select it and edit Length / Width / Height in "
+        "the Data panel (bottom-left) to resize, or replace it with your own "
+        "imported CAD.\n"
+        "- Boundary conditions: double-click a BC node under 'Boundary conditions' "
+        "to change its type, value or the faces it is on.\n"
+        "- Mesh / Numerics / Simulation control: double-click those tree nodes to "
+        "edit resolution, turbulence model, scheme order, iterations, etc.\n\n"
+        "When ready, double-click 'Run' (or the Run Flow from BCs toolbar button) "
+        "to mesh + solve on OpenFOAM and get the result image."
+        % (spec.get("label", key), getattr(box, "Label", box.Name)))
+
+
 class _CfdGalleryPanel:
     """Curated, fully-parameterised CFD examples (SimScale-style templates): pick a
-    case, set its *physical* parameters (speeds, viscosity, size, mesh, turbulence)
-    and Run - it meshes + solves on OpenFOAM and opens in ParaView. Non-modal."""
+    case, set its *physical* parameters (speeds, viscosity, size, mesh, turbulence),
+    then either Run it directly or open it as a fully editable study. Non-modal."""
     def __init__(self, catalog):
         self._catalog = catalog
         self._cur = None
@@ -9243,6 +9327,16 @@ class _CfdGalleryPanel:
             "in the case's images folder. Change any parameter and Run again to "
             "compare. Log: ~/dynframe_cfd/%s/log.dynframe"
             % (self._cur["title"], name))
+
+    def _open_study(self):
+        if self._cur is None or cfdex is None:
+            self._status.setText("Examples module not available."); return
+        doc = FreeCAD.ActiveDocument or FreeCAD.newDocument()
+        _cfd_open_template_as_study(doc, self._cur["key"], self._collect())
+        self._status.setText(
+            "Opened '%s' as an editable study - see the Model tree. Resize the box, "
+            "double-click the BC and Mesh/Numerics nodes to edit, then double-click "
+            "Run." % self._cur["title"])
 
     def getStandardButtons(self):
         return int(QW.QDialogButtonBox.Close)

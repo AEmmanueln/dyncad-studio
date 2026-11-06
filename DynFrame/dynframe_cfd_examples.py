@@ -73,6 +73,42 @@ def example_spec(key):
     return None
 
 
+def example_study_spec(key, p):
+    """Geometry size (mm), a face->BC scheme and study settings for loading a
+    box-geometry template as an EDITABLE CFD study (geometry + tree + BCs the user
+    can then change). 'bcs' maps a box side (xmin/xmax/ymin/ymax/zmin/zmax) to
+    (bc_key, value). Returns None for non-box examples (e.g. the step)."""
+    if key == "cavity":
+        S = float(p.get("side", 100.0))
+        return {
+            "label": "Lid-driven cavity",
+            "dims": (S, S, max(5.0, S * 0.1)),
+            "study": {"CfdNu": g._g(float(p.get("nu", 1.0e-3))),
+                      "CfdIters": str(int(p.get("iters", 2000))),
+                      "CfdTurbulence": "laminar",
+                      "CfdCells": str(int(p.get("cells", 50)))},
+            "bcs": {"ymax": ("moving_wall", float(p.get("lid", 1.0))),
+                    "xmin": ("wall", 0.0), "xmax": ("wall", 0.0),
+                    "ymin": ("wall", 0.0),
+                    "zmin": ("slip", 0.0), "zmax": ("slip", 0.0)},
+        }
+    if key == "channel":
+        L = float(p.get("length", 2000.0)); H = float(p.get("height", 100.0))
+        return {
+            "label": "Channel flow",
+            "dims": (L, H, H),
+            "study": {"CfdNu": g._g(float(p.get("nu", 1.0e-4))),
+                      "CfdIters": str(int(p.get("iters", 2000))),
+                      "CfdTurbulence": str(p.get("model", "laminar")),
+                      "CfdCells": str(int(p.get("cells", 48)))},
+            "bcs": {"xmin": ("velocity_inlet", float(p.get("speed", 0.1))),
+                    "xmax": ("pressure_outlet", 0.0),
+                    "zmin": ("wall", 0.0), "zmax": ("wall", 0.0),
+                    "ymin": ("slip", 0.0), "ymax": ("slip", 0.0)},
+        }
+    return None
+
+
 def _common(files, nu, model, iters):
     files["momentumTransport"] = g.momentum_transport_dict(model)
     files["physicalProperties"] = g.physical_properties_dict(nu)

@@ -8810,11 +8810,13 @@ def _cfd_run_internal_flow(doc, solid, assigns, bb, vals0, vals):
     if is_box:
         fs = cfdgen.build_internal_flow_script(
             {"of_env": of_env, "name": name, "stage_win": stage,
-             "win_out": win_out, "latest": True})
+             "win_out": win_out, "latest": True,
+             "win_paraview": _cfd_windows_paraview()})
     else:
         fs = cfdgen.build_snappy_flow_script(
             {"of_env": of_env, "name": name, "stage_win": stage,
-             "win_out": win_out, "patch_names": sorted(used), "latest": True})
+             "win_out": win_out, "patch_names": sorted(used), "latest": True,
+             "win_paraview": _cfd_windows_paraview()})
     fpath = os.path.join(outdir, "run_%s.sh" % name)
     try:
         _write_lf(fpath, fs)
@@ -8980,6 +8982,34 @@ def _cfd_launch_paraview(name, distro=""):
         return False
 
 
+def _cfd_windows_paraview():
+    """A native Windows ParaView's path (as a /mnt/c WSL path) if one is installed,
+    else "". DynFrame opens results in native Windows ParaView when present - the
+    only reliable interactive viewer here, since WSLg cannot show the WSL ParaView
+    window (it comes up 32x32 / off-screen). Without it, the result image is used."""
+    import glob
+    cands = []
+    for base in (os.environ.get("ProgramFiles", r"C:\Program Files"),
+                 os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+                 os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs")):
+        if base:
+            cands += glob.glob(os.path.join(base, "ParaView*", "bin", "paraview.exe"))
+    try:
+        import shutil
+        w = shutil.which("paraview")
+        if w:
+            cands.append(w)
+    except Exception:
+        pass
+    for p in sorted(cands, reverse=True):          # newest version first
+        if p and os.path.exists(p):
+            try:
+                return cfd.win_to_wsl(p)
+            except Exception:
+                return ""
+    return ""
+
+
 def _cfd_list_tutorials(of_env=None, distro=""):
     """Enumerate the installed OpenFOAM tutorials as (category, relpath, abspath)
     by asking WSL. Empty list if none are found / WSL is unreachable."""
@@ -9096,6 +9126,7 @@ class _CfdExamplesPanel:
         except Exception:
             win_out = ""
         opts = {"of_env": of_env, "src": ab, "name": name, "win_out": win_out,
+                "win_paraview": _cfd_windows_paraview(),
                 "end_time": self._end.text().strip(),
                 "write_interval": self._wri.text().strip(),
                 "delta_t": self._dt.text().strip()}
@@ -9321,7 +9352,7 @@ class _CfdGalleryPanel:
         try:
             script = cfdgen.build_example_run_script(
                 {"of_env": of_env, "name": name, "stage_win": stage,
-                 "win_out": win_out})
+                 "win_out": win_out, "win_paraview": _cfd_windows_paraview()})
             import subprocess
             subprocess.Popen(cfd.wsl_run_argv(script, distro),
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,

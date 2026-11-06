@@ -8263,22 +8263,41 @@ class _CfdBCTaskPanel:
             pass
 
 
-def _show_cfd_bc_panel():
-    """Open the non-modal BC panel. Returns True if shown (GUI), else False so the
-    caller falls back to the modal path (headless)."""
+def _cfd_dock(make_panel):
+    """Create and show a docked Task panel robustly. It first closes any stuck or
+    leftover Task dialog (an orphaned dialog otherwise blocks every new panel and
+    forces the ugly modal fallback - the cause of panels 'never opening'), then
+    builds the panel, catching and LOGGING any construction error to the Report
+    view, and shows it. Returns True if shown, else False (caller's fallback)."""
     Ctrl = getattr(FreeCADGui, "Control", None)
     if Ctrl is None or not hasattr(Ctrl, "showDialog"):
         return False
     try:
         if hasattr(Ctrl, "activeDialog") and Ctrl.activeDialog():
-            return False
+            try:
+                Ctrl.closeDialog()
+            except Exception:
+                pass
     except Exception:
         pass
     try:
-        Ctrl.showDialog(_CfdBCTaskPanel())
+        Ctrl.showDialog(make_panel())
         return True
-    except Exception:
+    except Exception as e:
+        try:
+            import traceback
+            FreeCAD.Console.PrintError(
+                "DynFrame: could not open the Task panel: %s\n%s\n"
+                % (e, traceback.format_exc()))
+        except Exception:
+            pass
         return False
+
+
+def _show_cfd_bc_panel():
+    """Open the non-modal BC panel. True if shown (GUI), else False so the caller
+    falls back to the modal path (headless)."""
+    return _cfd_dock(lambda: _CfdBCTaskPanel())
 
 
 def _cfd_node_faces(node):
@@ -8494,19 +8513,7 @@ class _CfdBCEditPanel:
 
 def _show_cfd_bc_edit_panel(node):
     """Open the non-modal BC editor; False if unavailable (headless fallback)."""
-    Ctrl = getattr(FreeCADGui, "Control", None)
-    if Ctrl is None or not hasattr(Ctrl, "showDialog"):
-        return False
-    try:
-        if hasattr(Ctrl, "activeDialog") and Ctrl.activeDialog():
-            return False
-    except Exception:
-        pass
-    try:
-        Ctrl.showDialog(_CfdBCEditPanel(node))
-        return True
-    except Exception:
-        return False
+    return _cfd_dock(lambda: _CfdBCEditPanel(node))
 
 
 def _cfd_edit_bc(node):
@@ -9057,9 +9064,6 @@ class _CfdExamplesPanel:
         run = QW.QPushButton("Run now (mesh + solve + result image)")
         run.clicked.connect(self._run)
         lay.addWidget(run)
-        edit = QW.QPushButton("Open as editable study (geometry, BCs, mesh, numerics)")
-        edit.clicked.connect(self._open_study)
-        lay.addWidget(edit)
         self._status = QW.QLabel(""); self._status.setWordWrap(True)
         lay.addWidget(self._status)
         lay.addStretch(1)
@@ -9244,9 +9248,12 @@ class _CfdGalleryPanel:
         self._env = QW.QLineEdit(); self._env.setText(cfd.DEFAULT_OF_ENV)
         eng.addRow("OpenFOAM env", self._env)
         lay.addLayout(eng)
-        run = QW.QPushButton("Run on OpenFOAM + open in ParaView")
+        run = QW.QPushButton("Run now (mesh + solve + result image)")
         run.clicked.connect(self._run)
         lay.addWidget(run)
+        edit = QW.QPushButton("Open as editable study (geometry, BCs, mesh, numerics)")
+        edit.clicked.connect(self._open_study)
+        lay.addWidget(edit)
         self._status = QW.QLabel(""); self._status.setWordWrap(True)
         lay.addWidget(self._status)
         lay.addStretch(1)
@@ -9366,18 +9373,8 @@ class CfdGallery:
         if cfd is None or cfdgen is None or cfdex is None:
             err("The CFD example modules failed to load."); return
         catalog = cfdex.example_catalog()
-        Ctrl = getattr(FreeCADGui, "Control", None)
-        if Ctrl is not None and hasattr(Ctrl, "showDialog"):
-            busy = False
-            try:
-                busy = bool(hasattr(Ctrl, "activeDialog") and Ctrl.activeDialog())
-            except Exception:
-                busy = False
-            if not busy:
-                try:
-                    Ctrl.showDialog(_CfdGalleryPanel(catalog)); return
-                except Exception:
-                    pass
+        if _cfd_dock(lambda: _CfdGalleryPanel(catalog)):
+            return
         info("Open CFD Examples from the FreeCAD GUI (it needs the Task panel). "
              "%d curated templates are available." % len(catalog))
 
@@ -9403,18 +9400,8 @@ class CfdExamples:
             info("No OpenFOAM tutorials were found. Is OpenFOAM installed in WSL "
                  "(expected $FOAM_TUTORIALS, e.g. /opt/openfoam14/tutorials)?")
             return
-        Ctrl = getattr(FreeCADGui, "Control", None)
-        if Ctrl is not None and hasattr(Ctrl, "showDialog"):
-            busy = False
-            try:
-                busy = bool(hasattr(Ctrl, "activeDialog") and Ctrl.activeDialog())
-            except Exception:
-                busy = False
-            if not busy:
-                try:
-                    Ctrl.showDialog(_CfdExamplesPanel(cases)); return
-                except Exception:
-                    pass
+        if _cfd_dock(lambda: _CfdExamplesPanel(cases)):
+            return
         info("Open the OpenFOAM Examples browser from the FreeCAD GUI (it needs "
              "the Task panel). %d tutorial cases are available." % len(cases))
 
@@ -9652,19 +9639,7 @@ def _show_cfd_flow_panel(obj, pts, facets, bb, Lm, fields):
     """Show the docked CFD-flow Task panel. Returns True if shown, False when the
     Task-panel control is unavailable (headless / another dialog open) so the
     caller falls back to the modal form."""
-    Ctrl = getattr(FreeCADGui, "Control", None)
-    if Ctrl is None or not hasattr(Ctrl, "showDialog"):
-        return False
-    try:
-        if hasattr(Ctrl, "activeDialog") and Ctrl.activeDialog():
-            return False
-    except Exception:
-        pass
-    try:
-        Ctrl.showDialog(_CfdFlowTaskPanel(obj, pts, facets, bb, Lm, fields))
-        return True
-    except Exception:
-        return False
+    return _cfd_dock(lambda: _CfdFlowTaskPanel(obj, pts, facets, bb, Lm, fields))
 
 
 class _CfdStepTaskPanel:
@@ -9761,19 +9736,8 @@ def _cfd_show_step_panel(title, subtitle, fields, on_accept):
     the themed modal form only when the Task-panel control is unavailable (headless
     / another dialog already open), so both paths run the SAME on_accept. Always
     returns True - the step is handled here."""
-    Ctrl = getattr(FreeCADGui, "Control", None)
-    if Ctrl is not None and hasattr(Ctrl, "showDialog"):
-        busy = False
-        try:
-            busy = bool(hasattr(Ctrl, "activeDialog") and Ctrl.activeDialog())
-        except Exception:
-            busy = False
-        if not busy:
-            try:
-                Ctrl.showDialog(_CfdStepTaskPanel(title, subtitle, fields, on_accept))
-                return True
-            except Exception:
-                pass
+    if _cfd_dock(lambda: _CfdStepTaskPanel(title, subtitle, fields, on_accept)):
+        return True
     vals = form_dialog(title, fields, **_cfd_dialog_kwargs(title, subtitle))
     if vals:
         on_accept(vals)
@@ -9828,19 +9792,8 @@ def _cfd_report(title, text):
     """Show a run report in a non-modal docked Task panel (SimScale feel). Falls
     back to a modal message box only when the Task control is unavailable
     (headless / tests), so both paths surface the same text."""
-    Ctrl = getattr(FreeCADGui, "Control", None)
-    if Ctrl is not None and hasattr(Ctrl, "showDialog"):
-        busy = False
-        try:
-            busy = bool(hasattr(Ctrl, "activeDialog") and Ctrl.activeDialog())
-        except Exception:
-            busy = False
-        if not busy:
-            try:
-                Ctrl.showDialog(_CfdResultPanel(title, text))
-                return
-            except Exception:
-                pass
+    if _cfd_dock(lambda: _CfdResultPanel(title, text)):
+        return
     info(text)
 
 

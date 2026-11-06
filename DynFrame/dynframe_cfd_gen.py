@@ -940,3 +940,73 @@ def build_mesh_check_script(opts):
              % win_out)
     L.append('echo "=== MESH DONE: $DST ==="')
     return "\n".join(L)
+
+
+# ---- OpenFOAM tutorial / example gallery (run any case, tweak parameters) ----
+def tutorials_find_script(of_env=None):
+    """Bash that lists every runnable OpenFOAM tutorial as 'category|relpath|abspath'
+    (one per case with a system/controlDict). Parsed by the Examples browser."""
+    import dynframe_cfd as cfd
+    env = of_env or cfd.DEFAULT_OF_ENV
+    return (". %s >/dev/null 2>&1\n" % env
+            + 'T="${FOAM_TUTORIALS:-$WM_PROJECT_DIR/tutorials}"\n'
+            + '[ -d "$T" ] || { echo "NO_TUTORIALS"; exit 0; }\n'
+            + 'find "$T" -type f -name controlDict -path "*/system/*" 2>/dev/null '
+              '| while read f; do\n'
+            + '  c="${f%/system/controlDict}"\n'
+            + '  rel="${c#$T/}"\n'
+            + '  cat="${rel%%/*}"\n'
+            + '  printf "%s|%s|%s\\n" "$cat" "$rel" "$c"\n'
+            + 'done | sort\n')
+
+
+def build_tutorial_run_script(opts):
+    """Background pipeline to run one OpenFOAM tutorial and show it in ParaView:
+    clone the case, apply the user's time controls, run it (its own Allrun or the
+    standard foamRunTutorials sequence), convert to VTK, copy the results to
+    Windows, and open ParaView through WSLg. Detached, so FreeCAD never blocks.
+    opts: of_env, src (WSL abs path), name (safe case name), win_out (Windows
+    path), end_time, write_interval, delta_t (each blank/None = keep as shipped)."""
+    import dynframe_cfd as cfd
+    env = opts.get("of_env", cfd.DEFAULT_OF_ENV)
+    src = opts["src"]; name = opts["name"]; work = cfd.WORK_ROOT
+    win_out = opts.get("win_out", "")
+    foam = '"$DST/%s.foam"' % name     # $DST is tilde-expanded at assignment
+    L = []
+    L.append(". %s >/dev/null 2>&1" % env)
+    L.append("SRC=%s" % cfd.shq(src))
+    L.append("mkdir -p %s" % work)
+    L.append("DST=%s/%s" % (work, name))
+    L.append('rm -rf "$DST"')
+    L.append('cp -r "$SRC" "$DST" || exit 1')
+    L.append('cd "$DST" || exit 1')
+    L.append('rm -f ./*.foam 2>/dev/null || true')
+    # apply the user's time-control overrides when given
+    for entry, val in (("endTime", opts.get("end_time")),
+                       ("writeInterval", opts.get("write_interval")),
+                       ("deltaT", opts.get("delta_t"))):
+        v = ("" if val is None else str(val)).strip()
+        if v != "":
+            L.append('foamDictionary system/controlDict -entry %s -set %s '
+                     '>/dev/null 2>&1 || true' % (entry, cfd.shq(v)))
+    # run: the case's own Allrun if present, else the standard tutorial sequence
+    L.append('echo "== DynFrame: running $DST ==" > log.dynframe')
+    L.append('if [ -f ./Allrun ]; then chmod +x ./Allrun >/dev/null 2>&1 || true; '
+             './Allrun >> log.dynframe 2>&1; '
+             'else foamRunTutorials >> log.dynframe 2>&1; fi')
+    L.append('echo "== foamToVTK ==" >> log.dynframe')
+    L.append('foamToVTK -latestTime >> log.dynframe 2>&1 || '
+             'foamToVTK >> log.dynframe 2>&1 || true')
+    if win_out:
+        L.append('OUT=%s' % cfd.shq(win_out))
+        L.append('mkdir -p "$OUT"; rm -rf "$OUT/VTK"; [ -d VTK ] && cp -r VTK "$OUT/"')
+    # open the finished case in ParaView (WSLg), detached
+    L.append('if command -v paraview >/dev/null 2>&1; then')
+    L.append('  touch %s' % foam)
+    L.append('  export DISPLAY=${DISPLAY:-:0}')
+    L.append('  nohup setsid paraview %s >/tmp/dynframe_pv.log 2>&1 </dev/null &'
+             % foam)
+    L.append('  disown 2>/dev/null || true')
+    L.append('fi')
+    L.append('echo "== DynFrame: DONE ==" >> log.dynframe')
+    return "\n".join(L)

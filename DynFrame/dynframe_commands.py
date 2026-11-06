@@ -8969,6 +8969,178 @@ def _cfd_launch_paraview(name, distro=""):
         return False
 
 
+def _cfd_list_tutorials(of_env=None, distro=""):
+    """Enumerate the installed OpenFOAM tutorials as (category, relpath, abspath)
+    by asking WSL. Empty list if none are found / WSL is unreachable."""
+    import subprocess
+    try:
+        script = cfdgen.tutorials_find_script(of_env or cfd.DEFAULT_OF_ENV)
+        r = subprocess.run(cfd.wsl_run_argv(script, distro),
+                           capture_output=True, timeout=90)
+        out = (r.stdout or b"").decode("utf-8", "replace")
+    except Exception:
+        return []
+    cases = []
+    for line in out.splitlines():
+        line = line.strip()
+        if not line or line == "NO_TUTORIALS" or line.count("|") != 2:
+            continue
+        cat, rel, ab = line.split("|")
+        if cat and rel and ab:
+            cases.append((cat, rel, ab))
+    return cases
+
+
+class _CfdExamplesPanel:
+    """Non-modal browser for the built-in OpenFOAM tutorials: pick a category and
+    case, optionally change the time controls, Run (in the background) and the
+    result opens in ParaView - a parameterisable example gallery, SimScale-style."""
+    def __init__(self, cases):
+        self._by_cat = {}
+        for cat, rel, ab in cases:
+            self._by_cat.setdefault(cat, []).append((rel, ab))
+        self.form = self._build()
+
+    def _build(self):
+        w = QW.QWidget(); w.setObjectName("cfdPanel")
+        w.setWindowTitle("OpenFOAM examples")
+        pal = (cfdui.PALETTE if cfdui is not None else
+               {"accent": "#17a2b8", "subtext": "#9aa7b4"})
+        if cfdui is not None:
+            try:
+                w.setStyleSheet(cfdui.stylesheet())
+            except Exception:
+                pass
+        lay = QW.QVBoxLayout(w)
+        hdr = QW.QLabel("OpenFOAM examples")
+        hdr.setStyleSheet("background:%s;color:#fff;font-weight:700;font-size:14px;"
+                          "padding:7px 10px;" % pal["accent"])
+        lay.addWidget(hdr)
+        n = sum(len(v) for v in self._by_cat.values())
+        tip = QW.QLabel("Pick a tutorial, change the time controls if you like, "
+                        "then Run. It solves on OpenFOAM in the background and "
+                        "opens in ParaView when done. %d cases available." % n)
+        tip.setWordWrap(True)
+        tip.setStyleSheet("color:%s;padding:4px 2px;" % pal["subtext"])
+        lay.addWidget(tip)
+        form = QW.QFormLayout()
+        self._cat = QW.QComboBox(); self._cat.addItems(sorted(self._by_cat.keys()))
+        self._cat.currentIndexChanged.connect(self._fill_cases)
+        form.addRow("Category", self._cat)
+        self._case = QW.QComboBox()
+        self._case.currentIndexChanged.connect(self._show_desc)
+        form.addRow("Example", self._case)
+        self._end = QW.QLineEdit(); self._end.setPlaceholderText("keep as shipped")
+        form.addRow("End time / iterations", self._end)
+        self._wri = QW.QLineEdit(); self._wri.setPlaceholderText("keep")
+        form.addRow("Write interval", self._wri)
+        self._dt = QW.QLineEdit(); self._dt.setPlaceholderText("keep")
+        form.addRow("Time step (deltaT)", self._dt)
+        self._distro = QW.QLineEdit(); self._distro.setPlaceholderText("default")
+        form.addRow("WSL distro", self._distro)
+        self._env = QW.QLineEdit(); self._env.setText(cfd.DEFAULT_OF_ENV)
+        form.addRow("OpenFOAM env", self._env)
+        lay.addLayout(form)
+        self._desc = QW.QLabel(""); self._desc.setWordWrap(True)
+        self._desc.setStyleSheet("color:%s;padding:2px;" % pal["subtext"])
+        lay.addWidget(self._desc)
+        run = QW.QPushButton("Run on OpenFOAM + open in ParaView")
+        run.clicked.connect(self._run)
+        lay.addWidget(run)
+        self._status = QW.QLabel(""); self._status.setWordWrap(True)
+        lay.addWidget(self._status)
+        lay.addStretch(1)
+        self._fill_cases()
+        return w
+
+    def _fill_cases(self, *a):
+        self._case.clear()
+        for rel, ab in self._by_cat.get(self._cat.currentText(), []):
+            self._case.addItem(rel.split("/", 1)[-1] if "/" in rel else rel)
+        self._show_desc()
+
+    def _show_desc(self, *a):
+        items = self._by_cat.get(self._cat.currentText(), [])
+        i = self._case.currentIndex()
+        if 0 <= i < len(items):
+            self._desc.setText("Case path: %s" % items[i][0])
+
+    def _run(self):
+        items = self._by_cat.get(self._cat.currentText(), [])
+        i = self._case.currentIndex()
+        if i < 0 or i >= len(items):
+            self._status.setText("Pick an example first."); return
+        rel, ab = items[i]
+        name = "ex_" + rel.replace("/", "_").replace(" ", "_")
+        of_env = str(self._env.text() or cfd.DEFAULT_OF_ENV).strip()
+        distro = str(self._distro.text() or "").strip()
+        try:
+            win_out = cfd.win_to_wsl(os.path.join(_cfd_outdir(), name), distro)
+        except Exception:
+            win_out = ""
+        opts = {"of_env": of_env, "src": ab, "name": name, "win_out": win_out,
+                "end_time": self._end.text().strip(),
+                "write_interval": self._wri.text().strip(),
+                "delta_t": self._dt.text().strip()}
+        try:
+            script = cfdgen.build_tutorial_run_script(opts)
+            import subprocess
+            subprocess.Popen(cfd.wsl_run_argv(script, distro),
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             stdin=subprocess.DEVNULL)
+        except Exception as e:
+            self._status.setText("Could not start: %s" % e); return
+        self._status.setText(
+            "Running '%s' in the background - ParaView opens when it finishes "
+            "(large cases take minutes). Progress: ~/dynframe_cfd/%s/log.dynframe"
+            % (rel, name))
+
+    def getStandardButtons(self):
+        return int(QW.QDialogButtonBox.Close)
+
+    def accept(self):
+        _close_task_dialog(); return True
+
+    def reject(self):
+        _close_task_dialog(); return True
+
+
+class CfdExamples:
+    def GetResources(self):
+        return {"Pixmap": _icon("cfd"),
+                "MenuText": "OpenFOAM Examples (tutorials)",
+                "ToolTip": "Browse the built-in OpenFOAM tutorial cases, change "
+                           "their time controls, run one on OpenFOAM and open it "
+                           "in ParaView - a parameterisable example gallery.",
+                "Accel": "C, E"}
+
+    def IsActive(self):
+        return cfd is not None and cfdgen is not None
+
+    def Activated(self):
+        if cfd is None or cfdgen is None:
+            err("The CFD modules failed to load."); return
+        cases = _cfd_list_tutorials(cfd.DEFAULT_OF_ENV, "")
+        if not cases:
+            info("No OpenFOAM tutorials were found. Is OpenFOAM installed in WSL "
+                 "(expected $FOAM_TUTORIALS, e.g. /opt/openfoam14/tutorials)?")
+            return
+        Ctrl = getattr(FreeCADGui, "Control", None)
+        if Ctrl is not None and hasattr(Ctrl, "showDialog"):
+            busy = False
+            try:
+                busy = bool(hasattr(Ctrl, "activeDialog") and Ctrl.activeDialog())
+            except Exception:
+                busy = False
+            if not busy:
+                try:
+                    Ctrl.showDialog(_CfdExamplesPanel(cases)); return
+                except Exception:
+                    pass
+        info("Open the OpenFOAM Examples browser from the FreeCAD GUI (it needs "
+             "the Task panel). %d tutorial cases are available." % len(cases))
+
+
 def _cfd_flow_execute(obj, pts, facets, bb, Lm, vals):
     """Build + stage the incompressible-flow case from the collected values and
     report it. Shared by the modal form and the docked Task panel so both paths
@@ -12151,6 +12323,7 @@ _add("DynFrame_CfdDomain", CfdDomain)
 _add("DynFrame_CfdMeshFromCad", CfdMeshFromCad)
 _add("DynFrame_CfdFlow", CfdFlow)
 _add("DynFrame_CfdView", CfdView)
+_add("DynFrame_CfdExamples", CfdExamples)
 _add("DynFrame_RunAnalysis", RunAnalysis)
 _add("DynFrame_ModalAnalysis", ModalAnalysis)
 _add("DynFrame_BucklingAnalysis", BucklingAnalysis)

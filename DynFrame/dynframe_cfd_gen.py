@@ -741,6 +741,7 @@ def build_internal_flow_script(opts):
     L.append('mkdir -p "$OUT"; rm -rf "$OUT/VTK"')
     L.append('[ -d VTK ] && cp -r VTK "$OUT/" && echo "=== results VTK copied to: %s ==="'
              % win_out)
+    L.append(mpl_render_block(name))
     L.append('echo "=== INTERNAL FLOW DONE: $DST  (colour by U or p) ==="')
     return "\n".join(L)
 
@@ -890,6 +891,7 @@ def build_snappy_flow_script(opts):
     L.append('mkdir -p "$OUT"; rm -rf "$OUT/VTK"')
     L.append('[ -d VTK ] && cp -r VTK "$OUT/" && echo "=== results VTK copied to: %s ==="'
              % win_out)
+    L.append(mpl_render_block(name))
     L.append('echo "=== SNAPPY FLOW DONE: $DST  (colour by U or p) ==="')
     return "\n".join(L)
 
@@ -942,6 +944,86 @@ def build_mesh_check_script(opts):
     return "\n".join(L)
 
 
+# ---- result visualisation: read the VTK and plot with matplotlib ----
+# Reliable everywhere: no OpenGL, no MPI, no display server (so it works where
+# WSLg GUI windows / ParaView do not). Reads the foamToVTK output with the vtk
+# Python module (data only, no rendering) and draws a filled field with
+# matplotlib's Agg backend. The result PNGs are opened in the Windows viewer.
+_MPL_RENDER_PY = r'''
+import sys, os
+import numpy as np
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import vtk
+from vtk.util import numpy_support as ns
+
+vtkfile, out = sys.argv[1], sys.argv[2]
+os.makedirs(out, exist_ok=True)
+reader = vtk.vtkUnstructuredGridReader()
+reader.SetFileName(vtkfile)
+reader.ReadAllScalarsOn(); reader.ReadAllVectorsOn()
+reader.Update()
+grid = reader.GetOutput()
+b = grid.GetBounds()
+ext = [b[1] - b[0], b[3] - b[2], b[5] - b[4]]
+thin = int(np.argmin(ext)); ax = [i for i in range(3) if i != thin]
+labels = ["x", "y", "z"]
+cc = vtk.vtkCellCenters(); cc.SetInputData(grid); cc.Update()
+C = ns.vtk_to_numpy(cc.GetOutput().GetPoints().GetData())
+P = ns.vtk_to_numpy(grid.GetPoints().GetData())
+
+def plot(name, fn, title):
+    cd = grid.GetCellData(); pd = grid.GetPointData()
+    a = cd.GetArray(name); src = "cell"
+    if a is None:
+        a = pd.GetArray(name); src = "point"
+    if a is None:
+        print("NOFIELD " + name); return
+    data = ns.vtk_to_numpy(a)
+    val = np.linalg.norm(data, axis=1) if data.ndim > 1 else data
+    xy = C if src == "cell" else P
+    x = xy[:, ax[0]]; y = xy[:, ax[1]]
+    fig, g = plt.subplots(figsize=(10, 6.5))
+    try:
+        m = g.tricontourf(x, y, val, levels=40, cmap="turbo")
+    except Exception:
+        m = g.scatter(x, y, c=val, s=6, cmap="turbo")
+    g.set_aspect("equal"); g.set_title(title)
+    g.set_xlabel(labels[ax[0]] + " (m)"); g.set_ylabel(labels[ax[1]] + " (m)")
+    fig.colorbar(m, ax=g, shrink=0.85)
+    fig.savefig(os.path.join(out, fn), dpi=110, bbox_inches="tight")
+    plt.close(fig)
+    print("PLOT %s range=%.4g..%.4g" % (fn, float(val.min()), float(val.max())))
+
+plot("U", "U.png", "Velocity magnitude |U| (m/s)")
+plot("p", "p.png", "Pressure p (m2/s2)")
+print("MPL_DONE")
+'''
+
+
+def mpl_render_block(name):
+    """Bash (run inside the case dir, with $OUT set to the Windows-side /mnt path
+    or empty) that renders the solved result to PNGs with matplotlib and opens the
+    velocity image in the Windows default viewer. Reliable where WSLg/ParaView
+    windows do not show."""
+    L = []
+    L.append('VTKMAIN=$(find VTK -maxdepth 1 -name "*.vtk" 2>/dev/null | head -1)')
+    L.append('if [ -n "$VTKMAIN" ]; then')
+    L.append("  cat > .dynframe_mpl.py <<'DYNFRAMEMPLEOF'")
+    L.append(_MPL_RENDER_PY.strip("\n"))
+    L.append("DYNFRAMEMPLEOF")
+    L.append('  mkdir -p images')
+    L.append('  python3 .dynframe_mpl.py "$VTKMAIN" images >> log.dynframe 2>&1 || true')
+    L.append('  if [ -n "${OUT:-}" ] && [ -f images/U.png ]; then')
+    L.append('    mkdir -p "$OUT/images"; cp -f images/*.png "$OUT/images/" 2>/dev/null || true')
+    L.append('    WIN=$(wslpath -w "$OUT/images/U.png" 2>/dev/null)')
+    L.append('    [ -n "$WIN" ] && /mnt/c/Windows/System32/cmd.exe /c start "" "$WIN" >/dev/null 2>&1 || true')
+    L.append('  fi')
+    L.append('fi')
+    return "\n".join(L)
+
+
 # ---- OpenFOAM tutorial / example gallery (run any case, tweak parameters) ----
 def tutorials_find_script(of_env=None):
     """Bash that lists every runnable OpenFOAM tutorial as 'category|relpath|abspath'
@@ -989,31 +1071,20 @@ def build_tutorial_run_script(opts):
         if v != "":
             L.append('foamDictionary system/controlDict -entry %s -set %s '
                      '>/dev/null 2>&1 || true' % (entry, cfd.shq(v)))
-    # Run the case in the background (its own Allrun, else the standard tutorial
-    # sequence) then convert to VTK. ParaView does NOT wait for the whole solve:
-    # it opens as soon as the mesh exists, so even a long case shows up promptly
-    # and fills in as it writes time steps (press Reload in ParaView).
-    out_copy = ""
-    if win_out:
-        out_copy = ('; OUT=%s; mkdir -p "$OUT"; rm -rf "$OUT/VTK"; '
-                    '[ -d VTK ] && cp -r VTK "$OUT/"' % cfd.shq(win_out))
+    # Run the case (its own Allrun, else the standard tutorial sequence), convert
+    # to VTK, render the result to PNGs with matplotlib and open the velocity image
+    # in the Windows viewer. The whole script runs detached (Popen), so FreeCAD
+    # never blocks; the image appears when the solve finishes.
+    L.append('OUT=%s' % (cfd.shq(win_out) if win_out else '""'))
     L.append('echo "== DynFrame: running $DST ==" > log.dynframe')
-    L.append('( if [ -f ./Allrun ]; then chmod +x ./Allrun >/dev/null 2>&1 || true; '
-             './Allrun; else foamRunTutorials; fi; '
-             'foamToVTK -latestTime >/dev/null 2>&1 || foamToVTK >/dev/null 2>&1 '
-             '|| true%s; echo "== DynFrame: DONE ==" ) >> log.dynframe 2>&1 &'
-             % out_copy)
-    L.append('RUNPID=$!')
-    L.append('if command -v paraview >/dev/null 2>&1; then')
-    L.append('  export DISPLAY=${DISPLAY:-:0}')
-    L.append('  for i in $(seq 1 240); do [ -f constant/polyMesh/points ] && break; '
-             'kill -0 $RUNPID 2>/dev/null || break; sleep 1; done')
-    L.append('  touch %s' % foam)
-    L.append('  nohup setsid paraview %s >/tmp/dynframe_pv.log 2>&1 </dev/null &'
-             % foam)
-    L.append('  disown 2>/dev/null || true')
-    L.append('fi')
-    L.append('wait $RUNPID 2>/dev/null || true')
+    L.append('if [ -f ./Allrun ]; then chmod +x ./Allrun >/dev/null 2>&1 || true; '
+             './Allrun >> log.dynframe 2>&1; else foamRunTutorials >> log.dynframe 2>&1; fi')
+    L.append('foamToVTK -latestTime >> log.dynframe 2>&1 || '
+             'foamToVTK >> log.dynframe 2>&1 || true')
+    L.append('if [ -n "$OUT" ]; then mkdir -p "$OUT"; rm -rf "$OUT/VTK"; '
+             '[ -d VTK ] && cp -r VTK "$OUT/" 2>/dev/null || true; fi')
+    L.append(mpl_render_block(name))
+    L.append('echo "== DynFrame: DONE ==" >> log.dynframe')
     return "\n".join(L)
 
 
@@ -1041,18 +1112,13 @@ def build_example_run_script(opts):
              '"$STAGE"/controlDict system/')
     L.append('cp "$STAGE"/momentumTransport "$STAGE"/physicalProperties constant/')
     L.append('cp "$STAGE"/U "$STAGE"/p "$STAGE"/k "$STAGE"/omega "$STAGE"/nut 0/')
+    L.append('OUT=%s' % (cfd.shq(win_out) if win_out else '""'))
     L.append('( echo "== blockMesh =="; blockMesh; echo "== checkMesh =="; '
              'checkMesh | tail -12; echo "== foamRun =="; foamRun; '
-             'echo "== foamToVTK =="; foamToVTK -latestTime; echo "== DONE ==" ) '
+             'echo "== foamToVTK =="; foamToVTK -latestTime; echo "== solved ==" ) '
              '> log.dynframe 2>&1')
-    if win_out:
-        L.append('OUT=%s; mkdir -p "$OUT"; rm -rf "$OUT/VTK"; '
-                 '[ -d VTK ] && cp -r VTK "$OUT/"' % cfd.shq(win_out))
-    L.append('if command -v paraview >/dev/null 2>&1; then')
-    L.append('  touch %s' % foam)
-    L.append('  export DISPLAY=${DISPLAY:-:0}')
-    L.append('  nohup setsid paraview %s >/tmp/dynframe_pv.log 2>&1 </dev/null &'
-             % foam)
-    L.append('  disown 2>/dev/null || true')
-    L.append('fi')
+    L.append('if [ -n "$OUT" ]; then mkdir -p "$OUT"; rm -rf "$OUT/VTK"; '
+             '[ -d VTK ] && cp -r VTK "$OUT/" 2>/dev/null || true; fi')
+    L.append(mpl_render_block(name))
+    L.append('echo "== DynFrame: DONE ==" >> log.dynframe')
     return "\n".join(L)

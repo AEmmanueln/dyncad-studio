@@ -8828,11 +8828,11 @@ def _cfd_run_internal_flow(doc, solid, assigns, bb, vals0, vals):
     if vals.get("run") == "Yes":
         status = _cfd_run_and_report(fs, distro, win_out)
         ran_ok = ("Results written to" in status)
-        if vals.get("pv", "Yes") == "Yes" and ran_ok:
-            if _cfd_launch_paraview(name, distro):
-                status += ("\n\nOpening the result in ParaView - click the case "
-                           "in the Pipeline, press Apply, and colour by U, p"
-                           + (" or T" if heat else "") + ".")
+        if ran_ok:
+            status += ("\n\nResult images (velocity magnitude and pressure) were "
+                       "rendered and opened in the Windows image viewer; they are "
+                       "also saved in the case's 'images' folder, next to the VTK "
+                       "(open the .foam there in ParaView for interactive viewing).")
     status += pref_note
     _cfd_report("Internal flow result",
          "Internal-flow case '%s' from your face BCs on '%s'.\n\nPatches: %s.\n"
@@ -9101,8 +9101,9 @@ class _CfdExamplesPanel:
         except Exception as e:
             self._status.setText("Could not start: %s" % e); return
         self._status.setText(
-            "Running '%s' in the background - ParaView opens when it finishes "
-            "(large cases take minutes). Progress: ~/dynframe_cfd/%s/log.dynframe"
+            "Running '%s' in the background - a result image opens in the Windows "
+            "viewer when it finishes (large cases take minutes); images + VTK are "
+            "saved in the case folder. Progress: ~/dynframe_cfd/%s/log.dynframe"
             % (rel, name))
 
     def getStandardButtons(self):
@@ -9237,9 +9238,11 @@ class _CfdGalleryPanel:
         except Exception as e:
             self._status.setText("Could not start: %s" % e); return
         self._status.setText(
-            "Running '%s' on OpenFOAM - ParaView opens when it finishes (usually "
-            "seconds). Change any parameter and Run again to compare. Log: "
-            "~/dynframe_cfd/%s/log.dynframe" % (self._cur["title"], name))
+            "Running '%s' on OpenFOAM - a result image (velocity + pressure) opens "
+            "in the Windows viewer when it finishes (usually seconds) and is saved "
+            "in the case's images folder. Change any parameter and Run again to "
+            "compare. Log: ~/dynframe_cfd/%s/log.dynframe"
+            % (self._cur["title"], name))
 
     def getStandardButtons(self):
         return int(QW.QDialogButtonBox.Close)

@@ -8810,13 +8810,12 @@ def _cfd_run_internal_flow(doc, solid, assigns, bb, vals0, vals):
     if is_box:
         fs = cfdgen.build_internal_flow_script(
             {"of_env": of_env, "name": name, "stage_win": stage,
-             "win_out": win_out, "latest": True,
-             "win_paraview": _cfd_windows_paraview()})
+             "win_out": win_out, "latest": True, "open_image": False})
     else:
         fs = cfdgen.build_snappy_flow_script(
             {"of_env": of_env, "name": name, "stage_win": stage,
              "win_out": win_out, "patch_names": sorted(used), "latest": True,
-             "win_paraview": _cfd_windows_paraview()})
+             "open_image": False})
     fpath = os.path.join(outdir, "run_%s.sh" % name)
     try:
         _write_lf(fpath, fs)
@@ -8838,10 +8837,17 @@ def _cfd_run_internal_flow(doc, solid, assigns, bb, vals0, vals):
         status = _cfd_run_and_report(fs, distro, win_out)
         ran_ok = ("Results written to" in status)
         if ran_ok:
-            status += ("\n\nResult images (velocity magnitude and pressure) were "
-                       "rendered and opened in the Windows image viewer; they are "
-                       "also saved in the case's 'images' folder, next to the VTK "
-                       "(open the .foam there in ParaView for interactive viewing).")
+            opened = _cfd_open_result(name, distro, win_out)
+            if opened == "paraview":
+                status += ("\n\nOpening the result in ParaView (native Windows): in "
+                           "the Pipeline Browser click the case, press Apply, and "
+                           "colour by U or p.")
+            elif opened == "image":
+                status += ("\n\nResult images (velocity + pressure) were rendered "
+                           "and opened; they are saved in the case's images folder. "
+                           "Install ParaView for Windows for interactive viewing.")
+            else:
+                status += "\n\nResults (VTK + images) saved in the case folder."
     status += pref_note
     _cfd_report("Internal flow result",
          "Internal-flow case '%s' from your face BCs on '%s'.\n\nPatches: %s.\n"
@@ -8983,10 +8989,10 @@ def _cfd_launch_paraview(name, distro=""):
 
 
 def _cfd_windows_paraview():
-    """A native Windows ParaView's path (as a /mnt/c WSL path) if one is installed,
-    else "". DynFrame opens results in native Windows ParaView when present - the
-    only reliable interactive viewer here, since WSLg cannot show the WSL ParaView
-    window (it comes up 32x32 / off-screen). Without it, the result image is used."""
+    """A native Windows ParaView's path (a Windows path, C:\\...) if one is
+    installed, else "". DynFrame opens results in native Windows ParaView when
+    present - the only reliable interactive viewer here, since WSLg cannot show the
+    WSL ParaView window (32x32 / off-screen). Without it, the result image is used."""
     import glob
     cands = []
     for base in (os.environ.get("ProgramFiles", r"C:\Program Files"),
@@ -9003,11 +9009,99 @@ def _cfd_windows_paraview():
         pass
     for p in sorted(cands, reverse=True):          # newest version first
         if p and os.path.exists(p):
-            try:
-                return cfd.win_to_wsl(p)
-            except Exception:
-                return ""
+            return p                               # a Windows path (C:\...)
     return ""
+
+
+_CFD_WATCHERS = []     # keep result watchers alive while they poll
+
+
+def _cfd_foam_unc(name, distro=""):
+    """The solved case's .foam as a Windows path (\\\\wsl.localhost\\...), creating
+    the .foam if needed. "" on failure."""
+    try:
+        import subprocess
+        script = ('D=%s/%s\n[ -d "$D" ] || exit 1\ntouch "$D/%s.foam" 2>/dev/null\n'
+                  'wslpath -w "$D/%s.foam"\n' % (cfd.WORK_ROOT, name, name, name))
+        r = subprocess.run(cfd.wsl_run_argv(script, distro),
+                           capture_output=True, timeout=30)
+        out = (r.stdout or b"").decode("utf-8", "replace").strip().splitlines()
+        return out[-1].strip() if out else ""
+    except Exception:
+        return ""
+
+
+def _cfd_open_result(name, distro, win_out):
+    """Open the solved result FROM THE WINDOWS SIDE (the FreeCAD process): native
+    Windows ParaView if installed - it survives, unlike a WSL-launched one, which
+    is killed before its window appears - else the rendered velocity image.
+    `win_out` is the Windows-side case folder (C:\\...\\<name>). Returns what opened."""
+    import subprocess
+    pv = _cfd_windows_paraview()                   # a Windows path, or ""
+    if pv:
+        foam = _cfd_foam_unc(name, distro)
+        if foam:
+            # Launch via Windows' own `start`, which detaches ParaView into a fully
+            # independent process (the Windows shell owns it) - so it survives
+            # FreeCAD closing and is never killed with the launcher. A plain child
+            # or a DETACHED_PROCESS one is still inside FreeCAD's job object and
+            # dies when FreeCAD exits; a WSL-launched one dies with the WSL script.
+            comspec = os.environ.get("ComSpec", r"C:\Windows\System32\cmd.exe")
+            try:
+                subprocess.Popen([comspec, "/c", "start", "", pv, foam],
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL, close_fds=True)
+                return "paraview"
+            except Exception:
+                try:
+                    subprocess.Popen([pv, foam])
+                    return "paraview"
+                except Exception:
+                    pass
+    img = os.path.join(win_out, "images", "U.png")
+    try:
+        if os.path.exists(img):
+            os.startfile(img)                      # Windows default image viewer
+            return "image"
+    except Exception:
+        pass
+    return ""
+
+
+class _CfdResultWatcher:
+    """After a DETACHED run, poll (non-blocking, from the FreeCAD/Windows side) for
+    the result, then open it in ParaView (or the image). Kept in _CFD_WATCHERS so
+    the QTimer is not garbage-collected mid-run."""
+    def __init__(self, name, distro, win_out):
+        self._name = name; self._distro = distro; self._win_out = win_out
+        self._ticks = 0
+        try:
+            from PySide import QtCore
+        except Exception:
+            from PySide2 import QtCore
+        self._timer = QtCore.QTimer()
+        self._timer.timeout.connect(self._poll)
+        self._timer.start(2500)
+        _CFD_WATCHERS.append(self)
+
+    def _poll(self):
+        self._ticks += 1
+        done = False
+        try:
+            done = os.path.exists(os.path.join(self._win_out, "images", "U.png"))
+        except Exception:
+            done = False
+        if done or self._ticks > 1200:             # ~50 min safety cap
+            try:
+                self._timer.stop()
+            except Exception:
+                pass
+            if done:
+                _cfd_open_result(self._name, self._distro, self._win_out)
+            try:
+                _CFD_WATCHERS.remove(self)
+            except Exception:
+                pass
 
 
 def _cfd_list_tutorials(of_env=None, distro=""):
@@ -9126,7 +9220,7 @@ class _CfdExamplesPanel:
         except Exception:
             win_out = ""
         opts = {"of_env": of_env, "src": ab, "name": name, "win_out": win_out,
-                "win_paraview": _cfd_windows_paraview(),
+                "open_image": False,
                 "end_time": self._end.text().strip(),
                 "write_interval": self._wri.text().strip(),
                 "delta_t": self._dt.text().strip()}
@@ -9136,12 +9230,13 @@ class _CfdExamplesPanel:
             subprocess.Popen(cfd.wsl_run_argv(script, distro),
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                              stdin=subprocess.DEVNULL)
+            _CfdResultWatcher(name, distro, os.path.join(_cfd_outdir(), name))
         except Exception as e:
             self._status.setText("Could not start: %s" % e); return
         self._status.setText(
-            "Running '%s' in the background - a result image opens in the Windows "
-            "viewer when it finishes (large cases take minutes); images + VTK are "
-            "saved in the case folder. Progress: ~/dynframe_cfd/%s/log.dynframe"
+            "Running '%s' in the background - the result opens in ParaView (native "
+            "Windows) when it finishes, or as an image if ParaView isn't installed "
+            "(large cases take minutes). Progress: ~/dynframe_cfd/%s/log.dynframe"
             % (rel, name))
 
     def getStandardButtons(self):
@@ -9352,17 +9447,18 @@ class _CfdGalleryPanel:
         try:
             script = cfdgen.build_example_run_script(
                 {"of_env": of_env, "name": name, "stage_win": stage,
-                 "win_out": win_out, "win_paraview": _cfd_windows_paraview()})
+                 "win_out": win_out, "open_image": False})
             import subprocess
             subprocess.Popen(cfd.wsl_run_argv(script, distro),
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                              stdin=subprocess.DEVNULL)
+            _CfdResultWatcher(name, distro, win_out)
         except Exception as e:
             self._status.setText("Could not start: %s" % e); return
         self._status.setText(
-            "Running '%s' on OpenFOAM - a result image (velocity + pressure) opens "
-            "in the Windows viewer when it finishes (usually seconds) and is saved "
-            "in the case's images folder. Change any parameter and Run again to "
+            "Running '%s' on OpenFOAM - the result opens in ParaView (native "
+            "Windows) when it finishes (usually seconds), or as an image if "
+            "ParaView isn't installed. Change any parameter and Run again to "
             "compare. Log: ~/dynframe_cfd/%s/log.dynframe"
             % (self._cur["title"], name))
 

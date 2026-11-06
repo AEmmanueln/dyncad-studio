@@ -741,7 +741,7 @@ def build_internal_flow_script(opts):
     L.append('mkdir -p "$OUT"; rm -rf "$OUT/VTK"')
     L.append('[ -d VTK ] && cp -r VTK "$OUT/" && echo "=== results VTK copied to: %s ==="'
              % win_out)
-    L.append(mpl_render_block(name, opts.get("win_paraview", "")))
+    L.append(mpl_render_block(name, opts.get("open_image", True)))
     L.append('echo "=== INTERNAL FLOW DONE: $DST  (colour by U or p) ==="')
     return "\n".join(L)
 
@@ -891,7 +891,7 @@ def build_snappy_flow_script(opts):
     L.append('mkdir -p "$OUT"; rm -rf "$OUT/VTK"')
     L.append('[ -d VTK ] && cp -r VTK "$OUT/" && echo "=== results VTK copied to: %s ==="'
              % win_out)
-    L.append(mpl_render_block(name, opts.get("win_paraview", "")))
+    L.append(mpl_render_block(name, opts.get("open_image", True)))
     L.append('echo "=== SNAPPY FLOW DONE: $DST  (colour by U or p) ==="')
     return "\n".join(L)
 
@@ -1002,13 +1002,14 @@ print("MPL_DONE")
 '''
 
 
-def mpl_render_block(name, win_paraview=""):
+def mpl_render_block(name, open_image=True):
     """Bash (run inside the case dir, with $OUT the Windows-side /mnt path or
-    empty) that renders the solved result to PNGs with matplotlib, then shows it -
-    in native Windows ParaView when `win_paraview` (a /mnt/c path to paraview.exe)
-    is given (fully interactive), otherwise by opening the velocity image in the
-    Windows viewer. Reliable where WSLg/ParaView windows do not show."""
-    import dynframe_cfd as cfd
+    empty) that renders the solved result to PNGs with matplotlib and copies them
+    to Windows. If open_image is true it also opens the velocity image in the
+    Windows viewer (instant, so it survives the WSL session ending). It does NOT
+    launch ParaView - a Windows GUI launched from WSL is killed when the script
+    ends, before ParaView's window appears; DynFrame opens ParaView from the
+    Windows side (the FreeCAD process) instead."""
     L = []
     L.append('VTKMAIN=$(find VTK -maxdepth 1 -name "*.vtk" 2>/dev/null | head -1)')
     L.append('if [ -n "$VTKMAIN" ]; then')
@@ -1019,25 +1020,11 @@ def mpl_render_block(name, win_paraview=""):
     L.append('  python3 .dynframe_mpl.py "$VTKMAIN" images >> log.dynframe 2>&1 || true')
     L.append('  if [ -n "${OUT:-}" ] && [ -f images/U.png ]; then')
     L.append('    mkdir -p "$OUT/images"; cp -f images/*.png "$OUT/images/" 2>/dev/null || true')
+    if open_image:
+        L.append('    WIN=$(wslpath -w "$OUT/images/U.png" 2>/dev/null)')
+        L.append('    [ -n "$WIN" ] && /mnt/c/Windows/System32/cmd.exe /c start "" "$WIN" >/dev/null 2>&1 || true')
     L.append('  fi')
     L.append('fi')
-    if win_paraview:
-        # Native Windows ParaView is installed: open the case in it (fully
-        # interactive). WSLg cannot show the WSL ParaView window, but a Windows
-        # ParaView reads the case over the \\wsl.localhost path fine.
-        L.append('touch "$DST/%s.foam" 2>/dev/null || true' % name)
-        L.append('FOAMWIN=$(wslpath -w "$DST/%s.foam" 2>/dev/null)' % name)
-        L.append('if [ -n "$FOAMWIN" ]; then')
-        L.append('  nohup %s "$FOAMWIN" >/dev/null 2>&1 &' % cfd.shq(win_paraview))
-        L.append('  disown 2>/dev/null || true')
-        L.append('fi')
-    else:
-        # No Windows ParaView: open the rendered velocity image in the Windows
-        # viewer (the reliable fallback where WSLg/ParaView windows do not show).
-        L.append('if [ -n "${OUT:-}" ] && [ -f images/U.png ]; then')
-        L.append('  WIN=$(wslpath -w "$OUT/images/U.png" 2>/dev/null)')
-        L.append('  [ -n "$WIN" ] && /mnt/c/Windows/System32/cmd.exe /c start "" "$WIN" >/dev/null 2>&1 || true')
-        L.append('fi')
     return "\n".join(L)
 
 
@@ -1105,7 +1092,7 @@ def build_tutorial_run_script(opts):
              'foamToVTK >> log.dynframe 2>&1 || true')
     L.append('if [ -n "$OUT" ]; then mkdir -p "$OUT"; rm -rf "$OUT/VTK"; '
              '[ -d VTK ] && cp -r VTK "$OUT/" 2>/dev/null || true; fi')
-    L.append(mpl_render_block(name, opts.get("win_paraview", "")))
+    L.append(mpl_render_block(name, opts.get("open_image", True)))
     L.append('echo "== DynFrame: DONE ==" >> log.dynframe')
     return "\n".join(L)
 
@@ -1141,6 +1128,6 @@ def build_example_run_script(opts):
              '> log.dynframe 2>&1')
     L.append('if [ -n "$OUT" ]; then mkdir -p "$OUT"; rm -rf "$OUT/VTK"; '
              '[ -d VTK ] && cp -r VTK "$OUT/" 2>/dev/null || true; fi')
-    L.append(mpl_render_block(name, opts.get("win_paraview", "")))
+    L.append(mpl_render_block(name, opts.get("open_image", True)))
     L.append('echo "== DynFrame: DONE ==" >> log.dynframe')
     return "\n".join(L)

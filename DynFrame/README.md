@@ -251,6 +251,28 @@ spreadsheets at the root.
   eccentricity; results go to the `Masonry` table. (Validated: f_b=10, f_m=5,
   K=0.5 → f_k=4.06 MPa; h_ef=2500, t=215, e_mk=10.75 → Annex-G Φ_mid=0.812 —
   matching the hand calc.)
+- **Fillet Weld (EC3)** — EN 1993-1-8 simplified method: design shear strength
+  f_vw,d = (f_u/√3)/(β_w·γ_M2) from the parent-metal f_u and the correlation
+  factor β_w (steel grade), the resistance per unit length F_w,Rd = f_vw,d·throat,
+  the group capacity and the utilisation. (Validated: S275, a=5 mm → f_vw,d=233.7
+  MPa, F_w,Rd=1168 N/mm — matching the hand calc.)
+- **Combined Footing (EC2)** — a combined (two-column) footing: uniform bearing
+  under the load resultant vs the allowable, and the longitudinal **top (hogging)
+  and bottom (sagging) steel** from the footing analysed as a beam on uniform
+  soil pressure (M(x) = w·x²/2 − Σ Nᵢ(x−xᵢ)). (Validated: 5 m footing, two
+  1000 kN columns at 1 m and 4 m, w=400 N/mm → max sagging 200 kN·m, max hogging
+  −250 kN·m — matching the hand calc.)
+- **AISC Steel Check (US)** — the US-code counterpart of the EC3 check, to
+  ANSI/AISC 360-16 (LRFD): flexural-buckling **φP_n** (chapter E, F_cr with the
+  inelastic/elastic transition at 4.71√(E/F_y)), flexure **φM_n = φ·F_y·Z**
+  (chapter F), and the chapter-H combined interaction. (Validated: A=10 000 mm²,
+  Z=10⁶ mm³, r=100 mm, Gr50, KL=4 m → F_cr=306.9 MPa, φP_n=2762 kN, φM_n=310.5
+  kN·m — matching the hand calc.)
+- **Aluminium Member (EC9)** — a fourth material: EN 1999-1-1 bending resistance
+  W·f_o/γ_M1, flexural-buckling (relative slenderness → χ, class-A curve) axial
+  resistance, and the combined axial+bending interaction, for alloys 6063/6082/
+  7020. (Validated: f_o=250, W=10⁵ mm³ → M_Rd=22.7 kN·m; χ at λ̄=1.0 → 0.656 —
+  matching the hand calc.)
 - **Wall U-value & Condensation (building physics)** — **Wall U-value &
   Condensation** analyses a layered wall/roof: the **U-value** (thermal
   transmittance) to EN ISO 6946 (R-values in series + surface resistances),
@@ -563,7 +585,12 @@ rely on. The checks it runs:
 > area 75 000 mm², thickness 28.3 mm); the **EC3 bolted connection** matches the
 > hand calc (M20 8.8 single shear → F_v,Rd = 94.1 kN, F_b,Rd = 88.3 kN,
 > F_t,Rd = 141.1 kN), and the **EC6 masonry** wall too (f_b = 10, f_m = 5,
-> K = 0.5 → f_k = 4.06 MPa, Annex-G Φ_mid = 0.812); the **SLS
+> K = 0.5 → f_k = 4.06 MPa, Annex-G Φ_mid = 0.812); the **EC3 fillet weld**
+> (S275 → f_vw,d = 233.7 MPa), the **EC2 combined footing** (two 1000 kN columns
+> on a 5 m footing → max sagging 200 kN·m, hogging −250 kN·m), the **AISC 360-16**
+> check (Gr50, KL = 4 m → F_cr = 306.9 MPa, φP_n = 2762 kN, φM_n = 310.5 kN·m)
+> and the **EC9 aluminium** member (M_Rd = 22.7 kN·m, χ = 0.656 at λ̄ = 1.0) all
+> match their hand calcs; the **SLS
 > deflection** extraction is exact — a 10 mm
 > mid-span sag reads as 10 mm (span/deflection = 1000 for a 10 m span) while a
 > rigid-body rotation and a purely axial displacement both read as zero;

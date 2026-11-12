@@ -7550,6 +7550,183 @@ class BoltedConnEC3:
               "OK" if uV <= 1 else "FAIL", tline))
 
 
+# ── EC3-1-8 fillet weld ─────────────────────────────────────────
+WELD_BETAW = {"S235": 0.80, "S275": 0.85, "S355": 0.90, "S420": 1.00, "S460": 1.00}
+
+
+def _fillet_weld_fvwd(fu, betaw, gM2=1.25):
+    """EN 1993-1-8 4.5.3.3 simplified-method design shear strength of a fillet
+    weld, f_vw,d = (f_u/sqrt3) / (beta_w gamma_M2). The weld resistance per unit
+    length is then F_w,Rd = f_vw,d * a (throat)."""
+    return (fu / (3.0 ** 0.5)) / (betaw * gM2)
+
+
+class FilletWeldEC3:
+    def GetResources(self):
+        return {"Pixmap": _icon("rebar"), "MenuText": "Fillet Weld (EC3)",
+                "ToolTip": "Check a fillet weld to EN 1993-1-8 (simplified method): "
+                           "the design shear strength f_vw,d from the parent-metal "
+                           "f_u and the correlation factor beta_w, the resistance "
+                           "per unit length F_w,Rd = f_vw,d * throat, and the group "
+                           "capacity vs the applied force.",
+                "Accel": "A, W"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        doc = FreeCAD.ActiveDocument
+        fields = [
+            {"key": "_i", "kind": "info", "default":
+             "Fillet weld, EN 1993-1-8 simplified method. Enter the throat a, the "
+             "total effective weld length, the steel grade (sets beta_w) and f_u, "
+             "and the applied force on the weld group."},
+            {"key": "a", "label": "Weld throat a (mm)", "kind": "float", "default": 5.0},
+            {"key": "l", "label": "Total weld length (mm)", "kind": "float", "default": 400.0},
+            {"key": "grade", "label": "Steel grade (beta_w)", "kind": "combo",
+             "options": list(WELD_BETAW.keys()), "default": "S275"},
+            {"key": "fu", "label": "Parent metal f_u (MPa)", "kind": "float", "default": 430.0},
+            {"key": "F", "label": "Applied force on the weld (kN)", "kind": "float",
+             "default": 300.0},
+        ]
+        vals = form_dialog("Fillet Weld (EC3)", fields)
+        if not vals:
+            return
+        betaw = WELD_BETAW[vals["grade"]]; fu = float(vals["fu"])
+        a = float(vals["a"]); l = float(vals["l"])
+        fvwd = _fillet_weld_fvwd(fu, betaw)
+        Fw_per_mm = fvwd * a                       # N/mm
+        Fw_Rd = Fw_per_mm * l                       # N
+        F = float(vals["F"]) * 1e3
+        util = F / Fw_Rd if Fw_Rd > 0 else 99.9
+        doc.openTransaction("DynFrame: fillet weld")
+        try:
+            s = doc.getObject("Weld") or doc.addObject("Spreadsheet::Sheet", "Weld")
+            s.Label = "Weld"; s.clearAll()
+            s.set("A1", "FILLET WELD EC3 - a=%g mm, l=%g mm, %s (beta_w=%.2f), "
+                  "f_u=%g | F=%g kN" % (a, l, vals["grade"], betaw, fu, vals["F"]))
+            rows = [
+                ("f_vw,d (MPa)", "%.1f" % fvwd),
+                ("F_w,Rd per mm (kN/mm)", "%.3f" % (Fw_per_mm / 1e3)),
+                ("Group capacity F_w,Rd (kN)", "%.0f" % (Fw_Rd / 1e3)),
+                ("Utilisation F/F_w,Rd", "%.2f  %s" % (util, "OK" if util <= 1 else "FAIL")),
+            ]
+            for i, (aa, bb) in enumerate(rows, start=2):
+                s.set("A%d" % i, aa); s.set("B%d" % i, bb)
+            _grp(doc, RES_GROUP).addObject(s)
+            doc.commitTransaction(); doc.recompute()
+        except Exception as e:
+            doc.abortTransaction(); err("Fillet weld failed: %s" % e); return
+        info("Fillet weld (EN 1993-1-8, simplified) - a = %g mm, length = %g mm, "
+             "%s.\n\nf_vw,d = %.1f MPa\nF_w,Rd = %.3f kN/mm x %g mm = %.0f kN\n"
+             "F_Ed = %g kN  ->  utilisation = %.2f  %s\n\nSee the 'Weld' table." %
+             (a, l, vals["grade"], fvwd, Fw_per_mm / 1e3, l, Fw_Rd / 1e3, vals["F"],
+              util, "OK" if util <= 1 else "FAIL"))
+
+
+# ── EC2 combined (two-column / strip) footing ───────────────────
+def _combined_footing_moments(L, w, cols, nx=1001):
+    """Bending-moment envelope of a combined/strip footing: length L (mm), uniform
+    upward soil pressure w (N/mm), downward column loads cols = [(x, N)].
+    M(x) = w x^2/2 - sum_{xi<=x} Ni (x - xi). Returns (M_max sagging sense,
+    M_min hogging sense) over the length (column positions are sampled exactly)."""
+    xs = sorted(set([L * i / (nx - 1) for i in range(nx)] + [c[0] for c in cols]))
+    Mmax = -1e30; Mmin = 1e30
+    for x in xs:
+        M = w * x * x / 2.0 - sum(N * (x - xi) for (xi, N) in cols if xi <= x)
+        Mmax = max(Mmax, M); Mmin = min(Mmin, M)
+    return Mmax, Mmin
+
+
+class CombinedFootingEC2:
+    _GRADES = RcBeamEC2._GRADES
+
+    def GetResources(self):
+        return {"Pixmap": _icon("rebar"), "MenuText": "Combined Footing (EC2)",
+                "ToolTip": "Design a combined (two-column) rectangular footing to "
+                           "EN 1992-1-1 / EN 1997: size it so the bearing is "
+                           "uniform under the load resultant, check the pressure, "
+                           "and design the longitudinal top (hogging) and bottom "
+                           "(sagging) steel from the footing-as-a-beam moments.",
+                "Accel": "A, G"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        doc = FreeCAD.ActiveDocument
+        fields = [
+            {"key": "_i", "kind": "info", "default":
+             "Combined footing under two columns (EN 1992-1-1 / EN 1997). Enter the "
+             "two column loads and positions, the footing plan + depth, materials "
+             "and allowable bearing. The footing is analysed as a beam on uniform "
+             "soil pressure to get the top/bottom steel."},
+            {"key": "grade", "label": "Concrete grade", "kind": "combo",
+             "options": list(self._GRADES.keys()), "default": "C30/37"},
+            {"key": "fyk", "label": "Steel fyk (MPa)", "kind": "float", "default": 500.0},
+            {"key": "N1", "label": "Column 1 load (kN, ULS)", "kind": "float", "default": 1000.0},
+            {"key": "x1", "label": "Column 1 position from left (mm)", "kind": "float",
+             "default": 1000.0},
+            {"key": "N2", "label": "Column 2 load (kN, ULS)", "kind": "float", "default": 1000.0},
+            {"key": "x2", "label": "Column 2 position from left (mm)", "kind": "float",
+             "default": 4000.0},
+            {"key": "L", "label": "Footing length L (mm)", "kind": "float", "default": 5000.0},
+            {"key": "B", "label": "Footing width B (mm)", "kind": "float", "default": 2000.0},
+            {"key": "h", "label": "Footing depth h (mm)", "kind": "float", "default": 700.0},
+            {"key": "cover", "label": "Cover (mm)", "kind": "float", "default": 50.0},
+            {"key": "bar", "label": "Bar diameter (mm)", "kind": "float", "default": 20.0},
+            {"key": "qall", "label": "Allowable bearing (kPa, SLS check)", "kind": "float",
+             "default": 200.0},
+        ]
+        vals = form_dialog("Combined Footing (EC2)", fields)
+        if not vals:
+            return
+        fck = self._GRADES[vals["grade"]][0]; fyk = float(vals["fyk"])
+        N1 = float(vals["N1"]) * 1e3; N2 = float(vals["N2"]) * 1e3
+        x1 = float(vals["x1"]); x2 = float(vals["x2"])
+        L = float(vals["L"]); B = float(vals["B"]); h = float(vals["h"])
+        R = N1 + N2
+        w = R / L                                   # N/mm upward
+        p = R / (B * L)                             # MPa
+        qall = float(vals["qall"]) / 1000.0
+        Mmax, Mmin = _combined_footing_moments(L, w, [(x1, N1), (x2, N2)])
+        d = h - float(vals["cover"]) - float(vals["bar"])
+        fb_sag = _rc_beam_flexure(abs(Mmax), B, d, fck, fyk)
+        fb_hog = _rc_beam_flexure(abs(Mmin), B, d, fck, fyk)
+        doc.openTransaction("DynFrame: combined footing")
+        try:
+            s = doc.getObject("CombFooting") or doc.addObject("Spreadsheet::Sheet",
+                                                              "CombFooting")
+            s.Label = "CombFooting"; s.clearAll()
+            s.set("A1", "COMBINED FOOTING EC2 - %gx%g mm, h=%g | N1=%g@%g, N2=%g@%g kN"
+                  % (B, L, h, vals["N1"], x1, vals["N2"], x2))
+            rows = [
+                ("Bearing pressure p (kPa)", "%.0f  %s"
+                 % (p * 1000, "OK" if p <= qall else "EXCEEDS ALLOWABLE")),
+                ("Max sagging M (kNm)", "%.0f" % (abs(Mmax) / 1e6)),
+                ("Bottom steel As (mm2)", "%.0f  (min %.0f)"
+                 % (fb_sag["As_req"], fb_sag["As_min"])),
+                ("Max hogging M (kNm)", "%.0f" % (abs(Mmin) / 1e6)),
+                ("Top steel As (mm2)", "%.0f  (min %.0f)"
+                 % (fb_hog["As_req"], fb_hog["As_min"])),
+            ]
+            for i, (aa, bb) in enumerate(rows, start=2):
+                s.set("A%d" % i, aa); s.set("B%d" % i, bb)
+            _grp(doc, RES_GROUP).addObject(s)
+            doc.commitTransaction(); doc.recompute()
+        except Exception as e:
+            doc.abortTransaction(); err("Combined footing failed: %s" % e); return
+        info("Combined footing (EN 1992-1-1) - %g x %g mm, h = %g mm, two columns.\n\n"
+             "Resultant %g kN, bearing p = %.0f kPa vs allowable %g kPa  %s\n\n"
+             "Longitudinal bending (footing as a beam on uniform pressure):\n"
+             "  sagging M = %.0f kNm -> bottom As = %.0f mm2\n"
+             "  hogging M = %.0f kNm -> top As = %.0f mm2\n\n"
+             "See the 'CombFooting' table." %
+             (B, L, h, R / 1e3, p * 1000, vals["qall"],
+              "OK" if p <= qall else "EXCEEDS", abs(Mmax) / 1e6, fb_sag["As_req"],
+              abs(Mmin) / 1e6, fb_hog["As_req"]))
+
+
 # ── EC6 unreinforced masonry wall (vertical load) ───────────────
 def _masonry_fk(fb, fm, K=0.5, alpha=0.7, beta=0.3):
     """EN 1996-1-1 3.6.1.2 characteristic compressive strength of masonry,
@@ -7641,6 +7818,190 @@ class MasonryEC6:
              "See the 'Masonry' table. Unreinforced, vertical load, per metre." %
              (t, hef, fk, fd, gM, phi_top, phi_mid, phi, NRd, util,
               "OK" if util <= 1 else "FAIL"))
+
+
+# ── AISC 360-16 steel member (US code, LRFD) ────────────────────
+def _aisc_Fcr(KLr, E, Fy):
+    """AISC 360-16 E3 flexural-buckling critical stress F_cr (MPa)."""
+    import math
+    if KLr <= 1e-9:
+        return Fy
+    Fe = math.pi ** 2 * E / (KLr * KLr)
+    if KLr <= 4.71 * math.sqrt(E / Fy):
+        return (0.658 ** (Fy / Fe)) * Fy        # inelastic
+    return 0.877 * Fe                            # elastic
+
+
+def _aisc_member(A, Z, r, E, Fy, KL, Pr, Mr, phi_c=0.90, phi_b=0.90):
+    """AISC 360-16 LRFD compact-section member check (axial + strong-axis
+    bending). Returns phiPn, phiMn and the H1-1 interaction utilisation."""
+    KLr = KL / r if r > 0 else 0.0
+    Fcr = _aisc_Fcr(KLr, E, Fy)
+    phiPn = phi_c * Fcr * A
+    phiMn = phi_b * Fy * Z
+    pr = Pr / phiPn if phiPn > 0 else 0.0
+    mr = Mr / phiMn if phiMn > 0 else 0.0
+    util = (pr + (8.0 / 9.0) * mr) if pr >= 0.2 else (pr / 2.0 + mr)
+    return {"Fcr": Fcr, "phiPn": phiPn, "phiMn": phiMn, "KLr": KLr,
+            "util": util, "ok": util <= 1.0}
+
+
+class AiscSteel:
+    _GRADES = {"A36 (Fy=250)": 250.0, "A992/Gr50 (Fy=345)": 345.0,
+               "Gr65 (Fy=450)": 450.0}
+
+    def GetResources(self):
+        return {"Pixmap": _icon("tension"), "MenuText": "AISC Steel Check (US)",
+                "ToolTip": "Check a compact steel member to ANSI/AISC 360-16 (LRFD): "
+                           "flexural-buckling phiP_n (chapter E), flexure phiM_n = "
+                           "phi Fy Z (chapter F), and the chapter H combined "
+                           "axial+bending interaction - the US-code counterpart of "
+                           "the EC3 check.",
+                "Accel": "A, 3"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        doc = FreeCAD.ActiveDocument
+        fields = [
+            {"key": "_i", "kind": "info", "default":
+             "Compact steel member to ANSI/AISC 360-16 (LRFD), SI units. Enter the "
+             "section (area, plastic modulus Z, radius of gyration r), the steel "
+             "grade, the effective length KL and the required strengths."},
+            {"key": "grade", "label": "Steel grade", "kind": "combo",
+             "options": list(self._GRADES.keys()), "default": "A992/Gr50 (Fy=345)"},
+            {"key": "A", "label": "Area A (mm2)", "kind": "float", "default": 10000.0},
+            {"key": "Z", "label": "Plastic modulus Z (mm3)", "kind": "float", "default": 1.0e6},
+            {"key": "r", "label": "Radius of gyration r (mm)", "kind": "float", "default": 100.0},
+            {"key": "KL", "label": "Effective length KL (mm)", "kind": "float", "default": 4000.0},
+            {"key": "Pr", "label": "Required axial P_r (kN)", "kind": "float", "default": 1000.0},
+            {"key": "Mr", "label": "Required moment M_r (kN.m)", "kind": "float", "default": 150.0},
+        ]
+        vals = form_dialog("AISC Steel Check (US)", fields)
+        if not vals:
+            return
+        Fy = self._GRADES[vals["grade"]]; E = 200000.0
+        res = _aisc_member(float(vals["A"]), float(vals["Z"]), float(vals["r"]), E,
+                           Fy, float(vals["KL"]), float(vals["Pr"]) * 1e3,
+                           float(vals["Mr"]) * 1e6)
+        doc.openTransaction("DynFrame: AISC check")
+        try:
+            s = doc.getObject("AISC") or doc.addObject("Spreadsheet::Sheet", "AISC")
+            s.Label = "AISC"; s.clearAll()
+            s.set("A1", "AISC 360-16 LRFD - %s, A=%g, Z=%g, r=%g | KL=%g, P_r=%g kN, "
+                  "M_r=%g kNm" % (vals["grade"], vals["A"], vals["Z"], vals["r"],
+                                  vals["KL"], vals["Pr"], vals["Mr"]))
+            rows = [
+                ("KL/r / F_cr (MPa)", "%.0f / %.1f" % (res["KLr"], res["Fcr"])),
+                ("phi P_n (kN)", "%.0f" % (res["phiPn"] / 1e3)),
+                ("phi M_n (kNm)", "%.0f" % (res["phiMn"] / 1e6)),
+                ("H1-1 interaction", "%.2f  %s" % (res["util"], "OK" if res["ok"] else "FAIL")),
+            ]
+            for i, (aa, bb) in enumerate(rows, start=2):
+                s.set("A%d" % i, aa); s.set("B%d" % i, bb)
+            _grp(doc, RES_GROUP).addObject(s)
+            doc.commitTransaction(); doc.recompute()
+        except Exception as e:
+            doc.abortTransaction(); err("AISC check failed: %s" % e); return
+        info("AISC 360-16 (LRFD) - %s.\n\nKL/r = %.0f, F_cr = %.1f MPa\n"
+             "phi P_n = %.0f kN, phi M_n = %.0f kNm\n"
+             "H1-1 interaction = %.2f  %s\n\nSee the 'AISC' table. Compact section, "
+             "strong-axis bending." %
+             (vals["grade"], res["KLr"], res["Fcr"], res["phiPn"] / 1e3,
+              res["phiMn"] / 1e6, res["util"], "OK" if res["ok"] else "FAIL"))
+
+
+# ── EC9 aluminium member (EN 1999-1-1) ──────────────────────────
+ALU_ALLOYS = {"6063-T6 (fo=160)": 160.0, "6082-T6 (fo=250)": 250.0,
+              "7020-T6 (fo=280)": 280.0}
+
+
+def _ec9_chi(lam, alpha=0.2, lam0=0.1):
+    """EN 1999-1-1 6.3.1 flexural-buckling reduction factor chi (class-A curve:
+    alpha=0.2, lambda_0=0.1)."""
+    if lam <= lam0:
+        return 1.0
+    phi = 0.5 * (1.0 + alpha * (lam - lam0) + lam * lam)
+    return min(1.0 / (phi + (phi * phi - lam * lam) ** 0.5), 1.0)
+
+
+def _ec9_member(A, W, fo, E, L, i, Pr, Mr, gM1=1.1, alpha_shape=1.0):
+    """EN 1999-1-1 member check (SI): section/buckling axial resistance and
+    bending resistance, plus a simplified axial+bending interaction."""
+    import math
+    M_Rd = alpha_shape * W * fo / gM1
+    lam = (L / i) / (math.pi * math.sqrt(E / fo)) if i > 0 else 0.0
+    chi = _ec9_chi(lam)
+    N_bRd = chi * A * fo / gM1
+    pr = Pr / N_bRd if N_bRd > 0 else 0.0
+    mr = Mr / M_Rd if M_Rd > 0 else 0.0
+    return {"M_Rd": M_Rd, "N_bRd": N_bRd, "lam": lam, "chi": chi,
+            "util": pr + mr, "ok": (pr + mr) <= 1.0}
+
+
+class AluminiumEC9:
+    def GetResources(self):
+        return {"Pixmap": _icon("tension"), "MenuText": "Aluminium Member (EC9)",
+                "ToolTip": "Check an aluminium member to EN 1999-1-1: bending "
+                           "resistance W fo/gamma_M1, flexural buckling (relative "
+                           "slenderness -> chi) axial resistance, and the combined "
+                           "axial+bending interaction - a fourth material alongside "
+                           "steel, concrete and timber.",
+                "Accel": "A, 9"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        doc = FreeCAD.ActiveDocument
+        fields = [
+            {"key": "_i", "kind": "info", "default":
+             "Aluminium member to EN 1999-1-1 (SI). Enter the alloy (0.2% proof "
+             "f_o), the section (area, modulus W, radius of gyration i), the "
+             "buckling length and the design forces."},
+            {"key": "alloy", "label": "Alloy (f_o)", "kind": "combo",
+             "options": list(ALU_ALLOYS.keys()), "default": "6082-T6 (fo=250)"},
+            {"key": "A", "label": "Area A (mm2)", "kind": "float", "default": 3000.0},
+            {"key": "W", "label": "Section modulus W (mm3)", "kind": "float", "default": 1.0e5},
+            {"key": "i", "label": "Radius of gyration i (mm)", "kind": "float", "default": 40.0},
+            {"key": "L", "label": "Buckling length L (mm)", "kind": "float", "default": 2000.0},
+            {"key": "Pr", "label": "Axial N_Ed (kN)", "kind": "float", "default": 100.0},
+            {"key": "Mr", "label": "Moment M_Ed (kN.m)", "kind": "float", "default": 10.0},
+        ]
+        vals = form_dialog("Aluminium Member (EC9)", fields)
+        if not vals:
+            return
+        fo = ALU_ALLOYS[vals["alloy"]]; E = 70000.0      # aluminium E
+        res = _ec9_member(float(vals["A"]), float(vals["W"]), fo, E,
+                          float(vals["L"]), float(vals["i"]),
+                          float(vals["Pr"]) * 1e3, float(vals["Mr"]) * 1e6)
+        doc.openTransaction("DynFrame: EC9 check")
+        try:
+            s = doc.getObject("Aluminium") or doc.addObject("Spreadsheet::Sheet",
+                                                            "Aluminium")
+            s.Label = "Aluminium"; s.clearAll()
+            s.set("A1", "ALUMINIUM EC9 - %s, A=%g, W=%g, i=%g | L=%g, N=%g kN, M=%g kNm"
+                  % (vals["alloy"], vals["A"], vals["W"], vals["i"], vals["L"],
+                     vals["Pr"], vals["Mr"]))
+            rows = [
+                ("Bending M_Rd (kNm)", "%.1f" % (res["M_Rd"] / 1e6)),
+                ("Slenderness lam_bar / chi", "%.2f / %.3f" % (res["lam"], res["chi"])),
+                ("Buckling N_b,Rd (kN)", "%.0f" % (res["N_bRd"] / 1e3)),
+                ("Interaction N/N_b + M/M_Rd", "%.2f  %s"
+                 % (res["util"], "OK" if res["ok"] else "FAIL")),
+            ]
+            for i2, (aa, bb) in enumerate(rows, start=2):
+                s.set("A%d" % i2, aa); s.set("B%d" % i2, bb)
+            _grp(doc, RES_GROUP).addObject(s)
+            doc.commitTransaction(); doc.recompute()
+        except Exception as e:
+            doc.abortTransaction(); err("EC9 check failed: %s" % e); return
+        info("Aluminium member (EN 1999-1-1) - %s.\n\n"
+             "M_Rd = %.1f kNm\nlambda_bar = %.2f -> chi = %.3f, N_b,Rd = %.0f kN\n"
+             "Interaction N/N_b,Rd + M/M_Rd = %.2f  %s\n\nSee the 'Aluminium' table." %
+             (vals["alloy"], res["M_Rd"] / 1e6, res["lam"], res["chi"],
+              res["N_bRd"] / 1e3, res["util"], "OK" if res["ok"] else "FAIL"))
 
 
 class WallThermal:
@@ -13956,7 +14317,11 @@ _add("DynFrame_PadFootingEC2", PadFootingEC2)
 _add("DynFrame_TimberEC5", TimberEC5)
 _add("DynFrame_BasePlateEC3", BasePlateEC3)
 _add("DynFrame_BoltedConnEC3", BoltedConnEC3)
+_add("DynFrame_FilletWeldEC3", FilletWeldEC3)
 _add("DynFrame_MasonryEC6", MasonryEC6)
+_add("DynFrame_CombinedFootingEC2", CombinedFootingEC2)
+_add("DynFrame_AiscSteel", AiscSteel)
+_add("DynFrame_AluminiumEC9", AluminiumEC9)
 _add("DynFrame_DeflectionCheck", DeflectionCheck)
 _add("DynFrame_WallThermal", WallThermal)
 _add("DynFrame_ThermalBridge2D", ThermalBridge2D)

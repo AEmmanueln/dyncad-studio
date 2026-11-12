@@ -1781,6 +1781,50 @@ assert dM.getObject("Masonry") is not None and "N_Rd" in gM["msg"]
 print("  masonry command: %s" % gM["msg"].split(chr(10))[0])
 print("EC3 bolted + EC6 masonry OK")
 
+# ---------- welds, combined footing, AISC, EC9 ----------
+print("\n== fillet weld + combined footing + AISC + EC9 ==")
+# fillet weld S275: f_vw,d = 430/(sqrt3*0.85*1.25) = 233.7 MPa
+fvwd = C._fillet_weld_fvwd(430.0, 0.85)
+assert abs(fvwd - 233.7) < 0.3, fvwd
+assert abs(fvwd * 5.0 - 1168.4) < 2.0        # per mm at a=5
+print("  weld S275: f_vw,d=%.1f MPa, F_w,Rd=%.0f N/mm at a=5 (expect 233.7/1168)"
+      % (fvwd, fvwd * 5.0))
+# combined footing: L=5000, w=400 N/mm, cols 1000kN @1000 & 4000
+Mx, Mn = C._combined_footing_moments(5000.0, 400.0, [(1000.0, 1e6), (4000.0, 1e6)])
+assert abs(Mx - 2.0e8) < 1e6 and abs(Mn - (-2.5e8)) < 1e6, (Mx, Mn)
+print("  combined footing: max sag=%.0f kNm, max hog=%.0f kNm (expect 200/-250)"
+      % (Mx / 1e6, Mn / 1e6))
+# AISC: A=10000,Z=1e6,r=100,Fy=345,KL=4000 -> F_cr=306.9, phiPn=2762kN, phiMn=310.5
+ai = C._aisc_member(10000.0, 1.0e6, 100.0, 200000.0, 345.0, 4000.0, 1000e3, 150e6)
+assert abs(ai["Fcr"] - 306.9) < 1.0 and abs(ai["phiPn"] / 1e3 - 2762.0) < 5.0
+assert abs(ai["phiMn"] / 1e6 - 310.5) < 1.0
+print("  AISC: F_cr=%.1f MPa, phiPn=%.0f kN, phiMn=%.0f kNm (expect 306.9/2762/310.5)"
+      % (ai["Fcr"], ai["phiPn"] / 1e3, ai["phiMn"] / 1e6))
+# EC9: section M_Rd = 1e5*250/1.1 = 22.7 kNm; chi(lam=1.0)=0.6563
+assert abs(C._ec9_chi(1.0) - 0.6563) < 2e-3, C._ec9_chi(1.0)
+assert C._ec9_chi(0.1) == 1.0
+ec9 = C._ec9_member(3000.0, 1.0e5, 250.0, 70000.0, 1.0, 40.0, 0.0, 10e6)  # i=40,L~0 -> chi~1
+assert abs(ec9["M_Rd"] / 1e6 - 22.73) < 0.1, ec9["M_Rd"]
+print("  EC9: M_Rd=%.1f kNm, chi(1.0)=%.3f (expect 22.7/0.656)"
+      % (ec9["M_Rd"] / 1e6, C._ec9_chi(1.0)))
+# command smoke tests (each writes its table)
+for cmd, flds, want in [
+    (C.FilletWeldEC3, {"a": 5.0, "l": 400.0, "grade": "S275", "fu": 430.0, "F": 300.0}, "Weld"),
+    (C.CombinedFootingEC2, {"grade": "C30/37", "fyk": 500.0, "N1": 1000.0, "x1": 1000.0,
+        "N2": 1000.0, "x2": 4000.0, "L": 5000.0, "B": 2000.0, "h": 700.0,
+        "cover": 50.0, "bar": 20.0, "qall": 200.0}, "CombFooting"),
+    (C.AiscSteel, {"grade": "A992/Gr50 (Fy=345)", "A": 10000.0, "Z": 1.0e6, "r": 100.0,
+        "KL": 4000.0, "Pr": 1000.0, "Mr": 150.0}, "AISC"),
+    (C.AluminiumEC9, {"alloy": "6082-T6 (fo=250)", "A": 3000.0, "W": 1.0e5, "i": 40.0,
+        "L": 2000.0, "Pr": 100.0, "Mr": 10.0}, "Aluminium")]:
+    dC = Doc(); FreeCAD.ActiveDocument = dC
+    C.form_dialog = lambda title, fields, f=flds: f
+    gC = {}; C.info = lambda m, g=gC: g.setdefault("msg", m)
+    cmd().Activated()
+    assert dC.getObject(want) is not None, want
+print("  command tables written: Weld, CombFooting, AISC, Aluminium")
+print("welds + combined footing + AISC + EC9 OK")
+
 # ---------- SLS deflection check ----------
 print("\n== SLS deflection check ==")
 dl = C._defl_limits(10000.0)       # 10 m span

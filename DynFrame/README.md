@@ -204,9 +204,21 @@ spreadsheets at the root.
   nominal-curvature method — give the effective length l₀ and it computes the
   slenderness λ against λ_lim and adds the second-order moment M₂ = N_Ed·e₂ to
   the design moment. Enter the section, bars and ULS N_Ed / M_Ed; results go to
-  the `RcColumn` table. (Validated: 300×400, 2000 mm² symmetric, C30/37 → squash
-  load 3270 kN, M_Rd=246 kN·m at N=960 kN; with l₀=6 m → λ=52 > λ_lim=17
-  (slender), M₂≈48 kN·m — all matching the hand calc.)
+  the `RcColumn` table. **Biaxial bending** (EC2 5.8.9) is checked when a moment
+  about the second axis is given: (M_Edz/M_Rdz)^a + (M_Edy/M_Rdy)^a ≤ 1 with the
+  exponent a from N_Ed/N_Rd. (Validated: 300×400, 2000 mm² symmetric, C30/37 →
+  squash load 3270 kN, M_Rd=246 kN·m at N=960 kN; with l₀=6 m → λ=52 > λ_lim=17
+  (slender), M₂≈48 kN·m; biaxial a=1.25 at n=0.4 — all matching the hand calc.)
+- **Pad Footing Design (EC2 / EN 1997)** — design an isolated pad footing under a
+  square column: the **bearing pressure** (p_max with any column moment, vs the
+  allowable, and the required plan area), the **cantilever bending** steel (the
+  footing as a cantilever from the column face), **one-way shear** at d from the
+  face, and **punching shear** at the 2d control perimeter (reduced for the
+  upward pressure inside it). Enter the column load, plan size, depth, allowable
+  bearing and materials; results go to the `PadFooting` table. (Validated:
+  1000 kN on 2.5×2.5 m, 400 mm column, C30/37, 200 kPa allowable → bearing
+  160 kPa, required area 5.0 m², cantilever M=119 kN·m/m, punching perimeter
+  u₁=7154 mm, v_Ed=0.152 ≤ v_Rd,c=0.415 MPa — matching the hand calc.)
 - **Wall U-value & Condensation (building physics)** — **Wall U-value &
   Condensation** analyses a layered wall/roof: the **U-value** (thermal
   transmittance) to EN ISO 6946 (R-values in series + surface resistances),
@@ -507,7 +519,12 @@ rely on. The checks it runs:
 > **EC2 RC column** N–M interaction matches the hand-calculated point (300×400,
 > 2000 mm² symmetric, C30/37: squash 3270 kN, and M_Rd = 246 kN·m at N = 960 kN,
 > with EC2 5.8 slenderness λ = 52 > λ_lim = 17 and a nominal-curvature M₂ ≈
-> 48 kN·m at l₀ = 6 m); the **SLS deflection** extraction is exact — a 10 mm
+> 48 kN·m at l₀ = 6 m, and the **biaxial** interaction exponent a = 1.25 at
+> n = 0.4 giving 0.5^a + 0.5^a = 0.841); the **EC2 pad footing** matches the
+> hand calc (1000 kN on 2.5×2.5 m, 400 mm column, C30/37, 200 kPa allowable →
+> bearing 160 kPa, required area 5.0 m², cantilever M = 119 kN·m/m, punching
+> perimeter u₁ = 7154 mm, v_Ed = 0.152 ≤ v_Rd,c = 0.415 MPa); the **SLS
+> deflection** extraction is exact — a 10 mm
 > mid-span sag reads as 10 mm (span/deflection = 1000 for a 10 m span) while a
 > rigid-body rotation and a purely axial displacement both read as zero;
 > the

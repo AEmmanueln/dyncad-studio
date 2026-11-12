@@ -6747,6 +6747,27 @@ def _rc_column_MRd(N_Ed, b, h, d2, As_tot, fck, fyk, gc=1.5, gs=1.15, nx=600):
     return best
 
 
+def _biaxial_exponent(n):
+    """EN 1992-1-1 5.8.9 exponent a for the biaxial interaction, from the axial
+    ratio n = N_Ed/N_Rd: a = 1.0 at n<=0.1, 1.5 at 0.7, 2.0 at 1.0 (linear)."""
+    if n <= 0.1:
+        return 1.0
+    if n >= 1.0:
+        return 2.0
+    return (1.0 + (n - 0.1) / 0.6 * 0.5) if n <= 0.7 else (1.5 + (n - 0.7) / 0.3 * 0.5)
+
+
+def _biaxial_check(N_Ed, Mz, My, MRdz, MRdy, NRd):
+    """EN 1992-1-1 5.8.9 biaxial-bending interaction:
+    (M_Edz/M_Rdz)^a + (M_Edy/M_Rdy)^a <= 1."""
+    n = N_Ed / NRd if NRd > 1e-9 else 0.0
+    a = _biaxial_exponent(n)
+    if MRdz <= 1e-9 or MRdy <= 1e-9:
+        return {"a": a, "util": 99.9, "ok": False}
+    util = (Mz / MRdz) ** a + (My / MRdy) ** a
+    return {"a": a, "util": util, "ok": util <= 1.0}
+
+
 def _column_slenderness(N_Ed, Ac, fck, l0, h, gc=1.5, A=0.7, B=1.1, Cf=0.7):
     """EN 1992-1-1 5.8.3 slenderness of a rectangular column about the h axis:
     lambda = l0/i (i = h/sqrt(12)) against lambda_lim = 20 A B C / sqrt(n),
@@ -6775,6 +6796,43 @@ def _column_2nd_order(N_Ed, l0, d, As, Ac, fck, fyk, gc=1.5, gs=1.15, c=10.0,
     inv_r = Kr * Kphi * (fyd / Es) / (0.45 * d) if d > 0 else 0.0
     e2 = inv_r * l0 * l0 / c
     return {"n": n, "omega": omega, "Kr": Kr, "e2": e2, "M2": N_Ed * e2}
+
+
+def _pad_footing(N_sls, M_sls, N_uls, B, L, h, c, fck, fyk, cover, bar, q_allow,
+                 gc=1.5, gs=1.15):
+    """EN 1992-1-1 / EN 1997 pad (isolated) footing under a square column. Forces
+    in N (N_sls/N_uls already include any self-weight the caller added), M in
+    N.mm, lengths in mm, q_allow (allowable bearing) in MPa. Returns the bearing
+    pressures and required area (SLS), the cantilever design moment + flexural
+    steel per metre, the one-way shear check and the punching check at 2d."""
+    import math
+    A = B * L
+    e = M_sls / N_sls if N_sls > 1e-9 else 0.0
+    p_avg = N_sls / A
+    if e <= L / 6.0:
+        p_max = p_avg * (1.0 + 6.0 * e / L); p_min = p_avg * (1.0 - 6.0 * e / L)
+    else:                                    # partial bearing (resultant outside middle third)
+        p_max = 2.0 * N_sls / (3.0 * B * (L / 2.0 - e)); p_min = 0.0
+    A_req = N_sls / q_allow
+    d = h - cover - 0.5 * bar
+    p_u = N_uls / A
+    a = (L - c) / 2.0                        # cantilever span from the column face
+    M_strip = p_u * a * a / 2.0 * 1000.0     # N.mm for a 1 m wide strip
+    fx = _rc_beam_flexure(M_strip, 1000.0, d, fck, fyk)
+    V1 = p_u * max(a - d, 0.0) * B           # one-way shear at d from the face, across B
+    sh = _rc_beam_shear(V1, B, d, fck, fyk, fx["As_req"] * B / 1000.0)
+    u1 = 4.0 * c + 4.0 * math.pi * d         # punching control perimeter at 2d
+    a_in = c * c + 4.0 * c * (2.0 * d) + math.pi * (2.0 * d) ** 2
+    Vred = N_uls - p_u * a_in                # reduce for upward pressure inside u1
+    vEd = Vred / (u1 * d) if u1 * d > 0 else 0.0
+    k = min(1.0 + math.sqrt(200.0 / d), 2.0)
+    rho = min(fx["As_req"] / (1000.0 * d), 0.02)
+    vRdc = max((0.18 / gc) * k * (100.0 * rho * fck) ** (1.0 / 3.0),
+               0.035 * k ** 1.5 * math.sqrt(fck))
+    return {"p_avg": p_avg, "p_max": p_max, "p_min": p_min, "A_req": A_req,
+            "bearing_ok": p_max <= q_allow, "d": d, "a": a, "M_strip": M_strip,
+            "As": fx["As_req"], "As_min": fx["As_min"], "shear": sh, "u1": u1,
+            "vEd_punch": vEd, "vRdc_punch": vRdc, "punch_ok": vEd <= vRdc}
 
 
 class RcBeamEC2:
@@ -6908,8 +6966,10 @@ class RcColumnEC2:
              "kind": "int", "default": 6, "min": 4, "max": 40},
             {"key": "N", "label": "Design axial N_Ed (kN, compression +)",
              "kind": "float", "default": 960.0},
-            {"key": "M", "label": "1st-order moment M_Ed (kN.m)", "kind": "float",
+            {"key": "M", "label": "Moment Mz about the h axis (kN.m)", "kind": "float",
              "default": 150.0},
+            {"key": "My", "label": "Moment My about the b axis (kN.m, 0 = uniaxial)",
+             "kind": "float", "default": 0.0},
             {"key": "l0", "label": "Effective length l0 (mm, 0 = ignore slenderness)",
              "kind": "float", "default": 0.0},
         ]
@@ -6936,13 +6996,26 @@ class RcColumnEC2:
         MRd = _rc_column_MRd(N, b, h, d2, As_tot, fck, fyk)
         util = (M / MRd) if MRd > 1e-6 else (99.9 if M > 0 else 0.0)
         rho = As_tot / (b * h)
+        # EC2 5.8.9 biaxial bending (when a moment about the b axis is given)
+        My = float(vals.get("My", 0.0)) * 1e6
+        biax = None
+        if My > 0:
+            MRdy = _rc_column_MRd(N, h, b, d2, As_tot, fck, fyk)   # bending about b
+            biax = _biaxial_check(N, M, My, MRd, MRdy, Nsquash)
+            biax["MRdy"] = MRdy
+            util = biax["util"]
         # auto-size: if it fails, grow As_tot (more bars) until M_Rd >= M_Ed
         need_As = As_tot; need_n = int(vals["nbar"])
         if util > 1.0 and N < Nsquash:
             nn = int(vals["nbar"])
             while nn < 400:
                 nn += 2
-                if _rc_column_MRd(N, b, h, d2, nn * abar, fck, fyk) >= M:
+                if biax is not None:
+                    mrz = _rc_column_MRd(N, b, h, d2, nn * abar, fck, fyk)
+                    mry = _rc_column_MRd(N, h, b, d2, nn * abar, fck, fyk)
+                    if _biaxial_check(N, M, My, mrz, mry, Nsquash)["ok"]:
+                        need_n = nn; need_As = nn * abar; break
+                elif _rc_column_MRd(N, b, h, d2, nn * abar, fck, fyk) >= M:
                     need_n = nn; need_As = nn * abar; break
         doc.openTransaction("DynFrame: RC column design")
         try:
@@ -6962,12 +7035,22 @@ class RcColumnEC2:
                     rows.append(("2nd-order moment M2 (kNm)", "%.1f" % (M2 / 1e6)))
                 rows.append(("Design moment M_Ed (kNm)",
                              "%.1f  (1st order %.1f)" % (M / 1e6, M0 / 1e6)))
-            rows += [
-                ("M_Rd at N_Ed (kNm)", "%.1f" % (MRd / 1e6)),
-                ("Utilisation M_Ed/M_Rd", "%.2f  %s" % (util, "OK" if util <= 1.0 else "FAIL")),
-                ("Reinforcement ratio", "%.2f%%  (min 0.10%% of Ac or 0.10 N_Ed/fyd)"
-                 % (100 * rho)),
-            ]
+            if biax is not None:
+                rows += [
+                    ("M_Rdz / M_Rdy at N_Ed (kNm)", "%.1f / %.1f"
+                     % (MRd / 1e6, biax["MRdy"] / 1e6)),
+                    ("Biaxial (Mz/MRdz)^a+(My/MRdy)^a", "%.2f  (a=%.2f)  %s"
+                     % (biax["util"], biax["a"], "OK" if biax["ok"] else "FAIL")),
+                    ("Reinforcement ratio", "%.2f%%" % (100 * rho)),
+                ]
+            else:
+                rows += [
+                    ("M_Rd at N_Ed (kNm)", "%.1f" % (MRd / 1e6)),
+                    ("Utilisation M_Ed/M_Rd", "%.2f  %s"
+                     % (util, "OK" if util <= 1.0 else "FAIL")),
+                    ("Reinforcement ratio", "%.2f%%  (min 0.10%% of Ac or 0.10 N_Ed/fyd)"
+                     % (100 * rho)),
+                ]
             if util > 1.0 and need_As > As_tot:
                 rows.append(("Steel required", "%d x H%g = %.0f mm2 (rho=%.2f%%)"
                              % (need_n, float(vals["bar"]), need_As,
@@ -6993,16 +7076,127 @@ class RcColumnEC2:
                         % (slen["lambda"], slen["lambda_lim"],
                            "SLENDER" if slen["slender"] else "short",
                            ", M2 = %.0f kNm" % (M2 / 1e6) if M2 > 0 else ""))
+        if biax is not None:
+            cap_txt = ("At N_Ed = %g kN:  M_Rdz = %.0f, M_Rdy = %.0f kNm\n"
+                       "Biaxial (EC2 5.8.9):  (Mz/MRdz)^%.2f + (My/MRdy)^%.2f = "
+                       "%.2f  %s" % (vals["N"], MRd / 1e6, biax["MRdy"] / 1e6,
+                        biax["a"], biax["a"], biax["util"],
+                        "OK" if biax["ok"] else "FAIL"))
+        else:
+            cap_txt = ("At N_Ed = %g kN:  M_Rd = %.0f kNm\n"
+                       "M_Ed = %.0f kNm (1st order %g)  ->  utilisation = %.2f  %s"
+                       % (vals["N"], MRd / 1e6, M / 1e6, vals["M"], util,
+                          "OK" if util <= 1.0 else "FAIL"))
         info("RC column (EN 1992-1-1) - %s, %g x %g mm, %d x H%g bars (As = %.0f "
              "mm2, rho = %.2f%%).\n\n"
-             "Squash load N_Rd0 = %.0f kN\n%s"
-             "At N_Ed = %g kN:  M_Rd = %.0f kNm\n"
-             "M_Ed = %.0f kNm (1st order %g)  ->  utilisation = %.2f  %s%s\n\n"
-             "See the 'RcColumn' table. Symmetric reinforcement, uniaxial bending "
-             "(EC2 5.8.8 nominal curvature when l0 is given); ULS envelope forces." %
+             "Squash load N_Rd0 = %.0f kN\n%s%s%s\n\n"
+             "See the 'RcColumn' table. Symmetric reinforcement; EC2 5.8.8 nominal "
+             "curvature when l0 is given, 5.8.9 biaxial when My is given; ULS "
+             "envelope forces." %
              (vals["grade"], b, h, int(vals["nbar"]), float(vals["bar"]), As_tot,
-              100 * rho, Nsquash / 1e3, slen_txt, vals["N"], MRd / 1e6, M / 1e6,
-              vals["M"], util, "OK" if util <= 1.0 else "FAIL", extra))
+              100 * rho, Nsquash / 1e3, slen_txt, cap_txt, extra))
+
+
+class PadFootingEC2:
+    _GRADES = RcBeamEC2._GRADES
+
+    def GetResources(self):
+        return {"Pixmap": _icon("rebar"), "MenuText": "Pad Footing Design (EC2)",
+                "ToolTip": "Design an isolated (pad) footing under a square column "
+                           "to EN 1992-1-1 / EN 1997: bearing pressure vs the "
+                           "allowable (SLS), cantilever bending steel, one-way "
+                           "shear and punching shear at 2d - Robot-style foundation "
+                           "design.",
+                "Accel": "A, F"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        doc = FreeCAD.ActiveDocument
+        grades = list(self._GRADES.keys())
+        fields = [
+            {"key": "_i", "kind": "info", "default":
+             "Isolated pad footing under a square column (EN 1992-1-1 / EN 1997). "
+             "Enter the column load (add the footing self-weight to the SLS load "
+             "yourself if you want it in the bearing check), the footing plan, the "
+             "allowable bearing pressure and the materials."},
+            {"key": "grade", "label": "Concrete grade", "kind": "combo",
+             "options": grades, "default": "C30/37"},
+            {"key": "fyk", "label": "Steel fyk (MPa)", "kind": "float", "default": 500.0},
+            {"key": "Nsls", "label": "Column load N (kN, SLS)", "kind": "float",
+             "default": 1000.0},
+            {"key": "Msls", "label": "Column moment M (kN.m, SLS)", "kind": "float",
+             "default": 0.0},
+            {"key": "Nuls", "label": "Column load N (kN, ULS; 0 = 1.35xSLS)",
+             "kind": "float", "default": 0.0},
+            {"key": "c", "label": "Square column size (mm)", "kind": "float",
+             "default": 400.0},
+            {"key": "B", "label": "Footing width B (mm)", "kind": "float", "default": 2500.0},
+            {"key": "L", "label": "Footing length L (mm)", "kind": "float", "default": 2500.0},
+            {"key": "h", "label": "Footing depth h (mm)", "kind": "float", "default": 500.0},
+            {"key": "cover", "label": "Cover (mm)", "kind": "float", "default": 50.0},
+            {"key": "bar", "label": "Bar diameter (mm)", "kind": "float", "default": 16.0},
+            {"key": "qall", "label": "Allowable bearing (kPa)", "kind": "float",
+             "default": 200.0},
+        ]
+        vals = form_dialog("Pad Footing Design (EC2)", fields)
+        if not vals:
+            return
+        fck = self._GRADES[vals["grade"]][0]; fyk = float(vals["fyk"])
+        Nsls = float(vals["Nsls"]) * 1e3; Msls = float(vals["Msls"]) * 1e6
+        Nuls = (float(vals["Nuls"]) * 1e3) if float(vals["Nuls"]) > 0 else 1.35 * Nsls
+        B = float(vals["B"]); L = float(vals["L"]); h = float(vals["h"])
+        c = float(vals["c"]); qall = float(vals["qall"]) / 1000.0     # kPa -> MPa
+        r = _pad_footing(Nsls, Msls, Nuls, B, L, h, c, fck, fyk,
+                         float(vals["cover"]), float(vals["bar"]), qall)
+        doc.openTransaction("DynFrame: pad footing")
+        try:
+            s = doc.getObject("PadFooting") or doc.addObject("Spreadsheet::Sheet",
+                                                             "PadFooting")
+            s.Label = "PadFooting"; s.clearAll()
+            s.set("A1", "PAD FOOTING EC2 - %s, %gx%g mm plan, h=%g, col %g mm | "
+                  "N=%g kN (SLS), q_all=%g kPa"
+                  % (vals["grade"], B, L, h, c, vals["Nsls"], vals["qall"]))
+            rows = [
+                ("Bearing p_max / p_avg (kPa)", "%.0f / %.0f  %s"
+                 % (r["p_max"] * 1000, r["p_avg"] * 1000,
+                    "OK" if r["bearing_ok"] else "EXCEEDS ALLOWABLE")),
+                ("Required area / provided (m2)", "%.2f / %.2f"
+                 % (r["A_req"] / 1e6, B * L / 1e6)),
+                ("Effective depth d (mm)", "%.0f" % r["d"]),
+                ("Cantilever a / design M (kNm/m)", "%.0f / %.1f"
+                 % (r["a"], r["M_strip"] / 1e6)),
+                ("Flexural steel As (mm2/m)", "%.0f  (min %.0f)"
+                 % (r["As"], r["As_min"])),
+                ("One-way shear V_Rd,c (kN)", "%.0f  %s"
+                 % (r["shear"]["VRdc"] / 1e3, "links" if r["shear"]["links"]
+                    == "designed" else "OK no links")),
+                ("Punching v_Ed / v_Rd,c at 2d (MPa)", "%.3f / %.3f  %s"
+                 % (r["vEd_punch"], r["vRdc_punch"],
+                    "OK" if r["punch_ok"] else "FAIL - thicken / add shear reinf")),
+            ]
+            for i, (a, bb) in enumerate(rows, start=2):
+                s.set("A%d" % i, a); s.set("B%d" % i, bb)
+            _grp(doc, RES_GROUP).addObject(s)
+            doc.commitTransaction(); doc.recompute()
+        except Exception as e:
+            doc.abortTransaction(); err("Pad footing design failed: %s" % e); return
+        info("Pad footing (EN 1992-1-1 / EN 1997) - %gx%g mm, h=%g mm, square "
+             "column %g mm.\n\n"
+             "BEARING (SLS):  p_max = %.0f kPa vs allowable %g kPa  %s\n"
+             "  required area %.2f m2, provided %.2f m2\n\n"
+             "BENDING (ULS):  cantilever a = %.0f mm, M = %.0f kNm/m\n"
+             "  flexural steel As = %.0f mm2/m (min %.0f), d = %.0f mm\n\n"
+             "SHEAR:  one-way V_Rd,c = %.0f kN (%s);  punching v_Ed = %.3f vs "
+             "v_Rd,c = %.3f MPa at 2d  %s\n\n"
+             "See the 'PadFooting' table." %
+             (B, L, h, c, r["p_max"] * 1000, vals["qall"],
+              "OK" if r["bearing_ok"] else "EXCEEDS", r["A_req"] / 1e6, B * L / 1e6,
+              r["a"], r["M_strip"] / 1e6, r["As"], r["As_min"], r["d"],
+              r["shear"]["VRdc"] / 1e3,
+              "links needed" if r["shear"]["links"] == "designed" else "OK no links",
+              r["vEd_punch"], r["vRdc_punch"], "OK" if r["punch_ok"] else "FAIL"))
 
 
 class WallThermal:
@@ -13314,6 +13508,7 @@ _add("DynFrame_PlateReinfEC2", PlateReinfEC2)
 _add("DynFrame_PunchingEC2", PunchingEC2)
 _add("DynFrame_RcBeamEC2", RcBeamEC2)
 _add("DynFrame_RcColumnEC2", RcColumnEC2)
+_add("DynFrame_PadFootingEC2", PadFootingEC2)
 _add("DynFrame_DeflectionCheck", DeflectionCheck)
 _add("DynFrame_WallThermal", WallThermal)
 _add("DynFrame_ThermalBridge2D", ThermalBridge2D)

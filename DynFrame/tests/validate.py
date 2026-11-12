@@ -1663,7 +1663,42 @@ so = C._column_2nd_order(960e3, 6000.0, 350.0, 2000.0, 300.0 * 400.0, 30.0, 500.
 assert abs(so["e2"] - 49.69) < 0.5 and abs(so["M2"] - 47.7e6) < 1e6, so
 print("  slenderness lambda=%.0f (lim %.0f, slender) -> M2=%.0f kNm (expect 52/17/48)"
       % (sl["lambda"], sl["lambda_lim"], so["M2"] / 1e6))
+# EC2 5.8.9 biaxial interaction exponent + check (closed form)
+assert C._biaxial_exponent(0.1) == 1.0 and C._biaxial_exponent(1.0) == 2.0
+assert abs(C._biaxial_exponent(0.7) - 1.5) < 1e-9 and abs(C._biaxial_exponent(0.4) - 1.25) < 1e-9
+# n=0.4 -> a=1.25; Mz/MRdz = My/MRdy = 0.5 -> util = 2*0.5^1.25 = 0.8409
+bx = C._biaxial_check(400e3, 100.0, 100.0, 200.0, 200.0, 1000e3)
+assert abs(bx["a"] - 1.25) < 1e-9 and abs(bx["util"] - 0.8409) < 1e-3 and bx["ok"]
+print("  biaxial (EC2 5.8.9): a(0.4)=1.25, (0.5^a+0.5^a)=%.3f OK (expect 0.841)"
+      % bx["util"])
 print("EC2 RC column design OK")
+
+# ---------- EC2 pad footing design ----------
+print("\n== EC2 pad footing design ==")
+# N_sls=1000kN, N_uls=1350kN, 2.5x2.5 m, h=500, col 400, C30/37, q_all=0.2 MPa
+pf = C._pad_footing(1e6, 0.0, 1.35e6, 2500.0, 2500.0, 500.0, 400.0, 30.0, 500.0,
+                    50.0, 16.0, 0.2)
+assert abs(pf["p_avg"] * 1000 - 160.0) < 1e-3 and abs(pf["p_max"] * 1000 - 160.0) < 1e-3
+assert pf["bearing_ok"] and abs(pf["A_req"] / 1e6 - 5.0) < 1e-6      # 5 m2 required
+assert abs(pf["a"] - 1050.0) < 1e-6 and abs(pf["M_strip"] - 1.1907e8) < 5e5
+assert abs(pf["d"] - 442.0) < 1e-6 and abs(pf["u1"] - 7154.4) < 2.0  # punching perimeter
+assert pf["punch_ok"] and abs(pf["vEd_punch"] - 0.152) < 5e-3
+print("  bearing p=%.0f kPa (allow 200), A_req=%.1f m2, cantilever M=%.0f kNm/m, "
+      "u1=%.0f mm, punch v_Ed=%.3f<=v_Rd,c=%.3f"
+      % (pf["p_max"] * 1000, pf["A_req"] / 1e6, pf["M_strip"] / 1e6, pf["u1"],
+         pf["vEd_punch"], pf["vRdc_punch"]))
+# command end-to-end writes the PadFooting table
+dPF = Doc(); FreeCAD.ActiveDocument = dPF
+C.form_dialog = lambda title, fields: {"grade": "C30/37", "fyk": 500.0,
+    "Nsls": 1000.0, "Msls": 0.0, "Nuls": 0.0, "c": 400.0, "B": 2500.0, "L": 2500.0,
+    "h": 500.0, "cover": 50.0, "bar": 16.0, "qall": 200.0}
+gPF = {}; C.info = lambda m, g=gPF: g.setdefault("msg", m)
+C.PadFootingEC2().Activated()
+pft = dPF.getObject("PadFooting")
+assert pft is not None and pft._cells.get("A1", "").startswith("PAD FOOTING EC2")
+assert "BEARING" in gPF["msg"] and "PUNCHING".lower() in gPF["msg"].lower()
+print("  command wrote PadFooting table: %s" % gPF["msg"].split(chr(10))[0])
+print("EC2 pad footing design OK")
 
 # ---------- SLS deflection check ----------
 print("\n== SLS deflection check ==")

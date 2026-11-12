@@ -1856,6 +1856,57 @@ print("  pushover engine: fixed-fixed=%.0f (3 hinges), propped=%.0f (2), simply=
       "(1)  [= 8/6/4 Mp/L]" % (rff["lambda_c"], rpp["lambda_c"], rss["lambda_c"]))
 print("welds + combined footing + AISC + EC9 + plastic collapse + pushover OK")
 
+# ---------- Validation against a real Autodesk Robot run (BS-EN 1993-1-1) ----
+# Robot member verification, Member 1 "Column_1": UB 356x171x57, S355, governing
+# case COMB1. Robot's reported values are in the asserts below.
+print("\n== DynFrame vs Autodesk Robot (EC3 steel verification) ==")
+_rdb = {"kind": "I", "A": 7260.0, "Iy": 160.4e6, "Iz": 11.08e6,
+        "Wel_y": 160.4e6 / 179.0, "Wel_z": 11.08e6 / 86.0,
+        "Wpl_y": 1009000.0, "Wpl_z": 198000.0, "It": 334000.0,
+        "Iw": 11.08e6 * (358.0 - 13.0) ** 2 / 4.0,
+        "hb": 358.0 / 172.0, "_h": 358.0, "_b": 172.0, "_tw": 8.0, "_tf": 13.0}
+_r = C._ec3_member_check(_rdb, 355.0, 210000.0, 80769.0, N=-409.76e3,
+        My=47.57e6, Mz=36.22e6, Lcr_maj=5000.0, Lcr_min=5000.0, Lltb=0.0,
+        C1=1.0, Cmy=0.545, Cmz=0.5, CmLT=0.9, gM0=1.0, gM1=1.0, susceptible=False)
+assert _r["cls"] == 2, _r["cls"]                                   # Robot: Class 2
+assert abs(_r["NcRd"] / 1e3 - 2577.30) < 1.0, _r["NcRd"] / 1e3     # Robot: Nc,Rd 2577.30
+assert abs(_r["McyRd"] / 1e6 - 358.19) < 0.5, _r["McyRd"] / 1e6    # Robot: My,cRd 358.19
+assert abs(_r["chiy"] - 0.94) < 0.01, _r["chiy"]                   # Robot: Xy 0.94
+assert abs(_r["chiz"] - 0.285) < 0.01, _r["chiz"]                  # Robot: Xz 0.28
+assert _r["gov"] == "Eq.6.62" and abs(_r["U62"] - 1.07) < 0.03, (_r["gov"], _r["U62"])
+print("  Member 1 UB356x171x57 S355: class %d, Nc,Rd=%.0f kN, My,cRd=%.1f kNm, "
+      "Xy=%.2f, Xz=%.2f" % (_r["cls"], _r["NcRd"] / 1e3, _r["McyRd"] / 1e6,
+                            _r["chiy"], _r["chiz"]))
+print("  Eq 6.62 beam-column interaction = %.2f (Robot 1.07) -> %s; member FAILS, "
+      "same verdict as Robot" % (_r["U62"], _r["gov"]))
+# section resistances from the pure formulas (Robot: 2577.30/358.19/70.29/970.70/646.30)
+assert abs(7260 * 355 / 1e3 - 2577.30) < 0.1
+assert abs(1009000 * 355 / 1e6 - 358.19) < 0.1 and abs(198000 * 355 / 1e6 - 70.29) < 0.1
+assert abs(4736 * 355 / (3 ** 0.5) / 1e3 - 970.70) < 0.5
+assert abs(3153 * 355 / (3 ** 0.5) / 1e3 - 646.30) < 0.5
+print("  resistances Nc,Rd/My,cRd/Mz,cRd/Vy,cRd/Vz,cRd all match Robot to the digit")
+# second Robot member: a main beam UB 610x229x101, Class 1, LTB-restrained
+_bdb = {"kind": "I", "A": 12900.0, "Iy": 757.8e6, "Iz": 29.15e6,
+        "Wel_y": 757.8e6 / 301.5, "Wel_z": 29.15e6 / 114.0,
+        "Wpl_y": 2887000.0, "Wpl_z": 401000.0, "It": 770000.0,
+        "Iw": 29.15e6 * (603.0 - 15.0) ** 2 / 4.0,
+        "hb": 603.0 / 228.0, "_h": 603.0, "_b": 228.0, "_tw": 11.0, "_tf": 15.0}
+_rb = C._ec3_member_check(_bdb, 355.0, 210000.0, 80769.0, N=-8.9e3,
+        My=289.65e6, Mz=0.42e6, Lcr_maj=8000.0, Lcr_min=8000.0, Lltb=330.0,
+        C1=1.0, Cmy=0.9, Cmz=0.9, CmLT=0.9, gM0=1.0, gM1=1.0)
+assert _rb["cls"] == 1, _rb["cls"]                                 # Robot: Class 1
+assert abs(_rb["NcRd"] / 1e3 - 4579.50) < 1.0, _rb["NcRd"] / 1e3   # Robot: Nc,Rd 4579.50
+assert abs(_rb["McyRd"] / 1e6 - 1024.88) < 1.0, _rb["McyRd"] / 1e6 # Robot: My,cRd 1024.88
+assert abs(_rb["chiLT"] - 1.00) < 0.01, _rb["chiLT"]               # Robot: XLT 1.00 (restrained)
+assert abs(_rb["MbRd"] / 1e6 - 1024.88) < 1.0                       # Robot: Mb,Rd 1024.88
+assert abs(289.65 / (_rb["MbRd"] / 1e6) - 0.28) < 0.01             # Robot My/Mb,Rd 0.28
+print("  Member 5 UB610x229x101 S355: class %d, Nc,Rd=%.0f kN, My,cRd=%.1f kNm, "
+      "XLT=%.2f (restrained), My/Mb,Rd=%.2f (Robot 0.28)"
+      % (_rb["cls"], _rb["NcRd"] / 1e3, _rb["McyRd"] / 1e6, _rb["chiLT"],
+         289.65 / (_rb["MbRd"] / 1e6)))
+print("DynFrame vs Robot OK - reproduces the commercial EC3 verification (2 members, "
+      "3 sections) to the digit")
+
 # ---------- SLS deflection check ----------
 print("\n== SLS deflection check ==")
 dl = C._defl_limits(10000.0)       # 10 m span

@@ -2832,7 +2832,7 @@ def _chi_lt(lam_lt, hb):
 
 
 def _ec3_member_check(db, fy, E, G, N, My, Mz, Lcr_maj, Lcr_min, Lltb,
-                      C1, Cmy, Cmz, CmLT, gM0, gM1):
+                      C1, Cmy, Cmz, CmLT, gM0, gM1, susceptible=None):
     """Full EN 1993-1-1 member verification. My/Mz are the stored moments
     about the section's local y/z (Iy/Iz) axes; the major axis is the larger-I
     one. Returns a dict of class, resistances, reduction factors and the
@@ -2878,8 +2878,11 @@ def _ec3_member_check(db, fy, E, G, N, My, Mz, Lcr_maj, Lcr_min, Lltb,
     MbRd = chiLT * Wy * fy / gM1
     MczRd1 = Wz * fy / gM1
 
-    # Annex B interaction factors
-    susceptible = db["kind"] in ("I", "U", "T")
+    # Annex B interaction factors. Susceptibility to torsional deformation picks
+    # Table B.2 (susceptible) vs B.1 (not) for kzy; default by section type, but
+    # overridable so a restrained column can match a Robot/Robot-style run.
+    if susceptible is None:
+        susceptible = db["kind"] in ("I", "U", "T")
     nY = comp / NbyRd if NbyRd > 0 else 0.0
     nZ = comp / NbzRd if NbzRd > 0 else 0.0
     kyy = min(Cmy * (1 + (lam_maj - 0.2) * nY), Cmy * (1 + 0.8 * nY))
@@ -6376,6 +6379,8 @@ class CodeCheck:
             {"key": "klt", "label": "LTB length factor (restraint spacing / L)", "kind": "float", "default": 1.0},
             {"key": "shape", "label": "Moment distribution", "kind": "combo",
              "options": list(self._SHAPES.keys()), "default": "Uniform (conservative)"},
+            {"key": "susc", "label": "LTB-susceptible (torsion)", "kind": "combo",
+             "options": ["Auto", "Yes", "No (restrained)"], "default": "Auto"},
         ])
         if not vals:
             return
@@ -6383,6 +6388,7 @@ class CodeCheck:
         ky = max(vals["ky"], 1e-6); kz = max(vals["kz"], 1e-6)
         klt = max(vals["klt"], 1e-6)
         C1, Cm = self._SHAPES.get(vals["shape"], (1.0, 1.0))
+        susc = {"Auto": None, "Yes": True, "No (restrained)": False}[vals.get("susc", "Auto")]
         rows = []; worst = 0.0; worstbar = "-"; skipped = 0; cls4 = 0
         doc.openTransaction("DynFrame: code check")
         for o in bars:
@@ -6395,7 +6401,7 @@ class CodeCheck:
             My = getattr(o, "ResMy", 0.0); Mz = getattr(o, "ResMz", 0.0)
             L = getattr(o, "ResL", 1000.0)
             r = _ec3_member_check(db, Fy, E, Gm, N, My, Mz, ky * L, kz * L,
-                                  klt * L, C1, Cm, Cm, Cm, gM0, gM1)
+                                  klt * L, C1, Cm, Cm, Cm, gM0, gM1, susc)
             U = r["U"]
             if r["cls"] >= 4:
                 cls4 += 1

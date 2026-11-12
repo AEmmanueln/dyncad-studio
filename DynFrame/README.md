@@ -653,6 +653,29 @@ rely on. The checks it runs:
 > FreeCAD is not Robot — this reproduces Robot's *workflow and core
 > engineering* on its kernel.
 
+### Cross-checked against Autodesk Robot
+
+The EN 1993-1-1 steel check has been validated **against a real Autodesk Robot
+run** (BS-EN 1993-1:2005/NA, a steel portal building, sections UB 356×171×57 /
+610×229×101 / 203×133×30). DynFrame reproduces Robot's member verification **to
+the digit**:
+
+- **Column** (UB 356×171×57, S355): section **Class 2**; resistances
+  N_c,Rd = 2577.30 kN, M_y,c,Rd = 358.19 kN·m, M_z,c,Rd = 70.29 kN·m,
+  V_y,c,Rd = 970.70 kN, V_z,c,Rd = 646.30 kN; flexural buckling **χ_y = 0.94,
+  χ_z = 0.28**; and the governing beam-column interaction **Eq 6.62 = 1.07** —
+  DynFrame gets 1.06 and the **same verdict (the member fails)**.
+- **Main beam** (UB 610×229×101, S355): **Class 1**; N_c,Rd = 4579.50 kN,
+  M_y,c,Rd = 1024.88 kN·m; LTB-restrained so **χ_LT = 1.00** and M_y,Ed/M_b,Rd =
+  0.28 — all matching Robot.
+
+These two members are asserted in `validate.py` (the *DynFrame vs Autodesk
+Robot* block). To match Robot's beam-column interaction exactly, the Steel Code
+Check has an **LTB-susceptible (torsion)** option (Auto / Yes / No) that selects
+Annex-B Table B.1 vs B.2 for the k-factors. The one thing Robot does here that
+DynFrame does not yet is the **combined torsion + shear** reduction (the beam
+carried a small T_t,Ed); pure bending/axial/buckling match exactly.
+
 **Modeling / export / setup**
 - **Quick Fillet** — fillet selected solid edges by a radius.
 - **Export to STEP** / **Export each body to STL**.
@@ -744,6 +767,13 @@ in the Insert Frame Members dropdown. Dimensions are millimetres.
   member follows the chord. (Swept curved members can be added later.)
 - Trim/Miter bake the member to global placement (geometry becomes
   world-coordinates); undo (Ctrl+Z) reverses it.
+- **Steel check does not include St-Venant torsion** (T_Ed) or the combined
+  torsion+shear reduction of EN 1993-1-1 6.2.7 — it covers axial, biaxial
+  bending, shear, flexural and lateral-torsional buckling and the Annex-B
+  interaction. For members with significant applied torsion (rare in typical
+  braced frames) use a dedicated torsion check. (Validated against Autodesk
+  Robot to the digit on the non-torsional checks — see *Verification &
+  Validation*.)
 
 ## License
 

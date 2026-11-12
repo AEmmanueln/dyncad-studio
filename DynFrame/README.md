@@ -377,6 +377,15 @@ spreadsheets at the root.
   include geometric nonlinearity: the solve iterates with the geometric
   stiffness until it converges, amplifying the displacements and moments
   from the axial forces (the stability effect in slender frames).
+- **Pushover (plastic hinges)** — nonlinear-static **pushover** of the planar
+  frame by the **event-to-event plastic-hinge** method: a lateral load pattern
+  is scaled until each section in turn reaches its plastic moment M_p and a
+  hinge forms (the member end is released and its moment frozen at M_p), the
+  structure redistributes, and the process repeats until a **mechanism** forms.
+  Reports the **collapse load factor**, the hinge sequence and the capacity
+  curve. (Validated to the exact single-span collapse loads: a central-point
+  beam gives 8M_p/L fixed-fixed (3 hinges), 6M_p/L propped (2 hinges) and 4M_p/L
+  simply supported (1 hinge) — to the newton.)
 - **Time-History (dynamic)** — transient response by **Newmark-β direct
   integration** (average-acceleration, unconditionally stable). Excite the
   frame with a **nodal force** (on selected nodes) or a **ground acceleration**
@@ -598,7 +607,9 @@ rely on. The checks it runs:
 > and the **EC9 aluminium** member (M_Rd = 22.7 kN·m, χ = 0.656 at λ̄ = 1.0) all
 > match their hand calcs; the **plastic-collapse** loads are the exact mechanism
 > results (fixed-fixed point 8M_p/L, propped 6M_p/L, simply 4M_p/L, fixed UDL
-> 16M_p/L²); the **SLS
+> 16M_p/L²), and the **event-to-event frame pushover** reproduces those same
+> collapse loads to the newton (160/120/80 kN for M_p = 100 kN·m, L = 5 m) with
+> the right number of hinges (3/2/1); the **SLS
 > deflection** extraction is exact — a 10 mm
 > mid-span sag reads as 10 mm (span/deflection = 1000 for a 10 m span) while a
 > rigid-body rotation and a purely axial displacement both read as zero;

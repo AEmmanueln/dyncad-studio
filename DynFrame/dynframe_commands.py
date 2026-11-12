@@ -7820,6 +7820,222 @@ class MasonryEC6:
               "OK" if util <= 1 else "FAIL"))
 
 
+def _pushover_klocal(EA, EI, L):
+    import numpy as np
+    k = np.zeros((6, 6))
+    k[0, 0] = EA / L; k[0, 3] = -EA / L; k[3, 0] = -EA / L; k[3, 3] = EA / L
+    a = 12 * EI / L ** 3; b = 6 * EI / L ** 2; c = 4 * EI / L; d = 2 * EI / L
+    k[1, 1] = a; k[1, 2] = b; k[1, 4] = -a; k[1, 5] = b
+    k[2, 1] = b; k[2, 2] = c; k[2, 4] = -b; k[2, 5] = d
+    k[4, 1] = -a; k[4, 2] = -b; k[4, 4] = a; k[4, 5] = -b
+    k[5, 1] = b; k[5, 2] = d; k[5, 4] = -b; k[5, 5] = c
+    return k
+
+
+def _pushover_condense(k, dof):
+    import numpy as np
+    k = k.copy(); piv = k[dof, dof]
+    if abs(piv) < 1e-12:
+        k[dof, :] = 0; k[:, dof] = 0; return k
+    k = k - np.outer(k[:, dof], k[dof, :]) / piv
+    k[dof, :] = 0; k[:, dof] = 0
+    return k
+
+
+def _pushover_elem(EA, EI, L, cs, sn, released):
+    import numpy as np
+    k = _pushover_klocal(EA, EI, L)
+    for dof in released:
+        k = _pushover_condense(k, dof)
+    T = np.zeros((6, 6)); R = np.array([[cs, sn, 0], [-sn, cs, 0], [0, 0, 1]])
+    T[0:3, 0:3] = R; T[3:6, 3:6] = R
+    return T.T @ k @ T, T, k
+
+
+def _pushover2d(nodes, elems, fixed, loads, Mp, EA=1e13, maxsteps=200):
+    """Plane-frame elastic-plastic pushover by the event-to-event plastic-hinge
+    method. Nodes [(x,y)], elems [(ni,nj,EI)], fixed {node:(fu,fv,ft)}, loads
+    {node:(Fx,Fy,Mz)} reference pattern, Mp the plastic moment. Returns the
+    collapse load factor (the multiplier on the reference loads at which a
+    mechanism forms), the hinge sequence and the capacity curve. Validated to the
+    exact single-span collapse loads (8/6/4 Mp/L)."""
+    import numpy as np
+    nn = len(nodes); ndof = 3 * nn
+    rest = set()
+    for n, (fu, fv, ft) in fixed.items():
+        if fu: rest.add(3 * n)
+        if fv: rest.add(3 * n + 1)
+        if ft: rest.add(3 * n + 2)
+    free = [i for i in range(ndof) if i not in rest]
+    if not free:
+        return {"lambda_c": 0.0, "seq": [], "curve": [], "mechanism": False}
+    P = np.zeros(ndof)
+    for n, (fx, fy, mz) in loads.items():
+        P[3 * n] += fx; P[3 * n + 1] += fy; P[3 * n + 2] += mz
+    geo = []
+    for (ni, nj, ei) in elems:
+        xi, yi = nodes[ni]; xj, yj = nodes[nj]
+        L = ((xj - xi) ** 2 + (yj - yi) ** 2) ** 0.5
+        if L < 1e-9:
+            continue
+        geo.append((ni, nj, L, (xj - xi) / L, (yj - yi) / L, ei))
+    hinges = set(); Macc = {}
+    for e in range(len(geo)):
+        Macc[(e, 0)] = 0.0; Macc[(e, 1)] = 0.0
+    lam = 0.0; seq = []; curve = [(0.0, 0.0)]
+    ctrl = free[0]
+    for _ in range(maxsteps):
+        K = np.zeros((ndof, ndof)); Ts = []
+        for e, (ni, nj, L, cs, sn, ei) in enumerate(geo):
+            rel = []
+            if (e, 0) in hinges: rel.append(2)
+            if (e, 1) in hinges: rel.append(5)
+            kg, T, kl = _pushover_elem(EA, ei, L, cs, sn, rel); Ts.append((T, kl))
+            dofs = [3 * ni, 3 * ni + 1, 3 * ni + 2, 3 * nj, 3 * nj + 1, 3 * nj + 2]
+            for a in range(6):
+                for b in range(6):
+                    K[dofs[a], dofs[b]] += kg[a, b]
+        Kff = K[np.ix_(free, free)]
+        if np.linalg.matrix_rank(Kff) < Kff.shape[0]:
+            return {"lambda_c": lam, "seq": seq, "curve": curve, "mechanism": True}
+        du = np.zeros(ndof)
+        try:
+            du[free] = np.linalg.solve(Kff, P[free])
+        except np.linalg.LinAlgError:
+            return {"lambda_c": lam, "seq": seq, "curve": curve, "mechanism": True}
+        dM = {}
+        for e, (ni, nj, L, cs, sn, ei) in enumerate(geo):
+            dofs = [3 * ni, 3 * ni + 1, 3 * ni + 2, 3 * nj, 3 * nj + 1, 3 * nj + 2]
+            T, kl = Ts[e]
+            fl = kl @ (T @ du[dofs])
+            dM[(e, 0)] = fl[2]; dM[(e, 1)] = fl[5]
+        best = 1e30; crit = None
+        for key in Macc:
+            if key in hinges:
+                continue
+            dm = dM[key]
+            if abs(dm) < 1e-9:
+                continue
+            dl = (Mp - Macc[key]) / dm if dm > 0 else (-Mp - Macc[key]) / dm
+            if -1e-6 <= dl < best:
+                best = dl; crit = key
+        if crit is None:
+            return {"lambda_c": lam, "seq": seq, "curve": curve, "mechanism": False}
+        best = max(best, 0.0); lam += best
+        for key in Macc:
+            if key not in hinges:
+                Macc[key] += best * dM[key]
+        hinges.add(crit); seq.append((crit, lam))
+        curve.append((abs(du[ctrl]), lam))
+    return {"lambda_c": lam, "seq": seq, "curve": curve, "mechanism": False}
+
+
+class Pushover:
+    def GetResources(self):
+        return {"Pixmap": _icon("sway"), "MenuText": "Pushover (plastic hinges)",
+                "ToolTip": "Nonlinear static (pushover) of the planar frame by the "
+                           "event-to-event plastic-hinge method: the collapse load "
+                           "factor at which a mechanism forms, the hinge sequence "
+                           "and the capacity curve. Lateral unit load pattern; "
+                           "uniform plastic moment M_p. Define supports first.",
+                "Accel": "A, H"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        doc = FreeCAD.ActiveDocument
+        objs = _analysis_objs(doc)[0]
+        bars = [o for o in objs if hasattr(o, "ResN") or getattr(o, "IsBar", False)]
+        if not bars:
+            bars = objs
+        if not bars:
+            info("No members found. Build a line model first."); return
+        vals = form_dialog("Pushover (plastic hinges)", [
+            {"key": "_i", "kind": "info", "default":
+             "Nonlinear static pushover of the frame in the X-Z plane (event-to-"
+             "event plastic hinges). A unit lateral (X) load is applied at every "
+             "free node; the collapse load factor multiplies that pattern. Enter a "
+             "uniform plastic moment M_p."},
+            {"key": "Mp", "label": "Plastic moment M_p (kN.m)", "kind": "float",
+             "default": 100.0},
+            {"key": "dir", "label": "Push direction", "kind": "combo",
+             "options": ["X", "Z"], "default": "X"},
+        ])
+        if not vals:
+            return
+        Mp = float(vals["Mp"]) * 1e6
+        comp = 0 if vals["dir"] == "X" else 1
+        # build planar nodes (X-Z plane) + elements
+        nodes = []
+
+        def nid(x, z):
+            for i, (px, pz) in enumerate(nodes):
+                if abs(px - x) <= 1.0 and abs(pz - z) <= 1.0:
+                    return i
+            nodes.append((x, z)); return len(nodes) - 1
+        elems = []
+        for o in bars:
+            try:
+                a, b = _elem_ends(o)
+            except Exception:
+                continue
+            ni = nid(a.x, a.z); nj = nid(b.x, b.z)
+            if ni != nj:
+                elems.append((ni, nj, 1.0e12))
+        if not elems:
+            info("Could not build a planar frame from the members."); return
+        fixed = {}
+        for o in doc.Objects:
+            r = getattr(o, "Restrain", None); at = getattr(o, "AtNode", None)
+            if r and at is not None:
+                i = nid(at.x, at.z)
+                # map 6-dof restraint -> 2D (u=X, v=Z, theta=RY)
+                fu = len(r) > 0 and r[0] == "1"
+                fv = len(r) > 2 and r[2] == "1"
+                ft = len(r) > 4 and r[4] == "1"
+                pf = fixed.get(i, (False, False, False))
+                fixed[i] = (pf[0] or fu, pf[1] or fv, pf[2] or ft)
+        if not fixed:
+            info("Define supports first - pushover needs a restrained frame."); return
+        loads = {}
+        nloaded = 0
+        for i in range(len(nodes)):
+            if i in fixed and all(fixed[i]):
+                continue
+            L = [0.0, 0.0, 0.0]; L[comp] = 1.0
+            loads[i] = tuple(L); nloaded += 1
+        res = _pushover2d(nodes, elems, fixed, loads, Mp)
+        lam = res["lambda_c"]
+        base_shear = lam * nloaded          # N (unit loads)
+        doc.openTransaction("DynFrame: pushover")
+        try:
+            s = doc.getObject("Pushover") or doc.addObject("Spreadsheet::Sheet", "Pushover")
+            s.Label = "Pushover"; s.clearAll()
+            s.set("A1", "PUSHOVER (plastic hinges) - push %s, M_p=%g kNm, %d nodes "
+                  "loaded | %s" % (vals["dir"], vals["Mp"], nloaded,
+                  "MECHANISM" if res["mechanism"] else "no mechanism in range"))
+            s.set("A2", "Collapse load factor"); s.set("B2", "%.1f" % lam)
+            s.set("A3", "Collapse base shear (N)"); s.set("B3", "%.0f" % base_shear)
+            s.set("A4", "Plastic hinges formed"); s.set("B4", "%d" % len(res["seq"]))
+            s.set("A5", "Hinge sequence (elem,end @ factor)")
+            s.set("B5", "; ".join("%d/%d@%.0f" % (e, en, lf)
+                                  for ((e, en), lf) in res["seq"][:12]))
+            _grp(doc, RES_GROUP).addObject(s)
+            doc.commitTransaction(); doc.recompute()
+        except Exception as e:
+            doc.abortTransaction(); err("Pushover failed: %s" % e); return
+        info("Pushover (event-to-event plastic hinges) - push %s.\n\n"
+             "Collapse load factor = %.1f  (%s)\n"
+             "%d plastic hinges formed before the mechanism.\n"
+             "Collapse base shear = %.0f N for the unit pattern (%d loaded nodes).\n\n"
+             "See the 'Pushover' table for the hinge sequence. Uniform M_p = %g "
+             "kNm; the factor multiplies the applied lateral pattern." %
+             (vals["dir"], lam, "mechanism formed" if res["mechanism"]
+              else "no mechanism within range - raise M_p or check supports",
+              len(res["seq"]), base_shear, nloaded, vals["Mp"]))
+
+
 # ── Plastic collapse (limit analysis) of a single-span beam ─────
 # (case, load) -> (coefficient, kind). P_c = coef*Mp/L ; w_c = coef*Mp/L^2.
 PLASTIC_CASES = {
@@ -14414,6 +14630,7 @@ _add("DynFrame_CombinedFootingEC2", CombinedFootingEC2)
 _add("DynFrame_AiscSteel", AiscSteel)
 _add("DynFrame_AluminiumEC9", AluminiumEC9)
 _add("DynFrame_PlasticCollapse", PlasticCollapse)
+_add("DynFrame_Pushover", Pushover)
 _add("DynFrame_DeflectionCheck", DeflectionCheck)
 _add("DynFrame_WallThermal", WallThermal)
 _add("DynFrame_ThermalBridge2D", ThermalBridge2D)

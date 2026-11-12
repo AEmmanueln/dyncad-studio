@@ -1839,7 +1839,22 @@ gPC = {}; C.info = lambda m, g=gPC: g.setdefault("msg", m)
 C.PlasticCollapse().Activated()
 assert dPC.getObject("PlasticCollapse") is not None and "load factor" in gPC["msg"]
 print("  plastic collapse command: %s" % gPC["msg"].split(chr(10))[0])
-print("welds + combined footing + AISC + EC9 + plastic collapse OK")
+# frame pushover (event-to-event plastic hinges) vs the exact collapse loads
+_nd = [(0.0, 0.0), (2500.0, 0.0), (5000.0, 0.0)]
+_el = [(0, 1, 1e12), (1, 2, 1e12)]
+_Mp = 100e6
+rff = C._pushover2d(_nd, _el, {0: (True, True, True), 2: (True, True, True)},
+                    {1: (0.0, -1.0, 0.0)}, _Mp)
+assert rff["mechanism"] and abs(rff["lambda_c"] - 160000.0) < 1.0 and len(rff["seq"]) == 3
+rpp = C._pushover2d(_nd, _el, {0: (True, True, True), 2: (False, True, False)},
+                    {1: (0.0, -1.0, 0.0)}, _Mp)
+assert rpp["mechanism"] and abs(rpp["lambda_c"] - 120000.0) < 1.0 and len(rpp["seq"]) == 2
+rss = C._pushover2d(_nd, _el, {0: (True, True, False), 2: (False, True, False)},
+                    {1: (0.0, -1.0, 0.0)}, _Mp)
+assert rss["mechanism"] and abs(rss["lambda_c"] - 80000.0) < 1.0 and len(rss["seq"]) == 1
+print("  pushover engine: fixed-fixed=%.0f (3 hinges), propped=%.0f (2), simply=%.0f "
+      "(1)  [= 8/6/4 Mp/L]" % (rff["lambda_c"], rpp["lambda_c"], rss["lambda_c"]))
+print("welds + combined footing + AISC + EC9 + plastic collapse + pushover OK")
 
 # ---------- SLS deflection check ----------
 print("\n== SLS deflection check ==")

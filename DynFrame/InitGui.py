@@ -68,7 +68,8 @@ class DynFrameWorkbench(FreeCADGui.Workbench):
                    "DynFrame_PlateReinfEC2", "DynFrame_PunchingEC2",
                    "DynFrame_RcBeamEC2", "DynFrame_RcColumnEC2",
                    "DynFrame_PadFootingEC2", "DynFrame_TimberEC5",
-                   "DynFrame_BasePlateEC3", "DynFrame_DeflectionCheck",
+                   "DynFrame_BasePlateEC3", "DynFrame_BoltedConnEC3",
+                   "DynFrame_MasonryEC6", "DynFrame_DeflectionCheck",
                    "DynFrame_WallThermal", "DynFrame_ThermalBridge2D",
                    "DynFrame_FireThermal",
                    "DynFrame_ShowDiagram", "DynFrame_ClearAnalysis"]

@@ -235,6 +235,22 @@ spreadsheets at the root.
   `BasePlate` table. (Validated: 200×200 column on a 400×400 plate, N=1000 kN,
   C30/37 → f_jd=13.3 MPa, p=6.25 MPa, required area 75 000 mm², overhang 100 mm,
   thickness required 28.3 mm — matching the hand calc.)
+- **Bolted Connection (EC3)** — check a bolt group in a shear/tension connection
+  to EN 1993-1-8: per-bolt **shear** F_v,Rd (α_v·f_ub·A/γ_M2, threads in or out
+  of the plane), **bearing** F_b,Rd (k₁·α_b·f_u·d·t/γ_M2 from the end/edge
+  distances and spacings), **tension** F_t,Rd, the group capacity and the
+  combined shear+tension check. Pick the bolt size (M12–M30) and grade (4.6–10.9),
+  the plate and the geometry; results go to the `BoltGroup` table. (Validated:
+  M20 8.8, single shear, threads in plane → F_v,Rd=94.1 kN, F_b,Rd=88.3 kN
+  (t=10, f_u=430, e1=p1=…), F_t,Rd=141.1 kN — matching the hand calc.)
+- **Masonry Wall (EC6)** — vertical-load capacity of an unreinforced masonry
+  wall to EN 1996-1-1: characteristic strength **f_k = K·f_b^0.7·f_m^0.3**,
+  design strength f_d = f_k/γ_M, and the capacity reduction **Φ** (top/bottom
+  from eccentricity, mid-height from the **Annex G** slenderness formula), giving
+  N_Rd = Φ·t·f_d per metre. Enter the unit/mortar strengths, wall geometry and
+  eccentricity; results go to the `Masonry` table. (Validated: f_b=10, f_m=5,
+  K=0.5 → f_k=4.06 MPa; h_ef=2500, t=215, e_mk=10.75 → Annex-G Φ_mid=0.812 —
+  matching the hand calc.)
 - **Wall U-value & Condensation (building physics)** — **Wall U-value &
   Condensation** analyses a layered wall/roof: the **U-value** (thermal
   transmittance) to EN ISO 6946 (R-values in series + surface resistances),
@@ -544,7 +560,10 @@ rely on. The checks it runs:
 > f_m,d = 14.8 MPa, σ = 7.5 MPa, util 0.51; buckling of a 3 m column → λ_rel =
 > 1.76, k_c = 0.285), and the **EC3 steel base plate** too (200×200 column on a
 > 400×400 plate, N = 1000 kN, C30/37 → f_jd = 13.3 MPa, p = 6.25 MPa, required
-> area 75 000 mm², thickness 28.3 mm); the **SLS
+> area 75 000 mm², thickness 28.3 mm); the **EC3 bolted connection** matches the
+> hand calc (M20 8.8 single shear → F_v,Rd = 94.1 kN, F_b,Rd = 88.3 kN,
+> F_t,Rd = 141.1 kN), and the **EC6 masonry** wall too (f_b = 10, f_m = 5,
+> K = 0.5 → f_k = 4.06 MPa, Annex-G Φ_mid = 0.812); the **SLS
 > deflection** extraction is exact — a 10 mm
 > mid-span sag reads as 10 mm (span/deflection = 1000 for a 10 m span) while a
 > rigid-body rotation and a purely axial displacement both read as zero;

@@ -1742,6 +1742,45 @@ assert "f_jd" in gBP["msg"] and "thickness" in gBP["msg"]
 print("  base plate command: %s" % gBP["msg"].split(chr(10))[0])
 print("EC5 timber + EC3 base plate OK")
 
+# ---------- EC3 bolted connection + EC6 masonry ----------
+print("\n== EC3 bolted connection + EC6 masonry ==")
+# M20 8.8 single shear, threads in plane: F_v,Rd = 0.6*800*245/1.25 = 94.08 kN
+Fv = C._bolt_shear(245.0, 3.14159265 * 20 * 20 / 4, 800.0, "8.8", True, 1)
+assert abs(Fv / 1e3 - 94.08) < 0.1, Fv
+# bearing: d=20,d0=22,t=10,fu=430,fub=800,e1=40,p1=60,e2=40,p2=60 -> 88.3 kN
+Fb = C._bolt_bearing(20.0, 22.0, 10.0, 430.0, 800.0, 40.0, 60.0, 40.0, 60.0)
+assert abs(Fb / 1e3 - 88.3) < 0.5, Fb / 1e3
+# tension: 0.9*800*245/1.25 = 141.12 kN
+Ft = C._bolt_tension(245.0, 800.0)
+assert abs(Ft / 1e3 - 141.12) < 0.1, Ft
+# 10.9 uses alpha_v=0.5
+assert abs(C._bolt_shear(245.0, 314.0, 1000.0, "10.9", True, 1) / 1e3 - 98.0) < 0.5
+print("  bolts M20 8.8: F_v=%.1f F_b=%.1f F_t=%.1f kN (expect 94.1/88.3/141.1)"
+      % (Fv / 1e3, Fb / 1e3, Ft / 1e3))
+dBC = Doc(); FreeCAD.ActiveDocument = dBC
+C.form_dialog = lambda title, fields: {"size": "M20", "grade": "8.8", "n": 4,
+    "planes": 1, "thread": "Yes", "t": 10.0, "fu": 430.0, "e1": 40.0, "p1": 60.0,
+    "e2": 40.0, "p2": 60.0, "V": 200.0, "T": 0.0}
+gBC = {}; C.info = lambda m, g=gBC: g.setdefault("msg", m)
+C.BoltedConnEC3().Activated()
+assert dBC.getObject("BoltGroup") is not None and "V_Rd" in gBC["msg"]
+print("  bolted command: %s" % gBC["msg"].split(chr(10))[0])
+# masonry: f_b=10, f_m=5, K=0.5 -> f_k = 0.5*10^0.7*5^0.3 = 4.06 MPa
+fk = C._masonry_fk(10.0, 5.0, 0.5)
+assert abs(fk - 4.06) < 0.02, fk
+# Annex-G mid-height factor: hef=2500, t=215, e_mk=0.05*215=10.75, fk=4.06 -> ~0.812
+phim = C._masonry_phi_mid(2500.0, 215.0, 215.0, 10.75, fk)
+assert abs(phim - 0.812) < 5e-3, phim
+print("  masonry: f_k=%.2f MPa, Annex-G Phi_mid=%.3f (expect 4.06/0.812)" % (fk, phim))
+dM = Doc(); FreeCAD.ActiveDocument = dM
+C.form_dialog = lambda title, fields: {"fb": 10.0, "fm": 5.0, "K": 0.5, "t": 215.0,
+    "hef": 2500.0, "e": 10.0, "gM": 2.5, "N": 300.0}
+gM = {}; C.info = lambda m, g=gM: g.setdefault("msg", m)
+C.MasonryEC6().Activated()
+assert dM.getObject("Masonry") is not None and "N_Rd" in gM["msg"]
+print("  masonry command: %s" % gM["msg"].split(chr(10))[0])
+print("EC3 bolted + EC6 masonry OK")
+
 # ---------- SLS deflection check ----------
 print("\n== SLS deflection check ==")
 dl = C._defl_limits(10000.0)       # 10 m span

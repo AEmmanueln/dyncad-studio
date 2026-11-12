@@ -7426,6 +7426,223 @@ class BasePlateEC3:
               "OK" if t_ok else "TOO THIN - thicken the plate"))
 
 
+# ── EC3-1-8 bolted connection ───────────────────────────────────
+BOLT_AREAS = {"M12": 84.3, "M16": 157.0, "M20": 245.0, "M24": 353.0, "M30": 561.0}
+BOLT_DIA = {"M12": 12.0, "M16": 16.0, "M20": 20.0, "M24": 24.0, "M30": 30.0}
+BOLT_HOLE = {"M12": 13.0, "M16": 18.0, "M20": 22.0, "M24": 26.0, "M30": 33.0}
+BOLT_GRADES = {"4.6": 400.0, "5.6": 500.0, "8.8": 800.0, "10.9": 1000.0}
+
+
+def _bolt_shear(As, Ashank, fub, grade, threads_in_plane, planes=1, gM2=1.25):
+    """EN 1993-1-8 Table 3.4 bolt shear resistance F_v,Rd (per the given number of
+    shear planes). alpha_v = 0.5 for 10.9, else 0.6; area = tensile-stress area if
+    the threads are in the shear plane, else the shank area."""
+    alpha_v = 0.5 if grade == "10.9" else 0.6
+    A = As if threads_in_plane else Ashank
+    return planes * alpha_v * fub * A / gM2
+
+
+def _bolt_bearing(d, d0, t, fu, fub, e1, p1, e2, p2, gM2=1.25):
+    """EN 1993-1-8 Table 3.4 bearing resistance F_b,Rd of one bolt on a plate."""
+    alpha_b = min(e1 / (3.0 * d0), p1 / (3.0 * d0) - 0.25, fub / fu, 1.0)
+    k1 = min(2.8 * e2 / d0 - 1.7, 1.4 * p2 / d0 - 1.7, 2.5)
+    return k1 * alpha_b * fu * d * t / gM2
+
+
+def _bolt_tension(As, fub, gM2=1.25):
+    """EN 1993-1-8 Table 3.4 bolt tension resistance F_t,Rd (k2 = 0.9)."""
+    return 0.9 * fub * As / gM2
+
+
+class BoltedConnEC3:
+    def GetResources(self):
+        return {"Pixmap": _icon("rebar"), "MenuText": "Bolted Connection (EC3)",
+                "ToolTip": "Check a bolt group in a shear/tension connection to "
+                           "EN 1993-1-8: per-bolt shear F_v,Rd, bearing F_b,Rd and "
+                           "tension F_t,Rd (from the edge/end distances and "
+                           "spacings), and the group capacity vs the applied shear "
+                           "and tension - Robot-style connection design.",
+                "Accel": "A, J"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        doc = FreeCAD.ActiveDocument
+        fields = [
+            {"key": "_i", "kind": "info", "default":
+             "Bolt group in a shear / tension connection (EN 1993-1-8). Enter the "
+             "bolt size and grade, the plate (thickness + steel f_u), the edge/end "
+             "distances and spacings, and the applied forces."},
+            {"key": "size", "label": "Bolt size", "kind": "combo",
+             "options": list(BOLT_AREAS.keys()), "default": "M20"},
+            {"key": "grade", "label": "Bolt grade", "kind": "combo",
+             "options": list(BOLT_GRADES.keys()), "default": "8.8"},
+            {"key": "n", "label": "Number of bolts", "kind": "int", "default": 4, "min": 1, "max": 100},
+            {"key": "planes", "label": "Shear planes per bolt", "kind": "int",
+             "default": 1, "min": 1, "max": 2},
+            {"key": "thread", "label": "Threads in the shear plane", "kind": "combo",
+             "options": ["Yes", "No"], "default": "Yes"},
+            {"key": "t", "label": "Plate thickness t (mm)", "kind": "float", "default": 10.0},
+            {"key": "fu", "label": "Plate steel f_u (MPa)", "kind": "float", "default": 430.0},
+            {"key": "e1", "label": "End distance e1 (mm)", "kind": "float", "default": 40.0},
+            {"key": "p1", "label": "Pitch p1 (mm)", "kind": "float", "default": 60.0},
+            {"key": "e2", "label": "Edge distance e2 (mm)", "kind": "float", "default": 40.0},
+            {"key": "p2", "label": "Gauge p2 (mm)", "kind": "float", "default": 60.0},
+            {"key": "V", "label": "Applied shear V_Ed (kN)", "kind": "float", "default": 200.0},
+            {"key": "T", "label": "Applied tension T_Ed (kN, total)", "kind": "float",
+             "default": 0.0},
+        ]
+        vals = form_dialog("Bolted Connection (EC3)", fields)
+        if not vals:
+            return
+        size = vals["size"]; grade = vals["grade"]
+        As = BOLT_AREAS[size]; d = BOLT_DIA[size]; d0 = BOLT_HOLE[size]
+        fub = BOLT_GRADES[grade]; Ashank = 3.14159265 * d * d / 4.0
+        n = int(vals["n"])
+        Fv = _bolt_shear(As, Ashank, fub, grade, vals["thread"] == "Yes",
+                         int(vals["planes"]))
+        Fb = _bolt_bearing(d, d0, float(vals["t"]), float(vals["fu"]), fub,
+                           float(vals["e1"]), float(vals["p1"]), float(vals["e2"]),
+                           float(vals["p2"]))
+        Ft = _bolt_tension(As, fub)
+        per_bolt = min(Fv, Fb)
+        VRd = n * per_bolt; TRd = n * Ft
+        V = float(vals["V"]) * 1e3; T = float(vals["T"]) * 1e3
+        uV = V / VRd if VRd > 0 else 0.0
+        uT = T / TRd if TRd > 0 else 0.0
+        # combined shear + tension (EN 1993-1-8 Table 3.4): Fv/Fv,Rd + Ft/(1.4 Ft,Rd) <= 1
+        uC = (V / n) / Fv + (T / n) / (1.4 * Ft) if (Fv > 0 and Ft > 0 and T > 0) else 0.0
+        doc.openTransaction("DynFrame: bolted connection")
+        try:
+            s = doc.getObject("BoltGroup") or doc.addObject("Spreadsheet::Sheet", "BoltGroup")
+            s.Label = "BoltGroup"; s.clearAll()
+            s.set("A1", "BOLTED CONNECTION EC3 - %d x %s gr %s, t=%g mm, f_u=%g | "
+                  "V=%g kN, T=%g kN" % (n, size, grade, vals["t"], vals["fu"],
+                                        vals["V"], vals["T"]))
+            rows = [
+                ("Shear F_v,Rd / bolt (kN)", "%.1f" % (Fv / 1e3)),
+                ("Bearing F_b,Rd / bolt (kN)", "%.1f  (%s governs)"
+                 % (Fb / 1e3, "bearing" if Fb < Fv else "shear")),
+                ("Tension F_t,Rd / bolt (kN)", "%.1f" % (Ft / 1e3)),
+                ("Group shear V_Rd (kN)", "%.0f" % (VRd / 1e3)),
+                ("Shear utilisation V/V_Rd", "%.2f  %s" % (uV, "OK" if uV <= 1 else "FAIL")),
+            ]
+            if T > 0:
+                rows.append(("Tension util / combined", "%.2f / %.2f  %s"
+                             % (uT, uC, "OK" if max(uT, uC) <= 1 else "FAIL")))
+            for i, (a, bb) in enumerate(rows, start=2):
+                s.set("A%d" % i, a); s.set("B%d" % i, bb)
+            _grp(doc, RES_GROUP).addObject(s)
+            doc.commitTransaction(); doc.recompute()
+        except Exception as e:
+            doc.abortTransaction(); err("Bolted connection failed: %s" % e); return
+        tline = ("\nTension: F_t,Rd = %.1f kN/bolt, util = %.2f, combined "
+                 "shear+tension = %.2f %s" % (Ft / 1e3, uT, uC,
+                 "OK" if max(uT, uC) <= 1 else "FAIL")) if T > 0 else ""
+        info("Bolted connection (EN 1993-1-8) - %d x %s grade %s.\n\n"
+             "Per bolt: shear F_v,Rd = %.1f kN, bearing F_b,Rd = %.1f kN "
+             "(%s governs), tension F_t,Rd = %.1f kN\n"
+             "Group shear V_Rd = %.0f kN  ->  V_Ed/V_Rd = %.2f  %s%s\n\n"
+             "See the 'BoltGroup' table." %
+             (n, size, grade, Fv / 1e3, Fb / 1e3,
+              "bearing" if Fb < Fv else "shear", Ft / 1e3, VRd / 1e3, uV,
+              "OK" if uV <= 1 else "FAIL", tline))
+
+
+# ── EC6 unreinforced masonry wall (vertical load) ───────────────
+def _masonry_fk(fb, fm, K=0.5, alpha=0.7, beta=0.3):
+    """EN 1996-1-1 3.6.1.2 characteristic compressive strength of masonry,
+    f_k = K f_b^alpha f_m^beta (general-purpose mortar: alpha=0.7, beta=0.3)."""
+    return K * (fb ** alpha) * (fm ** beta)
+
+
+def _masonry_phi_mid(hef, tef, t, e_mk, fk, E_factor=1000.0):
+    """EN 1996-1-1 Annex G capacity reduction factor at mid-height from the
+    slenderness and eccentricity. lambda = (h_ef/t_ef) sqrt(f_k/E), E=1000 f_k."""
+    import math
+    lam = (hef / tef) * math.sqrt(fk / (E_factor * fk))
+    A1 = 1.0 - 2.0 * e_mk / t
+    u = (lam - 0.063) / (0.73 - 1.17 * e_mk / t)
+    return A1 * math.exp(-u * u / 2.0)
+
+
+class MasonryEC6:
+    def GetResources(self):
+        return {"Pixmap": _icon("rebar"), "MenuText": "Masonry Wall (EC6)",
+                "ToolTip": "Vertical-load capacity of an unreinforced masonry wall "
+                           "to EN 1996-1-1: characteristic strength f_k = K f_b^a "
+                           "f_m^b, design strength f_d, and the capacity reduction "
+                           "Phi (top/bottom from eccentricity, mid-height from "
+                           "Annex G slenderness) - Robot-style masonry design.",
+                "Accel": "A, M"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        doc = FreeCAD.ActiveDocument
+        fields = [
+            {"key": "_i", "kind": "info", "default":
+             "Unreinforced masonry wall, vertical load (EN 1996-1-1), per metre "
+             "length. Enter the unit and mortar strengths, the wall geometry and "
+             "the eccentricity. Phi = min(top/bottom, Annex-G mid-height)."},
+            {"key": "fb", "label": "Normalised unit strength f_b (MPa)", "kind": "float",
+             "default": 10.0},
+            {"key": "fm", "label": "Mortar strength f_m (MPa)", "kind": "float", "default": 5.0},
+            {"key": "K", "label": "Constant K (unit/mortar)", "kind": "float",
+             "default": 0.5, "decimals": 3},
+            {"key": "t", "label": "Wall thickness t (mm)", "kind": "float", "default": 215.0},
+            {"key": "hef", "label": "Effective height h_ef (mm)", "kind": "float",
+             "default": 2500.0},
+            {"key": "e", "label": "Load eccentricity e (mm)", "kind": "float", "default": 10.0},
+            {"key": "gM", "label": "Partial factor gamma_M", "kind": "float", "default": 2.5},
+            {"key": "N", "label": "Applied load N_Ed (kN/m)", "kind": "float", "default": 300.0},
+        ]
+        vals = form_dialog("Masonry Wall (EC6)", fields)
+        if not vals:
+            return
+        fb = float(vals["fb"]); fm = float(vals["fm"]); K = float(vals["K"])
+        t = float(vals["t"]); hef = float(vals["hef"]); e = float(vals["e"])
+        gM = max(float(vals["gM"]), 1e-3)
+        fk = _masonry_fk(fb, fm, K)
+        fd = fk / gM
+        e_i = max(e, 0.05 * t)
+        phi_top = max(1.0 - 2.0 * e_i / t, 0.0)
+        e_mk = max(e + hef / 450.0, 0.05 * t)       # mid-height eccentricity (+ h/450)
+        phi_mid = max(_masonry_phi_mid(hef, t, t, e_mk, fk), 0.0)
+        phi = min(phi_top, phi_mid)
+        NRd = phi * t * fd                          # N per mm length = N/mm = kN/m
+        N = float(vals["N"]) * 1e3 / 1000.0         # kN/m -> N/mm
+        util = N / NRd if NRd > 0 else 99.9
+        doc.openTransaction("DynFrame: masonry wall")
+        try:
+            s = doc.getObject("Masonry") or doc.addObject("Spreadsheet::Sheet", "Masonry")
+            s.Label = "Masonry"; s.clearAll()
+            s.set("A1", "MASONRY WALL EC6 - f_b=%g, f_m=%g, t=%g mm, h_ef=%g | "
+                  "N=%g kN/m" % (fb, fm, t, hef, vals["N"]))
+            rows = [
+                ("f_k = K f_b^0.7 f_m^0.3 (MPa)", "%.2f" % fk),
+                ("Design strength f_d (MPa)", "%.2f  (gamma_M=%.1f)" % (fd, gM)),
+                ("Phi top / mid-height", "%.3f / %.3f" % (phi_top, phi_mid)),
+                ("Capacity N_Rd (kN/m)", "%.0f" % (NRd * 1000.0 / 1e3)),
+                ("Utilisation N_Ed/N_Rd", "%.2f  %s" % (util, "OK" if util <= 1 else "FAIL")),
+            ]
+            for i, (a, bb) in enumerate(rows, start=2):
+                s.set("A%d" % i, a); s.set("B%d" % i, bb)
+            _grp(doc, RES_GROUP).addObject(s)
+            doc.commitTransaction(); doc.recompute()
+        except Exception as e2:
+            doc.abortTransaction(); err("Masonry wall failed: %s" % e2); return
+        info("Masonry wall (EN 1996-1-1) - t = %g mm, h_ef = %g mm.\n\n"
+             "f_k = K f_b^0.7 f_m^0.3 = %.2f MPa; f_d = %.2f MPa (gamma_M = %.1f)\n"
+             "Phi = min(top %.3f, mid-height %.3f) = %.3f\n"
+             "Capacity N_Rd = %.0f kN/m  ->  N_Ed/N_Rd = %.2f  %s\n\n"
+             "See the 'Masonry' table. Unreinforced, vertical load, per metre." %
+             (t, hef, fk, fd, gM, phi_top, phi_mid, phi, NRd, util,
+              "OK" if util <= 1 else "FAIL"))
+
+
 class WallThermal:
     _NLAYER = 6
 
@@ -13738,6 +13955,8 @@ _add("DynFrame_RcColumnEC2", RcColumnEC2)
 _add("DynFrame_PadFootingEC2", PadFootingEC2)
 _add("DynFrame_TimberEC5", TimberEC5)
 _add("DynFrame_BasePlateEC3", BasePlateEC3)
+_add("DynFrame_BoltedConnEC3", BoltedConnEC3)
+_add("DynFrame_MasonryEC6", MasonryEC6)
 _add("DynFrame_DeflectionCheck", DeflectionCheck)
 _add("DynFrame_WallThermal", WallThermal)
 _add("DynFrame_ThermalBridge2D", ThermalBridge2D)

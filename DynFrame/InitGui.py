@@ -71,8 +71,9 @@ class DynFrameWorkbench(FreeCADGui.Workbench):
                    "DynFrame_TimberEC5", "DynFrame_BasePlateEC3",
                    "DynFrame_BoltedConnEC3", "DynFrame_FilletWeldEC3",
                    "DynFrame_MasonryEC6", "DynFrame_AiscSteel",
-                   "DynFrame_AluminiumEC9", "DynFrame_PlasticCollapse",
-                   "DynFrame_Pushover", "DynFrame_DeflectionCheck",
+                   "DynFrame_AluminiumEC9", "DynFrame_TorsionCheckEC3",
+                   "DynFrame_PlasticCollapse", "DynFrame_Pushover",
+                   "DynFrame_DeflectionCheck",
                    "DynFrame_WallThermal", "DynFrame_ThermalBridge2D",
                    "DynFrame_FireThermal",
                    "DynFrame_ShowDiagram", "DynFrame_ClearAnalysis"]

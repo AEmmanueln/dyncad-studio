@@ -2909,6 +2909,25 @@ def _ec3_member_check(db, fy, E, G, N, My, Mz, Lcr_maj, Lcr_min, Lltb,
             "MbRd": MbRd, "curves": (cmaj, cmin)}
 
 
+def _ec3_torsion(T_Ed, It, tw, tf, Az, fy, gM0=1.0):
+    """EN 1993-1-1 6.2.7 St-Venant torsion of an open I/H section: the torsional
+    shear stresses in the flange and web (tau = T t / It), their utilisation
+    against the shear yield fy/sqrt3, and the torsion-reduced plastic shear
+    resistance Vpl,T,Rd (eq 6.26 for I/H sections, using the web stress). Warping
+    torsion is not included; for the exact warping/St-Venant split an open-section
+    thin-walled analysis is needed (what Robot does internally)."""
+    T = abs(float(T_Ed))
+    tau_y = fy / (3.0 ** 0.5) / gM0
+    tau_f = T * tf / It if It > 0 else 0.0
+    tau_w = T * tw / It if It > 0 else 0.0
+    Vpl = Az * fy / (3.0 ** 0.5) / gM0
+    red = (1.0 - tau_w / (1.25 * tau_y)) ** 0.5 if tau_w < 1.25 * tau_y else 0.0
+    return {"tau_f": tau_f, "tau_w": tau_w, "tau_y": tau_y,
+            "util_f": tau_f / tau_y if tau_y > 0 else 0.0,
+            "util_w": tau_w / tau_y if tau_y > 0 else 0.0,
+            "Vpl_Rd": Vpl, "Vpl_T_Rd": red * Vpl, "red": red}
+
+
 # ── materials (name -> E, G, Fy, density) in N/mm^2 and kg/mm^3 ──────
 MATERIALS = {
     "Steel S235": (210000.0, 80769.0, 235.0, 7.85e-6),
@@ -7430,6 +7449,81 @@ class BasePlateEC3:
               r["A_req"], float(vals["bp"]) * float(vals["hp"]),
               "OK" if r["area_ok"] else "TOO SMALL", r["a"], r["t_req"], tp,
               "OK" if t_ok else "TOO THIN - thicken the plate"))
+
+
+class TorsionCheckEC3:
+    _GRADES = {"S235": 235.0, "S275": 275.0, "S355": 355.0, "S420": 420.0}
+
+    def GetResources(self):
+        return {"Pixmap": _icon("tension"), "MenuText": "Torsion Check (EC3)",
+                "ToolTip": "EN 1993-1-1 6.2.7 St-Venant torsion check of an open "
+                           "I/H member: the torsional shear stresses in flange and "
+                           "web, their utilisation against fy/sqrt3, and the "
+                           "torsion-reduced plastic shear resistance Vpl,T,Rd with "
+                           "the shear utilisation - the torsion check the main "
+                           "member check leaves out.",
+                "Accel": "A, X"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        doc = FreeCAD.ActiveDocument
+        fields = [
+            {"key": "_i", "kind": "info", "default":
+             "St-Venant torsion of an open I/H section (EN 1993-1-1 6.2.7). Enter "
+             "the section (torsion constant It, flange/web thickness, shear area "
+             "Az), the grade, and the design torsion and shear. Warping torsion is "
+             "not included."},
+            {"key": "grade", "label": "Steel grade", "kind": "combo",
+             "options": list(self._GRADES.keys()), "default": "S355"},
+            {"key": "It", "label": "Torsion constant It (mm4)", "kind": "float", "default": 770000.0},
+            {"key": "tf", "label": "Flange thickness tf (mm)", "kind": "float", "default": 15.0},
+            {"key": "tw", "label": "Web thickness tw (mm)", "kind": "float", "default": 11.0},
+            {"key": "Az", "label": "Shear area Az (mm2)", "kind": "float", "default": 6694.0},
+            {"key": "T", "label": "Design torsion T_Ed (kN.m)", "kind": "float", "default": 10.33},
+            {"key": "V", "label": "Design shear V_z,Ed (kN)", "kind": "float", "default": 510.32},
+        ]
+        vals = form_dialog("Torsion Check (EC3)", fields)
+        if not vals:
+            return
+        fy = self._GRADES[vals["grade"]]
+        r = _ec3_torsion(float(vals["T"]) * 1e6, float(vals["It"]), float(vals["tw"]),
+                         float(vals["tf"]), float(vals["Az"]), fy)
+        V = abs(float(vals["V"])) * 1e3
+        uV = V / r["Vpl_T_Rd"] if r["Vpl_T_Rd"] > 0 else 99.9
+        gov = max(r["util_f"], r["util_w"], uV)
+        doc.openTransaction("DynFrame: torsion check")
+        try:
+            s = doc.getObject("Torsion") or doc.addObject("Spreadsheet::Sheet", "Torsion")
+            s.Label = "Torsion"; s.clearAll()
+            s.set("A1", "TORSION EC3 (6.2.7) - %s, It=%g, T_Ed=%g kNm, V_z,Ed=%g kN"
+                  % (vals["grade"], vals["It"], vals["T"], vals["V"]))
+            rows = [
+                ("Flange tau_t / (fy/sqrt3)", "%.0f / %.0f MPa = %.2f %s"
+                 % (r["tau_f"], r["tau_y"], r["util_f"], "OK" if r["util_f"] <= 1 else "FAIL")),
+                ("Web tau_t / (fy/sqrt3)", "%.0f / %.0f MPa = %.2f %s"
+                 % (r["tau_w"], r["tau_y"], r["util_w"], "OK" if r["util_w"] <= 1 else "FAIL")),
+                ("Vpl,Rd / Vpl,T,Rd (kN)", "%.0f / %.0f  (factor %.3f)"
+                 % (r["Vpl_Rd"] / 1e3, r["Vpl_T_Rd"] / 1e3, r["red"])),
+                ("Shear V_Ed/Vpl,T,Rd", "%.2f  %s" % (uV, "OK" if uV <= 1 else "FAIL")),
+            ]
+            for i, (aa, bb) in enumerate(rows, start=2):
+                s.set("A%d" % i, aa); s.set("B%d" % i, bb)
+            _grp(doc, RES_GROUP).addObject(s)
+            doc.commitTransaction(); doc.recompute()
+        except Exception as e:
+            doc.abortTransaction(); err("Torsion check failed: %s" % e); return
+        info("Torsion check (EN 1993-1-1 6.2.7) - %s, St-Venant.\n\n"
+             "Torsional shear: flange %.0f MPa (util %.2f), web %.0f MPa (util "
+             "%.2f) vs fy/sqrt3 = %.0f MPa\n"
+             "Plastic shear Vpl,Rd = %.0f kN -> torsion-reduced Vpl,T,Rd = %.0f kN "
+             "(x %.3f)\n"
+             "Shear V_Ed/Vpl,T,Rd = %.2f\n\nGoverning utilisation = %.2f  %s\n\n"
+             "See the 'Torsion' table. Warping torsion not included." %
+             (vals["grade"], r["tau_f"], r["util_f"], r["tau_w"], r["util_w"],
+              r["tau_y"], r["Vpl_Rd"] / 1e3, r["Vpl_T_Rd"] / 1e3, r["red"], uV,
+              gov, "OK" if gov <= 1 else "FAIL"))
 
 
 # ── EC3-1-8 bolted connection ───────────────────────────────────
@@ -14636,6 +14730,7 @@ _add("DynFrame_CombinedFootingEC2", CombinedFootingEC2)
 _add("DynFrame_AiscSteel", AiscSteel)
 _add("DynFrame_AluminiumEC9", AluminiumEC9)
 _add("DynFrame_PlasticCollapse", PlasticCollapse)
+_add("DynFrame_TorsionCheckEC3", TorsionCheckEC3)
 _add("DynFrame_Pushover", Pushover)
 _add("DynFrame_DeflectionCheck", DeflectionCheck)
 _add("DynFrame_WallThermal", WallThermal)

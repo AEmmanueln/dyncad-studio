@@ -1906,6 +1906,18 @@ print("  Member 5 UB610x229x101 S355: class %d, Nc,Rd=%.0f kN, My,cRd=%.1f kNm, 
          289.65 / (_rb["MbRd"] / 1e6)))
 print("DynFrame vs Robot OK - reproduces the commercial EC3 verification (2 members, "
       "3 sections) to the digit")
+# EC3 6.2.7 St-Venant torsion (the gap now closed), vs Robot's Member 5 beam:
+# T_t,Ed=10.33 kNm, It=770000, tw=11, tf=15, Az=6694, S355. Robot: Tau,ty util
+# 0.97 (flange), Tau,tz 0.69 (web), Vz,T,Rd 920.84 kN.
+_tr = C._ec3_torsion(10.33e6, 770000.0, 11.0, 15.0, 6694.0, 355.0)
+assert abs(_tr["util_f"] - 0.97) < 0.03 and abs(_tr["util_w"] - 0.69) < 0.04, \
+    (_tr["util_f"], _tr["util_w"])
+assert abs(_tr["Vpl_Rd"] / 1e3 - 1372.0) < 1.0           # Az fy/sqrt3
+assert abs(_tr["Vpl_T_Rd"] / 1e3 - 920.84) < 30.0, _tr["Vpl_T_Rd"] / 1e3  # within ~3% (Robot adds warping)
+print("  EC3 6.2.7 torsion: flange util=%.2f (Robot 0.97), web util=%.2f (Robot "
+      "0.69), Vpl,T,Rd=%.0f kN (Robot 920.84)"
+      % (_tr["util_f"], _tr["util_w"], _tr["Vpl_T_Rd"] / 1e3))
+print("torsion check validated vs Robot (St-Venant)")
 
 # ---------- SLS deflection check ----------
 print("\n== SLS deflection check ==")

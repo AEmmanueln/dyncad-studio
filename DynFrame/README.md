@@ -256,6 +256,13 @@ spreadsheets at the root.
   factor β_w (steel grade), the resistance per unit length F_w,Rd = f_vw,d·throat,
   the group capacity and the utilisation. (Validated: S275, a=5 mm → f_vw,d=233.7
   MPa, F_w,Rd=1168 N/mm — matching the hand calc.)
+- **Torsion Check (EC3)** — EN 1993-1-1 6.2.7 **St-Venant torsion** of an open
+  I/H member: the torsional shear stresses in the flange and web (τ = T·t/It),
+  their utilisation against f_y/√3, and the **torsion-reduced plastic shear
+  resistance** V_pl,T,Rd = √(1 − τ_t/(1.25·f_y/√3))·V_pl,Rd (eq 6.26), with the
+  shear utilisation. (Validated against the Autodesk Robot beam: flange τ_t util
+  0.98 vs 0.97, web 0.72 vs 0.69, V_pl,T,Rd 893 vs 920.84 kN — the ~3 % is the
+  warping torsion Robot adds.)
 - **Combined Footing (EC2)** — a combined (two-column) footing: uniform bearing
   under the load resultant vs the allowable, and the longitudinal **top (hogging)
   and bottom (sagging) steel** from the footing analysed as a beam on uniform
@@ -672,9 +679,14 @@ the digit**:
 These two members are asserted in `validate.py` (the *DynFrame vs Autodesk
 Robot* block). To match Robot's beam-column interaction exactly, the Steel Code
 Check has an **LTB-susceptible (torsion)** option (Auto / Yes / No) that selects
-Annex-B Table B.1 vs B.2 for the k-factors. The one thing Robot does here that
-DynFrame does not yet is the **combined torsion + shear** reduction (the beam
-carried a small T_t,Ed); pure bending/axial/buckling match exactly.
+Annex-B Table B.1 vs B.2 for the k-factors.
+
+The beam also carried a small **torsion** (T_t,Ed = 10.33 kN·m). The new
+**Torsion Check (EC3)** (EN 1993-1-1 6.2.7) reproduces it too: flange
+τ_t-utilisation **0.98** (Robot 0.97), web **0.72** (Robot 0.69), and the
+torsion-reduced shear **Vpl,T,Rd = 893 kN** vs Robot's 920.84 kN — within 3 %,
+the remainder being the open-section **warping** torsion Robot resolves with a
+full thin-walled analysis (St-Venant only here).
 
 **Modeling / export / setup**
 - **Quick Fillet** — fillet selected solid edges by a radius.
@@ -767,13 +779,12 @@ in the Insert Frame Members dropdown. Dimensions are millimetres.
   member follows the chord. (Swept curved members can be added later.)
 - Trim/Miter bake the member to global placement (geometry becomes
   world-coordinates); undo (Ctrl+Z) reverses it.
-- **Steel check does not include St-Venant torsion** (T_Ed) or the combined
-  torsion+shear reduction of EN 1993-1-1 6.2.7 — it covers axial, biaxial
-  bending, shear, flexural and lateral-torsional buckling and the Annex-B
-  interaction. For members with significant applied torsion (rare in typical
-  braced frames) use a dedicated torsion check. (Validated against Autodesk
-  Robot to the digit on the non-torsional checks — see *Verification &
-  Validation*.)
+- **Torsion** is covered by the separate **Torsion Check (EC3)** (EN 1993-1-1
+  6.2.7, St-Venant): torsional shear stresses and the torsion-reduced shear
+  resistance. **Warping** torsion of open sections is not modelled (so the exact
+  Vpl,T,Rd is ~3 % off Robot, which does a full thin-walled analysis); the main
+  member check (axial/bending/shear/buckling/interaction) itself does not fold
+  torsion in automatically — run the Torsion Check alongside it when T_Ed matters.
 
 ## License
 

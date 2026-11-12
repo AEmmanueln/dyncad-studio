@@ -1823,7 +1823,23 @@ for cmd, flds, want in [
     cmd().Activated()
     assert dC.getObject(want) is not None, want
 print("  command tables written: Weld, CombFooting, AISC, Aluminium")
-print("welds + combined footing + AISC + EC9 OK")
+# plastic collapse (limit analysis) closed forms: Mp=100 kNm, L=5000
+Pc, kind = C._plastic_collapse("Fixed-fixed", "point", 5000.0, 100e6)
+assert kind == "P" and abs(Pc / 1e3 - 160.0) < 1e-6          # 8 Mp/L
+assert abs(C._plastic_collapse("Propped cantilever", "point", 5000.0, 100e6)[0] / 1e3 - 120.0) < 1e-6
+assert abs(C._plastic_collapse("Simply supported", "point", 5000.0, 100e6)[0] / 1e3 - 80.0) < 1e-6
+wc, k2 = C._plastic_collapse("Fixed-fixed", "udl", 5000.0, 100e6)
+assert k2 == "w" and abs(wc - 64.0) < 1e-3   # 16 Mp/L^2 = 64 N/mm = 64 kN/m
+print("  plastic collapse: fixed-fixed point 8Mp/L=160 kN, propped 120, simply 80, "
+      "fixed UDL 64 kN/m")
+dPC = Doc(); FreeCAD.ActiveDocument = dPC
+C.form_dialog = lambda title, fields: {"Z": 1.0e6, "fy": 355.0, "L": 5000.0,
+    "case": "Fixed-fixed", "load": "point", "applied": 100.0}
+gPC = {}; C.info = lambda m, g=gPC: g.setdefault("msg", m)
+C.PlasticCollapse().Activated()
+assert dPC.getObject("PlasticCollapse") is not None and "load factor" in gPC["msg"]
+print("  plastic collapse command: %s" % gPC["msg"].split(chr(10))[0])
+print("welds + combined footing + AISC + EC9 + plastic collapse OK")
 
 # ---------- SLS deflection check ----------
 print("\n== SLS deflection check ==")

@@ -7820,6 +7820,97 @@ class MasonryEC6:
               "OK" if util <= 1 else "FAIL"))
 
 
+# ── Plastic collapse (limit analysis) of a single-span beam ─────
+# (case, load) -> (coefficient, kind). P_c = coef*Mp/L ; w_c = coef*Mp/L^2.
+PLASTIC_CASES = {
+    ("Simply supported", "point"): (4.0, "P"),
+    ("Simply supported", "udl"): (8.0, "w"),
+    ("Propped cantilever", "point"): (6.0, "P"),
+    ("Propped cantilever", "udl"): (11.657, "w"),      # 2(3+2sqrt2)
+    ("Fixed-fixed", "point"): (8.0, "P"),
+    ("Fixed-fixed", "udl"): (16.0, "w"),
+}
+
+
+def _plastic_collapse(case, load, L, Mp):
+    """Plastic-collapse (limit-analysis) load of a single-span beam from the
+    kinematic mechanism. Returns (collapse load, kind): a point load P_c (N) or a
+    UDL w_c (N/mm). These are the exact mechanism results used in plastic design."""
+    coef, kind = PLASTIC_CASES[(case, load)]
+    return (coef * Mp / L, "P") if kind == "P" else (coef * Mp / (L * L), "w")
+
+
+class PlasticCollapse:
+    def GetResources(self):
+        return {"Pixmap": _icon("tension"), "MenuText": "Plastic Collapse (limit)",
+                "ToolTip": "Plastic collapse (limit analysis) of a single-span "
+                           "steel beam: the plastic moment M_p = f_y Z and the "
+                           "collapse load from the kinematic mechanism (simply "
+                           "supported / propped cantilever / fixed-fixed, point or "
+                           "UDL), with the load factor against the applied load.",
+                "Accel": "A, L"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        doc = FreeCAD.ActiveDocument
+        cases = sorted(set(k[0] for k in PLASTIC_CASES))
+        fields = [
+            {"key": "_i", "kind": "info", "default":
+             "Plastic collapse of a single-span beam (limit analysis). Enter the "
+             "plastic modulus Z and f_y (-> M_p), the span, the support/load case "
+             "and the applied load; reports the collapse load and the load factor."},
+            {"key": "Z", "label": "Plastic modulus Z (mm3)", "kind": "float", "default": 1.0e6},
+            {"key": "fy", "label": "Steel f_y (MPa)", "kind": "float", "default": 355.0},
+            {"key": "L", "label": "Span L (mm)", "kind": "float", "default": 5000.0},
+            {"key": "case", "label": "Support case", "kind": "combo",
+             "options": cases, "default": "Fixed-fixed"},
+            {"key": "load", "label": "Load type", "kind": "combo",
+             "options": ["point", "udl"], "default": "point"},
+            {"key": "applied", "label": "Applied load (kN point, or kN/m UDL)",
+             "kind": "float", "default": 100.0},
+        ]
+        vals = form_dialog("Plastic Collapse (limit)", fields)
+        if not vals:
+            return
+        Mp = float(vals["Z"]) * float(vals["fy"])          # N.mm
+        L = float(vals["L"])
+        Pc, kind = _plastic_collapse(vals["case"], vals["load"], L, Mp)
+        if kind == "P":
+            coll = Pc / 1e3; unit = "kN"; applied = float(vals["applied"])
+        else:
+            coll = Pc * 1000.0 / 1e3; unit = "kN/m"; applied = float(vals["applied"])
+        factor = coll / applied if applied > 1e-9 else 0.0
+        doc.openTransaction("DynFrame: plastic collapse")
+        try:
+            s = doc.getObject("PlasticCollapse") or doc.addObject("Spreadsheet::Sheet",
+                                                                 "PlasticCollapse")
+            s.Label = "PlasticCollapse"; s.clearAll()
+            s.set("A1", "PLASTIC COLLAPSE - %s, %s load, L=%g mm, M_p=%.1f kNm"
+                  % (vals["case"], vals["load"], L, Mp / 1e6))
+            rows = [
+                ("Plastic moment M_p (kNm)", "%.1f" % (Mp / 1e6)),
+                ("Collapse load (%s)" % unit, "%.1f" % coll),
+                ("Applied load (%s)" % unit, "%.1f" % applied),
+                ("Collapse load factor", "%.2f  %s" % (factor,
+                 "OK (>=1)" if factor >= 1.0 else "UNSAFE (<1)")),
+            ]
+            for i, (aa, bb) in enumerate(rows, start=2):
+                s.set("A%d" % i, aa); s.set("B%d" % i, bb)
+            _grp(doc, RES_GROUP).addObject(s)
+            doc.commitTransaction(); doc.recompute()
+        except Exception as e:
+            doc.abortTransaction(); err("Plastic collapse failed: %s" % e); return
+        info("Plastic collapse (limit analysis) - %s beam, %s load, L = %g mm.\n\n"
+             "Plastic moment M_p = f_y Z = %.1f kNm\n"
+             "Collapse load = %.1f %s (applied %.1f %s)\n"
+             "Collapse load factor = %.2f  %s\n\nSee the 'PlasticCollapse' table. "
+             "Exact kinematic-mechanism result for a single span." %
+             (vals["case"], vals["load"], L, Mp / 1e6, coll, unit, applied, unit,
+              factor, "OK" if factor >= 1.0 else "UNSAFE"))
+
+
 # ── AISC 360-16 steel member (US code, LRFD) ────────────────────
 def _aisc_Fcr(KLr, E, Fy):
     """AISC 360-16 E3 flexural-buckling critical stress F_cr (MPa)."""
@@ -14322,6 +14413,7 @@ _add("DynFrame_MasonryEC6", MasonryEC6)
 _add("DynFrame_CombinedFootingEC2", CombinedFootingEC2)
 _add("DynFrame_AiscSteel", AiscSteel)
 _add("DynFrame_AluminiumEC9", AluminiumEC9)
+_add("DynFrame_PlasticCollapse", PlasticCollapse)
 _add("DynFrame_DeflectionCheck", DeflectionCheck)
 _add("DynFrame_WallThermal", WallThermal)
 _add("DynFrame_ThermalBridge2D", ThermalBridge2D)

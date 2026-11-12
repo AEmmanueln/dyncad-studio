@@ -273,6 +273,12 @@ spreadsheets at the root.
   resistance, and the combined axial+bending interaction, for alloys 6063/6082/
   7020. (Validated: f_o=250, W=10⁵ mm³ → M_Rd=22.7 kN·m; χ at λ̄=1.0 → 0.656 —
   matching the hand calc.)
+- **Plastic Collapse (limit analysis)** — the plastic moment M_p = f_y·Z and the
+  **collapse load** of a single-span beam from the kinematic mechanism (simply
+  supported, propped cantilever or fixed-fixed; point or UDL), with the collapse
+  load factor against the applied load. (Validated: M_p=100 kN·m, L=5 m →
+  fixed-fixed point 8M_p/L=160 kN, propped 6M_p/L=120 kN, simply 4M_p/L=80 kN,
+  fixed-fixed UDL 16M_p/L²=64 kN/m — the exact mechanism results.)
 - **Wall U-value & Condensation (building physics)** — **Wall U-value &
   Condensation** analyses a layered wall/roof: the **U-value** (thermal
   transmittance) to EN ISO 6946 (R-values in series + surface resistances),
@@ -590,7 +596,9 @@ rely on. The checks it runs:
 > on a 5 m footing → max sagging 200 kN·m, hogging −250 kN·m), the **AISC 360-16**
 > check (Gr50, KL = 4 m → F_cr = 306.9 MPa, φP_n = 2762 kN, φM_n = 310.5 kN·m)
 > and the **EC9 aluminium** member (M_Rd = 22.7 kN·m, χ = 0.656 at λ̄ = 1.0) all
-> match their hand calcs; the **SLS
+> match their hand calcs; the **plastic-collapse** loads are the exact mechanism
+> results (fixed-fixed point 8M_p/L, propped 6M_p/L, simply 4M_p/L, fixed UDL
+> 16M_p/L²); the **SLS
 > deflection** extraction is exact — a 10 mm
 > mid-span sag reads as 10 mm (span/deflection = 1000 for a 10 m span) while a
 > rigid-body rotation and a purely axial displacement both read as zero;

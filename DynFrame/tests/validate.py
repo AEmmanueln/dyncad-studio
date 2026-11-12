@@ -530,16 +530,27 @@ C.form_dialog=lambda title,fields:{"dir":"X","ag":0.25,"soil":"B","q":1.5,"n":12
 got={}; C.info=lambda m,g=got: g.setdefault("msg",m)
 C.ResponseSpectrum().Activated()
 import re
-V=float(re.search(r"SRSS base shear:\s*([\d.]+)",got["msg"]).group(1))
+V=float(re.search(r"(?:SRSS|CQC) base shear:\s*([\d.]+)",got["msg"]).group(1))
 pm=float(re.search(r"Modal mass captured:\s*([\d.]+)",got["msg"]).group(1))
+assert "CQC base shear" in got["msg"]        # CQC is the default combination now
 # bound: V <= M_total * Sd_plateau ; M_total ~ rho_t*A*L, Sd_plateau=ag*S*2.5/q
 rho_t=7.85e-9; A=2000.; Mtot=rho_t*A*Lc; Sd_pl=0.25*9810*1.2*2.5/1.5
-print("SRSS base shear = %.1f N   modal mass captured = %.1f%%"%(V,pm))
+print("CQC base shear = %.1f N   modal mass captured = %.1f%%"%(V,pm))
 print("upper bound M*Sd_plateau = %.1f N"%(Mtot*Sd_pl))
 sk=d12.getObject("Seismic"); shape=[o for o in d12.Objects if o.Name.startswith("Seismic") and getattr(o,'DiagKind',None)]
 print("Seismic table + shape:", sk is not None and bool(shape))
 assert 0 < V <= Mtot*Sd_pl*1.05 and pm > 80 and sk is not None
-print("seismic OK")
+# CQC modal-combination coefficients (pure): rho=1 for identical, ->0 separated
+assert abs(C._cqc_rho(2.0,2.0,0.05)-1.0)<1e-9
+assert C._cqc_rho(1.0,10.0,0.05) < 1e-2
+assert abs(C._cqc_scalar([5.0],[2.0])-5.0)<1e-9                       # single mode
+assert abs(C._cqc_scalar([3.0,4.0],[2.0,2.0],0.05)-7.0)<1e-6         # identical -> |3+4|
+assert abs(C._cqc_scalar([3.0,4.0],[1.0,10.0],0.05)-5.0)<2e-2        # separated -> SRSS
+import numpy as _np
+_vc=C._cqc_vector([_np.array([3.0,0.0]),_np.array([4.0,0.0])],[2.0,2.0],0.05)
+assert abs(_vc[0]-7.0)<1e-6 and abs(_vc[1])<1e-9
+print("  CQC: rho(2,2)=1, well-separated->SRSS, identical modes fully correlated")
+print("seismic + CQC OK")
 
 print("\n=== Bar point load: cantilever tip load -> PL^3/3EI, M_fixed = PL ===")
 C._section_props_from_name=lambda name:(2000.0,1.0e6,1.0e6,2.0e6,100.0)  # symmetric
@@ -1642,7 +1653,37 @@ assert rc is not None and rc._cells.get("A1", "").startswith("RC COLUMN EC2")
 assert "Utilisation" in str(rc._cells.get("A4", "")) and "Squash" in str(rc._cells.get("A2", ""))
 assert "utilisation" in gCL["msg"]
 print("  command wrote RcColumn table: %s" % gCL["msg"].split(chr(10))[0])
+# EC2 5.8 slenderness + nominal-curvature 2nd order (hand calc):
+# 300x400, l0=6000, N=960kN, As=2000, C30/37 -> lambda~52 (>lim ~17, slender);
+# e2~49.7mm, M2~47.7 kNm
+sl = C._column_slenderness(960e3, 300.0 * 400.0, 30.0, 6000.0, 400.0)
+assert abs(sl["n"] - 0.4) < 1e-6 and abs(sl["lambda"] - 51.96) < 0.3, sl
+assert abs(sl["lambda_lim"] - 17.04) < 0.3 and sl["slender"], sl
+so = C._column_2nd_order(960e3, 6000.0, 350.0, 2000.0, 300.0 * 400.0, 30.0, 500.0)
+assert abs(so["e2"] - 49.69) < 0.5 and abs(so["M2"] - 47.7e6) < 1e6, so
+print("  slenderness lambda=%.0f (lim %.0f, slender) -> M2=%.0f kNm (expect 52/17/48)"
+      % (sl["lambda"], sl["lambda_lim"], so["M2"] / 1e6))
 print("EC2 RC column design OK")
+
+# ---------- SLS deflection check ----------
+print("\n== SLS deflection check ==")
+dl = C._defl_limits(10000.0)       # 10 m span
+assert abs(dl["L/250"] - 40.0) < 1e-9 and abs(dl["L/500"] - 20.0) < 1e-9
+# a beam along +X with ends held and 10 mm sag at midspan -> delta = 10 mm
+d1, r1 = C._member_transverse_deflection((1.0, 0.0, 0.0), 10000.0,
+    [0.0, 0.5, 1.0], [(0, 0, 0), (0, 0, -10.0), (0, 0, 0)])
+assert abs(d1 - 10.0) < 1e-9 and abs(r1 - 1000.0) < 1e-6, (d1, r1)
+# a rigid-body rotation (ends at 0 and 5, mid exactly on the chord) -> zero
+d2, r2 = C._member_transverse_deflection((1.0, 0.0, 0.0), 10000.0,
+    [0.0, 0.5, 1.0], [(0, 0, 0), (0, 0, 2.5), (0, 0, 5.0)])
+assert d2 < 1e-9, d2
+# axial-only displacement (along the member) is not a deflection
+d3, _ = C._member_transverse_deflection((1.0, 0.0, 0.0), 10000.0,
+    [0.0, 0.5, 1.0], [(0, 0, 0), (3.0, 0, 0), (0, 0, 0)])
+assert d3 < 1e-9, d3
+print("  limits L/250=%.0f L/500=%.0f; midspan sag caught (delta=%.0f, L/d=%.0f); "
+      "rigid-body & axial -> 0" % (dl["L/250"], dl["L/500"], d1, r1))
+print("SLS deflection check OK")
 
 # ---------- CFD (OpenFOAM driver) ----------
 print("\n== CFD (OpenFOAM case driver) ==")

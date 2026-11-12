@@ -200,10 +200,13 @@ spreadsheets at the root.
   rectangular RC column to EN 1992-1-1 by its **N–M interaction**: the moment
   capacity M_Rd at the design axial load N_Ed (rectangular stress block, steel
   on both faces, strains from plane sections), the utilisation for M_Ed, and the
-  steel auto-sized if it fails. Enter the section, bars and ULS N_Ed / M_Ed;
-  results go to the `RcColumn` table. (Validated: 300×400, 2000 mm² symmetric,
-  C30/37 → squash load 3270 kN; at N=960 kN the capacity is M_Rd=246 kN·m,
-  matching the hand-calculated interaction point.)
+  steel auto-sized if it fails. **Slender columns** are handled by the EC2 5.8
+  nominal-curvature method — give the effective length l₀ and it computes the
+  slenderness λ against λ_lim and adds the second-order moment M₂ = N_Ed·e₂ to
+  the design moment. Enter the section, bars and ULS N_Ed / M_Ed; results go to
+  the `RcColumn` table. (Validated: 300×400, 2000 mm² symmetric, C30/37 → squash
+  load 3270 kN, M_Rd=246 kN·m at N=960 kN; with l₀=6 m → λ=52 > λ_lim=17
+  (slender), M₂≈48 kN·m — all matching the hand calc.)
 - **Wall U-value & Condensation (building physics)** — **Wall U-value &
   Condensation** analyses a layered wall/roof: the **U-value** (thermal
   transmittance) to EN ISO 6946 (R-values in series + surface resistances),
@@ -339,8 +342,17 @@ spreadsheets at the root.
   analysis built on the modal results: pick the direction, ground
   acceleration aₘ, ground type (A–E) and behaviour factor q; it reports
   per-mode period / modal mass % / spectral acceleration / base shear, the
-  **SRSS base shear**, and the SRSS seismic displacement shape (warns if
-  < 90 % modal mass is captured).
+  combined base shear and the seismic displacement shape (warns if < 90 %
+  modal mass is captured). Modes are combined by **CQC** (the complete
+  quadratic combination, with correlation ρ_ij from the modal frequencies and
+  damping — correct for closely-spaced modes) or **SRSS**, your choice.
+- **Deflection Check (SLS)** — check every member's maximum span deflection
+  from the latest analysis against the serviceability limit (**span/250** for
+  appearance, span/350 or span/500 for brittle finishes). The deflection is
+  measured **perpendicular to the member, relative to its displaced
+  end-to-end chord**, so a rigid-body translation or rotation correctly reads
+  as zero; results and a pass/fail per member go to the `Deflections` table
+  (run it on an SLS combination).
 - **Elastic (spring) supports** — model foundations / soil: in **Define
   Support** choose *Elastic (spring)* and enter the spring stiffnesses per DOF
   (Kx, Ky, Kz in N/mm; Krx, Kry, Krz in N·mm/rad). The springs add stiffness
@@ -456,8 +468,10 @@ rely on. The checks it runs:
 > buckling curves and a worked column check (χ_z = 0.452, Nb,z = 551 kN,
 > U = 0.73) and reproduces the LTB reduction (χ_LT ≈ 0.52 for a long
 > unrestrained span); **P-Δ** reproduces the 1/(1−P/Pcr) amplification;
-> **seismic** effective modal masses sum to 100 % of the total mass; the
-> **time-history** (Newmark-β) reproduces the exact step-load dynamic
+> **seismic** effective modal masses sum to 100 % of the total mass, and the
+> **CQC** modal combination is exact — ρ = 1 for identical modes, → 0 (SRSS)
+> for well-separated ones, and two fully-correlated modes combine to |R₁+R₂|;
+> the **time-history** (Newmark-β) reproduces the exact step-load dynamic
 > amplification factor of 2.0, oscillates at the natural period T₁, and
 > collapses to the static response under heavy damping; **modal superposition**
 > matches the direct result to 0.5 %, a **recorded accelerogram** read from a
@@ -491,7 +505,11 @@ rely on. The checks it runs:
 > As ≈ 1486 mm²; M = 400 kN·m → doubly reinforced As2 ≈ 550, As ≈ 2445 mm²;
 > V = 300 kN → V_Rd,c ≈ 87 kN, V_Rd,max ≈ 442 kN, Asw/s ≈ 682 mm²/m); the
 > **EC2 RC column** N–M interaction matches the hand-calculated point (300×400,
-> 2000 mm² symmetric, C30/37: squash 3270 kN, and M_Rd = 246 kN·m at N = 960 kN);
+> 2000 mm² symmetric, C30/37: squash 3270 kN, and M_Rd = 246 kN·m at N = 960 kN,
+> with EC2 5.8 slenderness λ = 52 > λ_lim = 17 and a nominal-curvature M₂ ≈
+> 48 kN·m at l₀ = 6 m); the **SLS deflection** extraction is exact — a 10 mm
+> mid-span sag reads as 10 mm (span/deflection = 1000 for a 10 m span) while a
+> rigid-body rotation and a purely axial displacement both read as zero;
 > the
 > **EN 1991-1-4 wind** pressure q_p(10 m, terrain II, v_b = 26 m/s) ≈ 0.99 kPa
 > (c_e ≈ 2.35, matching the exposure chart) with the applied base shear equal

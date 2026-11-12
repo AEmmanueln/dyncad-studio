@@ -5964,6 +5964,44 @@ class BucklingAnalysis:
              "into %d sub-elements.)" % (lam_cr, verdict, lam_cr, NSUB))
 
 
+def _cqc_rho(fi, fj, zeta):
+    """CQC cross-correlation coefficient between two modes with equal damping
+    (Der Kiureghian), used by EN 1998 modal combination. fi, fj are modal
+    frequencies; zeta the damping ratio. rho=1 for identical modes, ->0 for
+    well-separated ones (so CQC -> SRSS)."""
+    if fi <= 0.0 or fj <= 0.0:
+        return 1.0 if fi == fj else 0.0
+    r = fi / fj
+    denom = (1.0 - r * r) ** 2 + 4.0 * zeta * zeta * r * (1.0 + r) ** 2
+    if denom <= 0.0:
+        return 1.0
+    return 8.0 * zeta * zeta * (1.0 + r) * r ** 1.5 / denom
+
+
+def _cqc_scalar(values, freqs, zeta=0.05):
+    """CQC-combine per-mode scalar responses (e.g. base shears)."""
+    import math
+    s = 0.0
+    for i, vi in enumerate(values):
+        for j, vj in enumerate(values):
+            s += _cqc_rho(freqs[i], freqs[j], zeta) * vi * vj
+    return math.sqrt(max(s, 0.0))
+
+
+def _cqc_vector(vectors, freqs, zeta=0.05):
+    """CQC-combine a list of modal response vectors (numpy) into one vector."""
+    import numpy as np
+    if not vectors:
+        return None
+    acc = np.zeros_like(np.asarray(vectors[0], dtype=float))
+    for i in range(len(vectors)):
+        vi = np.asarray(vectors[i], dtype=float)
+        for j in range(len(vectors)):
+            acc += (_cqc_rho(freqs[i], freqs[j], zeta)
+                    * vi * np.asarray(vectors[j], dtype=float))
+    return np.sqrt(np.maximum(acc, 0.0))
+
+
 class ResponseSpectrum:
     def GetResources(self):
         return {"Pixmap": _icon("seismic"), "MenuText": "Seismic (Response Spectrum)",
@@ -5983,8 +6021,8 @@ class ResponseSpectrum:
             info("No bars/members found. Build a line model first."); return
         vals = form_dialog("Seismic - EC8 Response Spectrum", [
             {"key": "_i", "kind": "info", "default":
-             "Elastic/design response spectrum (EN 1998-1, Type 1). Base shear by "
-             "SRSS over the modes."},
+             "Elastic/design response spectrum (EN 1998-1, Type 1). Modes combined "
+             "by CQC (correlated, better for closely-spaced modes) or SRSS."},
             {"key": "dir", "label": "Direction", "kind": "combo",
              "options": ["X", "Y", "Z"], "default": "X"},
             {"key": "ag", "label": "Ground accel. ag (x g)", "kind": "float", "default": 0.25},
@@ -5992,6 +6030,10 @@ class ResponseSpectrum:
              "options": list(EC8_SOILS.keys()), "default": "B"},
             {"key": "q", "label": "Behaviour factor q", "kind": "float", "default": 1.5},
             {"key": "n", "label": "Modes", "kind": "int", "default": 10},
+            {"key": "comb", "label": "Modal combination", "kind": "combo",
+             "options": ["CQC", "SRSS"], "default": "CQC"},
+            {"key": "zeta", "label": "Damping ratio (%, for CQC)", "kind": "float",
+             "default": 5.0},
         ])
         if not vals:
             return
@@ -6079,7 +6121,7 @@ class ResponseSpectrum:
         rf = r[free]
         Mrf = Mf @ rf
         total_mass = float(rf @ Mrf)
-        rows = []; u_srss = np.zeros(ndof); V2 = 0.0
+        rows = []; uis = []; Vis = []; fis = []
         for idx in order:
             w = float(np.sqrt(w2[idx])); T = 2 * np.pi / w; f = w / (2 * np.pi)
             phi = Lci.T @ Y[:, idx]            # mass-normalised (phi^T M phi = 1)
@@ -6087,14 +6129,20 @@ class ResponseSpectrum:
             meff = gamma * gamma               # tonne
             Sd = _ec8_sd(T, ag, S, TB, TC, TD, q)
             Vi = meff * Sd                     # N
-            V2 += Vi * Vi
             ui = np.zeros(ndof)
             ui[free] = gamma * phi * Sd / (w * w)   # mm
-            u_srss += ui * ui
+            uis.append(ui); Vis.append(Vi); fis.append(f)
             rows.append((T, f, 100.0 * meff / total_mass if total_mass > 1e-12 else 0.0,
                          Sd / 9810.0, Vi))
-        u_srss = np.sqrt(u_srss)
-        base_shear = float(np.sqrt(V2))
+        method = vals.get("comb", "CQC")
+        zeta = max(float(vals.get("zeta", 5.0)) / 100.0, 1e-4)
+        if method == "CQC" and uis:
+            u_srss = _cqc_vector(uis, fis, zeta)
+            base_shear = _cqc_scalar(Vis, fis, zeta)
+        else:
+            method = "SRSS"
+            u_srss = np.sqrt(np.sum([u * u for u in uis], axis=0)) if uis else np.zeros(ndof)
+            base_shear = float(np.sqrt(sum(v * v for v in Vis)))
         sum_mass = sum(rw[2] for rw in rows)
 
         # table
@@ -6111,7 +6159,7 @@ class ResponseSpectrum:
                 sh.set("A%d" % r2, "%.4f" % T); sh.set("B%d" % r2, "%.3f" % f)
                 sh.set("C%d" % r2, "%.1f" % pm); sh.set("D%d" % r2, "%.4f" % sdg)
                 sh.set("E%d" % r2, "%.0f" % Vi); r2 += 1
-            sh.set("A%d" % (r2 + 1), "SRSS base shear (N)")
+            sh.set("A%d" % (r2 + 1), "%s base shear (N)" % method)
             sh.set("E%d" % (r2 + 1), "%.0f" % base_shear)
             sh.set("A%d" % (r2 + 2), "Sum modal mass %%")
             sh.set("C%d" % (r2 + 2), "%.1f" % sum_mass)
@@ -6141,7 +6189,7 @@ class ResponseSpectrum:
         ob = _result_tube(doc, _grp(doc, RES_GROUP), "SeismicShape", "_seismic", perbar,
                           _tube_radius(msize), dmax, True)
         if ob is not None:
-            ob.Label = "Seismic displacement (SRSS)"
+            ob.Label = "Seismic displacement (%s)" % method
         doc.commitTransaction(); doc.recompute(); _apply_result_colors(doc)
         try:
             FreeCADGui.activeDocument().activeView().viewAxonometric()
@@ -6149,13 +6197,145 @@ class ResponseSpectrum:
         except Exception:
             pass
         info("Seismic response-spectrum analysis complete (EC8, dir %s).\n\n"
-             "SRSS base shear:  %.0f N  (%.1f kN)\n"
+             "%s base shear:  %.0f N  (%.1f kN)\n"
              "Modal mass captured:  %.1f%% (%d modes)\n\n"
              "Per-mode period / modal-mass / Sd / base shear in the 'Seismic' "
-             "table; the SRSS seismic displacement shape is shown.\n\n%s" %
-             (vals["dir"], base_shear, base_shear / 1000.0, sum_mass, len(rows),
+             "table; the %s seismic displacement shape is shown.\n\n%s" %
+             (vals["dir"], method, base_shear, base_shear / 1000.0, sum_mass,
+              len(rows), method,
               "" if sum_mass >= 90.0 else "Note: < 90%% modal mass - include more "
               "modes for a code-compliant run."))
+
+
+def _defl_limits(span):
+    """SLS vertical-deflection limits (EN 1990 A1.4 / EN 1993-1-1 7.2): span/250
+    for total deflection (appearance/function), span/350 for deflection damaging
+    brittle finishes/partitions, span/500 for very sensitive ones."""
+    return {"L/250": span / 250.0, "L/350": span / 350.0, "L/500": span / 500.0}
+
+
+def _member_transverse_deflection(axis_unit, L, ts, us):
+    """Maximum deflection of a member PERPENDICULAR to its axis, measured from
+    the straight chord between the two end-node displacements (so a rigid-body
+    translation or rotation gives zero). axis_unit is the member's unit vector;
+    ts the fractional positions (0..1) of the sampled nodes; us their (3,)
+    displacement vectors. Returns (delta, span/delta ratio). This is the part a
+    per-member SLS deflection check gets wrong, so it is unit-tested."""
+    import numpy as np
+    a = np.asarray(axis_unit, float)
+    i0 = min(range(len(ts)), key=lambda i: ts[i])
+    i1 = max(range(len(ts)), key=lambda i: ts[i])
+    uA = np.asarray(us[i0], float); uB = np.asarray(us[i1], float)
+    dmax = 0.0
+    for t, u in zip(ts, us):
+        res = np.asarray(u, float) - ((1.0 - t) * uA + t * uB)
+        perp = res - (res @ a) * a
+        dmax = max(dmax, float(np.linalg.norm(perp)))
+    return dmax, (L / dmax if dmax > 1e-12 else 1e12)
+
+
+class DeflectionCheck:
+    def GetResources(self):
+        return {"Pixmap": _icon("settle"), "MenuText": "Deflection Check (SLS)",
+                "ToolTip": "Check every member's maximum span deflection from the "
+                           "latest analysis against the serviceability limit "
+                           "(span/250 by default; span/350 or span/500 for brittle "
+                           "finishes) - the deflection measured perpendicular to "
+                           "the member, relative to its displaced end-to-end chord. "
+                           "Run Calculate first.",
+                "Accel": "A, D"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        import numpy as np
+        doc = FreeCAD.ActiveDocument
+        state = _load_state(doc)
+        if state is None:
+            info("Run Calculate first - the deflection check uses the displacements "
+                 "from the latest analysis."); return
+        nodes, U, elems, scale, msize, radius = state[:6]
+        lim_name, ok = get_item("Deflection Check (SLS)", "Deflection limit:",
+                                ["span/250 (appearance)", "span/350 (brittle)",
+                                 "span/500 (sensitive)"], 0)
+        if not ok:
+            return
+        denom = {"span/250": 250.0, "span/350": 350.0, "span/500": 500.0}[
+            lim_name.split(" ")[0]]
+        bars = [o for o in _analysis_objs(doc)[0] if hasattr(o, "ResN") or
+                getattr(o, "IsBar", False)]
+        if not bars:
+            bars = _analysis_objs(doc)[0]
+
+        def nidx(p):
+            best = -1; bd = 1e9
+            for i, q in enumerate(nodes):
+                d = q.distanceToPoint(p)
+                if d < bd:
+                    bd = d; best = i
+            return best if bd <= 1.0 else -1
+        rows = []
+        for o in bars:
+            try:
+                A, B = _elem_ends(o)
+            except Exception:
+                continue
+            axis = B - A; L = axis.Length
+            if L < 1e-6:
+                continue
+            ax = unit(axis)
+            au = (ax.x, ax.y, ax.z)
+            ts = []; us = []
+            for i, q in enumerate(nodes):
+                w = q - A
+                t = (w.x * ax.x + w.y * ax.y + w.z * ax.z) / L
+                if -1e-6 <= t <= 1.0 + 1e-6:
+                    # on the member axis (perpendicular distance ~ 0)?
+                    proj = A + vscale(ax, t * L)
+                    if proj.distanceToPoint(q) <= max(1.0, 1e-3 * L):
+                        ts.append(min(max(t, 0.0), 1.0))
+                        us.append((float(U[6 * i]), float(U[6 * i + 1]), float(U[6 * i + 2])))
+            if len(ts) < 2:
+                continue
+            delta, ratio = _member_transverse_deflection(au, L, ts, us)
+            allow = L / denom
+            rows.append((getattr(o, "Label", o.Name), L, delta, ratio, allow,
+                         delta <= allow))
+        if not rows:
+            info("No member spans found to check (run Calculate, and use line "
+                 "members)."); return
+        rows.sort(key=lambda r: (r[5], -r[2]))      # failures first, worst first
+        worst = min((r[3] for r in rows), default=1e12)
+        nfail = sum(1 for r in rows if not r[5])
+        doc.openTransaction("DynFrame: deflection check")
+        try:
+            s = doc.getObject("Deflections") or doc.addObject("Spreadsheet::Sheet",
+                                                              "Deflections")
+            s.Label = "Deflections"; s.clearAll()
+            s.set("A1", "DEFLECTION CHECK (SLS) - limit %s | %d member(s), %d FAIL"
+                  % (lim_name.split(" ")[0], len(rows), nfail))
+            for c, hh in zip("ABCDE", ["Member", "Span L (mm)", "Deflection (mm)",
+                                       "L / delta", "Verdict"]):
+                s.set("%s2" % c, hh)
+            r2 = 3
+            for (nm, L, d, ratio, allow, okk) in rows:
+                s.set("A%d" % r2, str(nm)); s.set("B%d" % r2, "%.0f" % L)
+                s.set("C%d" % r2, "%.2f" % d)
+                s.set("D%d" % r2, "%.0f" % ratio if ratio < 1e11 else "-")
+                s.set("E%d" % r2, "OK" if okk else "FAIL"); r2 += 1
+            _grp(doc, RES_GROUP).addObject(s)
+            doc.commitTransaction(); doc.recompute()
+        except Exception as e:
+            doc.abortTransaction(); err("Deflection check failed: %s" % e); return
+        info("Deflection check (SLS, limit %s) - %d member(s), %d FAIL.\n\n"
+             "Worst span/deflection ratio = %s (limit %.0f).\n\n"
+             "Each member's span deflection (perpendicular to the member, relative "
+             "to its displaced end-to-end chord) vs the limit is in the "
+             "'Deflections' table. Deflections come from the latest analysis - use "
+             "an SLS combination (characteristic/frequent) for a code check." %
+             (lim_name.split(" ")[0], len(rows), nfail,
+              "%.0f" % worst if worst < 1e11 else "inf", denom))
 
 
 class CodeCheck:
@@ -6567,6 +6747,36 @@ def _rc_column_MRd(N_Ed, b, h, d2, As_tot, fck, fyk, gc=1.5, gs=1.15, nx=600):
     return best
 
 
+def _column_slenderness(N_Ed, Ac, fck, l0, h, gc=1.5, A=0.7, B=1.1, Cf=0.7):
+    """EN 1992-1-1 5.8.3 slenderness of a rectangular column about the h axis:
+    lambda = l0/i (i = h/sqrt(12)) against lambda_lim = 20 A B C / sqrt(n),
+    n = N_Ed/(Ac fcd). slender when lambda > lambda_lim."""
+    import math
+    fcd = fck / gc
+    n = N_Ed / (Ac * fcd) if Ac * fcd > 0 else 0.0
+    i = h / math.sqrt(12.0)
+    lam = l0 / i if i > 0 else 0.0
+    lam_lim = 20.0 * A * B * Cf / math.sqrt(n) if n > 0 else 1e9
+    return {"n": n, "i": i, "lambda": lam, "lambda_lim": lam_lim,
+            "slender": lam > lam_lim}
+
+
+def _column_2nd_order(N_Ed, l0, d, As, Ac, fck, fyk, gc=1.5, gs=1.15, c=10.0,
+                      Kphi=1.0):
+    """EN 1992-1-1 5.8.8 nominal-curvature second-order moment M2 = N_Ed e2,
+    e2 = (1/r) l0^2/c, 1/r = Kr Kphi (eps_yd)/(0.45 d), Kr = (nu-n)/(nu-nbal)
+    with nu = 1+omega, omega = As fyd/(Ac fcd), nbal = 0.4."""
+    fcd = fck / gc; fyd = fyk / gs; Es = 200000.0
+    n = N_Ed / (Ac * fcd) if Ac * fcd > 0 else 0.0
+    omega = As * fyd / (Ac * fcd) if Ac * fcd > 0 else 0.0
+    nu = 1.0 + omega
+    Kr = (nu - n) / (nu - 0.4) if (nu - 0.4) > 1e-9 else 1.0
+    Kr = min(max(Kr, 0.0), 1.0)
+    inv_r = Kr * Kphi * (fyd / Es) / (0.45 * d) if d > 0 else 0.0
+    e2 = inv_r * l0 * l0 / c
+    return {"n": n, "omega": omega, "Kr": Kr, "e2": e2, "M2": N_Ed * e2}
+
+
 class RcBeamEC2:
     _GRADES = {"C20/25": (20.0, 2.2), "C25/30": (25.0, 2.6), "C30/37": (30.0, 2.9),
                "C35/45": (35.0, 3.2), "C40/50": (40.0, 3.5), "C45/55": (45.0, 3.8),
@@ -6698,8 +6908,10 @@ class RcColumnEC2:
              "kind": "int", "default": 6, "min": 4, "max": 40},
             {"key": "N", "label": "Design axial N_Ed (kN, compression +)",
              "kind": "float", "default": 960.0},
-            {"key": "M", "label": "Design moment M_Ed (kN.m)", "kind": "float",
+            {"key": "M", "label": "1st-order moment M_Ed (kN.m)", "kind": "float",
              "default": 150.0},
+            {"key": "l0", "label": "Effective length l0 (mm, 0 = ignore slenderness)",
+             "kind": "float", "default": 0.0},
         ]
         vals = form_dialog("RC Column Design (EC2)", fields)
         if not vals:
@@ -6709,8 +6921,18 @@ class RcColumnEC2:
         d2 = float(vals["cover"]) + float(vals["link"]) + 0.5 * float(vals["bar"])
         abar = 3.14159265 * (float(vals["bar"]) / 2.0) ** 2
         As_tot = int(vals["nbar"]) * abar
-        N = float(vals["N"]) * 1e3; M = float(vals["M"]) * 1e6
+        N = float(vals["N"]) * 1e3; M0 = float(vals["M"]) * 1e6
+        l0 = float(vals.get("l0", 0.0))
         Nsquash = (fck / 1.5) * b * h + As_tot * (fyk / 1.15)
+        # EC2 5.8: slenderness and nominal-curvature 2nd-order moment
+        slen = None; M2 = 0.0; M = M0
+        if l0 > 0:
+            slen = _column_slenderness(N, b * h, fck, l0, h)
+            M0e = max(M0, N * max(h / 30.0, 20.0))   # include EC2 5.8.8.2 minimum
+            if slen["slender"]:
+                so = _column_2nd_order(N, l0, h - d2, As_tot, b * h, fck, fyk)
+                M2 = so["M2"]
+            M = M0e + M2
         MRd = _rc_column_MRd(N, b, h, d2, As_tot, fck, fyk)
         util = (M / MRd) if MRd > 1e-6 else (99.9 if M > 0 else 0.0)
         rho = As_tot / (b * h)
@@ -6730,8 +6952,17 @@ class RcColumnEC2:
                   "mm2, rho=%.2f%%) | N=%g kN, M=%g kNm"
                   % (vals["grade"], fyk, b, h, int(vals["nbar"]), float(vals["bar"]),
                      As_tot, 100 * rho, vals["N"], vals["M"]))
-            rows = [
-                ("Squash load N_Rd0 (kN)", "%.0f" % (Nsquash / 1e3)),
+            rows = [("Squash load N_Rd0 (kN)", "%.0f" % (Nsquash / 1e3))]
+            if slen is not None:
+                rows.append(("Slenderness lambda / lambda_lim",
+                             "%.1f / %.1f  (%s)" % (slen["lambda"], slen["lambda_lim"],
+                              "SLENDER - 2nd order included" if slen["slender"]
+                              else "short - no 2nd order")))
+                if M2 > 0:
+                    rows.append(("2nd-order moment M2 (kNm)", "%.1f" % (M2 / 1e6)))
+                rows.append(("Design moment M_Ed (kNm)",
+                             "%.1f  (1st order %.1f)" % (M / 1e6, M0 / 1e6)))
+            rows += [
                 ("M_Rd at N_Ed (kNm)", "%.1f" % (MRd / 1e6)),
                 ("Utilisation M_Ed/M_Rd", "%.2f  %s" % (util, "OK" if util <= 1.0 else "FAIL")),
                 ("Reinforcement ratio", "%.2f%%  (min 0.10%% of Ac or 0.10 N_Ed/fyd)"
@@ -6756,16 +6987,22 @@ class RcColumnEC2:
                      "(rho = %.2f%%)." % (need_n, float(vals["bar"]), need_As,
                                           100 * need_As / (b * h))) if need_As > As_tot \
                 else "\n\nFails - increase the section."
+        slen_txt = ""
+        if slen is not None:
+            slen_txt = ("Slenderness lambda = %.0f vs lambda_lim = %.0f (%s)%s\n"
+                        % (slen["lambda"], slen["lambda_lim"],
+                           "SLENDER" if slen["slender"] else "short",
+                           ", M2 = %.0f kNm" % (M2 / 1e6) if M2 > 0 else ""))
         info("RC column (EN 1992-1-1) - %s, %g x %g mm, %d x H%g bars (As = %.0f "
              "mm2, rho = %.2f%%).\n\n"
-             "Squash load N_Rd0 = %.0f kN\n"
+             "Squash load N_Rd0 = %.0f kN\n%s"
              "At N_Ed = %g kN:  M_Rd = %.0f kNm\n"
-             "M_Ed = %g kNm  ->  utilisation = %.2f  %s%s\n\n"
-             "See the 'RcColumn' table. Symmetric reinforcement, uniaxial bending; "
-             "N_Ed are ULS envelope forces." %
+             "M_Ed = %.0f kNm (1st order %g)  ->  utilisation = %.2f  %s%s\n\n"
+             "See the 'RcColumn' table. Symmetric reinforcement, uniaxial bending "
+             "(EC2 5.8.8 nominal curvature when l0 is given); ULS envelope forces." %
              (vals["grade"], b, h, int(vals["nbar"]), float(vals["bar"]), As_tot,
-              100 * rho, Nsquash / 1e3, vals["N"], MRd / 1e6, vals["M"], util,
-              "OK" if util <= 1.0 else "FAIL", extra))
+              100 * rho, Nsquash / 1e3, slen_txt, vals["N"], MRd / 1e6, M / 1e6,
+              vals["M"], util, "OK" if util <= 1.0 else "FAIL", extra))
 
 
 class WallThermal:
@@ -13077,6 +13314,7 @@ _add("DynFrame_PlateReinfEC2", PlateReinfEC2)
 _add("DynFrame_PunchingEC2", PunchingEC2)
 _add("DynFrame_RcBeamEC2", RcBeamEC2)
 _add("DynFrame_RcColumnEC2", RcColumnEC2)
+_add("DynFrame_DeflectionCheck", DeflectionCheck)
 _add("DynFrame_WallThermal", WallThermal)
 _add("DynFrame_ThermalBridge2D", ThermalBridge2D)
 _add("DynFrame_FireThermal", FireThermal)

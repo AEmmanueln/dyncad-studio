@@ -7199,6 +7199,233 @@ class PadFootingEC2:
               r["vEd_punch"], r["vRdc_punch"], "OK" if r["punch_ok"] else "FAIL"))
 
 
+# ── EC5 timber member design (EN 1995-1-1) ──────────────────────
+# Strength class -> (f_m,k, f_t,0,k, f_c,0,k, f_v,k, E_0,mean, E_0,05, rho_k, gamma_M)
+# Solid (EN 338) and glulam (EN 14080), representative values (MPa / kg/m3).
+TIMBER_CLASSES = {
+    "C16": (16.0, 10.0, 17.0, 3.2, 8000.0, 5400.0, 310.0, 1.3),
+    "C24": (24.0, 14.0, 21.0, 4.0, 11000.0, 7400.0, 350.0, 1.3),
+    "C30": (30.0, 18.0, 23.0, 4.0, 12000.0, 8000.0, 380.0, 1.3),
+    "GL24h": (24.0, 16.5, 24.0, 3.5, 11500.0, 9600.0, 385.0, 1.25),
+    "GL28h": (28.0, 19.5, 28.0, 3.5, 12600.0, 10200.0, 425.0, 1.25),
+}
+# k_mod, EN 1995-1-1 Table 3.1 (service class -> load-duration class)
+KMOD = {
+    1: {"permanent": 0.60, "long": 0.70, "medium": 0.80, "short": 0.90, "instant": 1.10},
+    2: {"permanent": 0.60, "long": 0.70, "medium": 0.80, "short": 0.90, "instant": 1.10},
+    3: {"permanent": 0.50, "long": 0.55, "medium": 0.65, "short": 0.70, "instant": 0.90},
+}
+
+
+def _timber_kc(lam_rel, beta_c=0.2):
+    """EN 1995-1-1 6.3.2 buckling reduction factor k_c from the relative
+    slenderness (beta_c = 0.2 solid timber, 0.1 glulam/LVL)."""
+    if lam_rel <= 0.3:
+        return 1.0
+    k = 0.5 * (1.0 + beta_c * (lam_rel - 0.3) + lam_rel * lam_rel)
+    return 1.0 / (k + (k * k - lam_rel * lam_rel) ** 0.5)
+
+
+class TimberEC5:
+    def GetResources(self):
+        return {"Pixmap": _icon("rebar"), "MenuText": "Timber Member Check (EC5)",
+                "ToolTip": "Check a rectangular solid-timber or glulam member to "
+                           "EN 1995-1-1: design strengths from k_mod / gamma_M, "
+                           "biaxial bending, combined axial + bending with column "
+                           "buckling (k_c), and shear (k_cr) - the way Robot checks "
+                           "timber members.",
+                "Accel": "A, T"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        doc = FreeCAD.ActiveDocument
+        classes = list(TIMBER_CLASSES.keys())
+        fields = [
+            {"key": "_i", "kind": "info", "default":
+             "Rectangular timber member to EN 1995-1-1. Enter the section, strength "
+             "class, service class + load duration (set k_mod) and the design "
+             "forces. Checks biaxial bending, axial+bending with buckling, shear."},
+            {"key": "cls", "label": "Strength class", "kind": "combo",
+             "options": classes, "default": "C24"},
+            {"key": "sc", "label": "Service class", "kind": "combo",
+             "options": ["1", "2", "3"], "default": "1"},
+            {"key": "dur", "label": "Load duration", "kind": "combo",
+             "options": ["permanent", "long", "medium", "short", "instant"],
+             "default": "medium"},
+            {"key": "b", "label": "Width b (mm)", "kind": "float", "default": 100.0},
+            {"key": "h", "label": "Depth h (mm)", "kind": "float", "default": 200.0},
+            {"key": "My", "label": "Moment My about y (kN.m)", "kind": "float", "default": 5.0},
+            {"key": "Mz", "label": "Moment Mz about z (kN.m)", "kind": "float", "default": 0.0},
+            {"key": "N", "label": "Axial N (kN, + compression)", "kind": "float", "default": 0.0},
+            {"key": "V", "label": "Shear V (kN)", "kind": "float", "default": 0.0},
+            {"key": "lef", "label": "Buckling length l_ef (mm, 0 = no buckling)",
+             "kind": "float", "default": 0.0},
+        ]
+        vals = form_dialog("Timber Member Check (EC5)", fields)
+        if not vals:
+            return
+        fmk, ft0k, fc0k, fvk, E0m, E005, rhok, gM = TIMBER_CLASSES[vals["cls"]]
+        kmod = KMOD[int(vals["sc"])][vals["dur"]]
+        beta_c = 0.1 if vals["cls"].startswith("GL") else 0.2
+        kcr = 0.67
+        b = float(vals["b"]); h = float(vals["h"]); A = b * h
+        Wy = b * h * h / 6.0; Wz = h * b * b / 6.0
+        fmd = kmod * fmk / gM; fc0d = kmod * fc0k / gM
+        ft0d = kmod * ft0k / gM; fvd = kmod * fvk / gM
+        My = float(vals["My"]) * 1e6; Mz = float(vals["Mz"]) * 1e6
+        N = float(vals["N"]) * 1e3; V = abs(float(vals["V"])) * 1e3
+        lef = float(vals["lef"])
+        smy = My / Wy; smz = Mz / Wz
+        km = 0.7           # rectangular sections
+        bend = max(smy / fmd + km * smz / fmd, km * smy / fmd + smz / fmd)
+        checks = [("Bending (biaxial)", bend)]
+        kc = 1.0; lam_rel = 0.0
+        if N > 0:
+            sc0d = N / A
+            if lef > 0:
+                i = b / (12.0 ** 0.5)          # buckling about the weak (b) axis
+                lam = lef / i
+                lam_rel = (lam / 3.14159265) * (fc0k / E005) ** 0.5
+                kc = _timber_kc(lam_rel, beta_c)
+            comb = sc0d / (kc * fc0d) + smy / fmd + km * smz / fmd
+            checks.append(("Compression + bending (buckling)", comb))
+        elif N < 0:
+            st0d = -N / A
+            checks.append(("Tension + bending", st0d / ft0d + smy / fmd + km * smz / fmd))
+        if V > 0:
+            tau = 1.5 * V / (kcr * A)
+            checks.append(("Shear", tau / fvd))
+        gov = max(c[1] for c in checks)
+        doc.openTransaction("DynFrame: timber check")
+        try:
+            s = doc.getObject("Timber") or doc.addObject("Spreadsheet::Sheet", "Timber")
+            s.Label = "Timber"; s.clearAll()
+            s.set("A1", "TIMBER EC5 - %s, %gx%g mm, SC%s/%s, k_mod=%.2f, gamma_M=%.2f"
+                  % (vals["cls"], b, h, vals["sc"], vals["dur"], kmod, gM))
+            s.set("A2", "Design strengths (MPa)")
+            s.set("B2", "f_m,d=%.2f  f_c,0,d=%.2f  f_t,0,d=%.2f  f_v,d=%.2f"
+                  % (fmd, fc0d, ft0d, fvd))
+            r2 = 3
+            for (nm, u) in checks:
+                s.set("A%d" % r2, nm)
+                s.set("B%d" % r2, "%.2f  %s" % (u, "OK" if u <= 1.0 else "FAIL")); r2 += 1
+            if kc < 1.0:
+                s.set("A%d" % r2, "Buckling lambda_rel / k_c")
+                s.set("B%d" % r2, "%.2f / %.3f" % (lam_rel, kc))
+            _grp(doc, RES_GROUP).addObject(s)
+            doc.commitTransaction(); doc.recompute()
+        except Exception as e:
+            doc.abortTransaction(); err("Timber check failed: %s" % e); return
+        info("Timber member (EN 1995-1-1) - %s, %g x %g mm.\n\n"
+             "k_mod = %.2f (SC%s, %s), gamma_M = %.2f\n"
+             "f_m,d = %.2f, f_c,0,d = %.2f, f_v,d = %.2f MPa\n\n%s\n\n"
+             "Governing utilisation = %.2f  %s%s\n\nSee the 'Timber' table." %
+             (vals["cls"], b, h, kmod, vals["sc"], vals["dur"], gM, fmd, fc0d, fvd,
+              "\n".join("  %s: %.2f %s" % (nm, u, "OK" if u <= 1 else "FAIL")
+                        for nm, u in checks), gov, "OK" if gov <= 1.0 else "FAIL",
+              "  (buckling k_c = %.3f, lambda_rel = %.2f)" % (kc, lam_rel)
+              if kc < 1.0 else ""))
+
+
+def _base_plate(N, bc, hc, bp, hp, fck, fy, gM0=1.0, kj=1.0, betaj=2.0 / 3.0):
+    """EN 1993-1-8 6.2.5 axially-loaded column base plate (cantilever method):
+    concrete bearing strength f_jd = betaj kj fcd, the required bearing area, the
+    actual pressure, and the plate thickness from the plate overhang acting as a
+    cantilever under the bearing pressure. N in N, lengths mm, stresses MPa."""
+    fcd = fck / 1.5
+    f_jd = betaj * kj * fcd
+    A = bp * hp
+    p = N / A if A > 0 else 0.0
+    A_req = N / f_jd if f_jd > 0 else 0.0
+    a = max((hp - hc) / 2.0, (bp - bc) / 2.0)
+    M = p * a * a / 2.0                 # per unit width
+    t_req = (6.0 * M * gM0 / fy) ** 0.5 if fy > 0 else 0.0
+    return {"f_jd": f_jd, "p": p, "A_req": A_req, "a": a, "t_req": t_req,
+            "area_ok": A >= A_req and p <= f_jd}
+
+
+class BasePlateEC3:
+    _GRADES = {"C20/25": 20.0, "C25/30": 25.0, "C30/37": 30.0, "C35/45": 35.0}
+
+    def GetResources(self):
+        return {"Pixmap": _icon("rebar"), "MenuText": "Steel Base Plate (EC3)",
+                "ToolTip": "Design an axially-loaded steel column base plate to "
+                           "EN 1993-1-8: the concrete bearing strength f_jd, the "
+                           "required bearing area, the actual pressure and the "
+                           "plate thickness (plate overhang as a cantilever). "
+                           "Robot-style steel column-base design.",
+                "Accel": "A, P"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        doc = FreeCAD.ActiveDocument
+        fields = [
+            {"key": "_i", "kind": "info", "default":
+             "Axially-loaded steel column base plate (EN 1993-1-8). Enter the "
+             "column footprint, the plate size and thickness, the axial load and "
+             "the concrete grade. Concentric load; cantilever-method thickness."},
+            {"key": "grade", "label": "Concrete grade", "kind": "combo",
+             "options": list(self._GRADES.keys()), "default": "C30/37"},
+            {"key": "fy", "label": "Plate steel fy (MPa)", "kind": "float", "default": 235.0},
+            {"key": "N", "label": "Axial load N_Ed (kN, compression)", "kind": "float",
+             "default": 1000.0},
+            {"key": "bc", "label": "Column width (mm)", "kind": "float", "default": 200.0},
+            {"key": "hc", "label": "Column depth (mm)", "kind": "float", "default": 200.0},
+            {"key": "bp", "label": "Plate width (mm)", "kind": "float", "default": 400.0},
+            {"key": "hp", "label": "Plate depth (mm)", "kind": "float", "default": 400.0},
+            {"key": "tp", "label": "Plate thickness provided (mm)", "kind": "float",
+             "default": 30.0},
+            {"key": "kj", "label": "Concentration factor k_j (1-3)", "kind": "float",
+             "default": 1.0},
+        ]
+        vals = form_dialog("Steel Base Plate (EC3)", fields)
+        if not vals:
+            return
+        fck = self._GRADES[vals["grade"]]; fy = float(vals["fy"])
+        N = float(vals["N"]) * 1e3
+        r = _base_plate(N, float(vals["bc"]), float(vals["hc"]), float(vals["bp"]),
+                        float(vals["hp"]), fck, fy, kj=max(1.0, float(vals["kj"])))
+        tp = float(vals["tp"]); t_ok = tp >= r["t_req"]
+        doc.openTransaction("DynFrame: base plate")
+        try:
+            s = doc.getObject("BasePlate") or doc.addObject("Spreadsheet::Sheet", "BasePlate")
+            s.Label = "BasePlate"; s.clearAll()
+            s.set("A1", "STEEL BASE PLATE EC3 - %s, fy=%g, plate %gx%g mm, col %gx%g "
+                  "| N=%g kN" % (vals["grade"], fy, vals["bp"], vals["hp"],
+                                 vals["bc"], vals["hc"], vals["N"]))
+            rows = [
+                ("Bearing strength f_jd (MPa)", "%.2f" % r["f_jd"]),
+                ("Actual pressure p (MPa)", "%.2f  %s"
+                 % (r["p"], "OK" if r["p"] <= r["f_jd"] else "EXCEEDS f_jd")),
+                ("Required / provided area (mm2)", "%.0f / %.0f  %s"
+                 % (r["A_req"], float(vals["bp"]) * float(vals["hp"]),
+                    "OK" if r["area_ok"] else "TOO SMALL")),
+                ("Plate overhang a (mm)", "%.0f" % r["a"]),
+                ("Plate thickness req / prov (mm)", "%.1f / %.1f  %s"
+                 % (r["t_req"], tp, "OK" if t_ok else "TOO THIN")),
+            ]
+            for i, (a, bb) in enumerate(rows, start=2):
+                s.set("A%d" % i, a); s.set("B%d" % i, bb)
+            _grp(doc, RES_GROUP).addObject(s)
+            doc.commitTransaction(); doc.recompute()
+        except Exception as e:
+            doc.abortTransaction(); err("Base plate design failed: %s" % e); return
+        info("Steel base plate (EN 1993-1-8) - plate %g x %g mm, column %g x %g mm.\n\n"
+             "Concrete bearing f_jd = %.2f MPa; actual pressure p = %.2f MPa  %s\n"
+             "Required area %.0f mm2, provided %.0f mm2  %s\n"
+             "Plate overhang a = %.0f mm -> thickness required %.1f mm, provided "
+             "%.1f mm  %s\n\nSee the 'BasePlate' table." %
+             (vals["bp"], vals["hp"], vals["bc"], vals["hc"], r["f_jd"], r["p"],
+              "OK" if r["p"] <= r["f_jd"] else "EXCEEDS",
+              r["A_req"], float(vals["bp"]) * float(vals["hp"]),
+              "OK" if r["area_ok"] else "TOO SMALL", r["a"], r["t_req"], tp,
+              "OK" if t_ok else "TOO THIN - thicken the plate"))
+
+
 class WallThermal:
     _NLAYER = 6
 
@@ -13509,6 +13736,8 @@ _add("DynFrame_PunchingEC2", PunchingEC2)
 _add("DynFrame_RcBeamEC2", RcBeamEC2)
 _add("DynFrame_RcColumnEC2", RcColumnEC2)
 _add("DynFrame_PadFootingEC2", PadFootingEC2)
+_add("DynFrame_TimberEC5", TimberEC5)
+_add("DynFrame_BasePlateEC3", BasePlateEC3)
 _add("DynFrame_DeflectionCheck", DeflectionCheck)
 _add("DynFrame_WallThermal", WallThermal)
 _add("DynFrame_ThermalBridge2D", ThermalBridge2D)

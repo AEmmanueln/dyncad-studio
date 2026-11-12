@@ -219,6 +219,22 @@ spreadsheets at the root.
   1000 kN on 2.5×2.5 m, 400 mm column, C30/37, 200 kPa allowable → bearing
   160 kPa, required area 5.0 m², cantilever M=119 kN·m/m, punching perimeter
   u₁=7154 mm, v_Ed=0.152 ≤ v_Rd,c=0.415 MPa — matching the hand calc.)
+- **Timber Member Check (EC5)** — check a rectangular **solid-timber or glulam**
+  member to EN 1995-1-1: design strengths from **k_mod** (service class + load
+  duration) and γ_M, **biaxial bending** (with k_m), **combined axial + bending
+  with column buckling** (relative slenderness λ_rel → k_c), and **shear** (k_cr).
+  Pick the strength class (C16–C30, GL24h/GL28h), service class and duration,
+  enter the section and forces; utilisations go to the `Timber` table. (Validated:
+  C24 100×200, M=5 kN·m, k_mod=0.8 → f_m,d=14.8 MPa, σ=7.5 MPa, util 0.51; and a
+  C24 100×100, l_ef=3 m column → λ_rel=1.76, k_c=0.285 — matching the hand calc.)
+- **Steel Base Plate (EC3)** — design an axially-loaded steel column base plate
+  to EN 1993-1-8: the **concrete bearing strength** f_jd = β_j·k_j·f_cd, the
+  required bearing area, the actual pressure, and the **plate thickness** from
+  the plate overhang acting as a cantilever under the bearing pressure. Enter the
+  column footprint, plate size/thickness and axial load; results go to the
+  `BasePlate` table. (Validated: 200×200 column on a 400×400 plate, N=1000 kN,
+  C30/37 → f_jd=13.3 MPa, p=6.25 MPa, required area 75 000 mm², overhang 100 mm,
+  thickness required 28.3 mm — matching the hand calc.)
 - **Wall U-value & Condensation (building physics)** — **Wall U-value &
   Condensation** analyses a layered wall/roof: the **U-value** (thermal
   transmittance) to EN ISO 6946 (R-values in series + surface resistances),
@@ -523,7 +539,12 @@ rely on. The checks it runs:
 > n = 0.4 giving 0.5^a + 0.5^a = 0.841); the **EC2 pad footing** matches the
 > hand calc (1000 kN on 2.5×2.5 m, 400 mm column, C30/37, 200 kPa allowable →
 > bearing 160 kPa, required area 5.0 m², cantilever M = 119 kN·m/m, punching
-> perimeter u₁ = 7154 mm, v_Ed = 0.152 ≤ v_Rd,c = 0.415 MPa); the **SLS
+> perimeter u₁ = 7154 mm, v_Ed = 0.152 ≤ v_Rd,c = 0.415 MPa); the **EC5 timber**
+> member check matches the hand calc (C24 100×200, M = 5 kN·m, k_mod = 0.8 →
+> f_m,d = 14.8 MPa, σ = 7.5 MPa, util 0.51; buckling of a 3 m column → λ_rel =
+> 1.76, k_c = 0.285), and the **EC3 steel base plate** too (200×200 column on a
+> 400×400 plate, N = 1000 kN, C30/37 → f_jd = 13.3 MPa, p = 6.25 MPa, required
+> area 75 000 mm², thickness 28.3 mm); the **SLS
 > deflection** extraction is exact — a 10 mm
 > mid-span sag reads as 10 mm (span/deflection = 1000 for a 10 m span) while a
 > rigid-body rotation and a purely axial displacement both read as zero;

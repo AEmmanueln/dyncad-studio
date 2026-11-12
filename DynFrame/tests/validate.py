@@ -1700,6 +1700,48 @@ assert "BEARING" in gPF["msg"] and "PUNCHING".lower() in gPF["msg"].lower()
 print("  command wrote PadFooting table: %s" % gPF["msg"].split(chr(10))[0])
 print("EC2 pad footing design OK")
 
+# ---------- EC5 timber + EC3 base plate ----------
+print("\n== EC5 timber + EC3 base plate ==")
+# timber buckling: C24 100x100, l_ef=3000, N=20kN -> lambda_rel=1.762, k_c=0.285
+import math as _m
+fc0k = 21.0; E005 = 7400.0
+_i = 100.0 / _m.sqrt(12.0); _lam = 3000.0 / _i
+_lr = (_lam / _m.pi) * (fc0k / E005) ** 0.5
+assert abs(_lr - 1.762) < 5e-3, _lr
+assert abs(C._timber_kc(_lr, 0.2) - 0.2846) < 2e-3, C._timber_kc(_lr, 0.2)
+assert C._timber_kc(0.3, 0.2) == 1.0 and C._timber_kc(0.2) == 1.0   # stocky -> 1
+print("  timber buckling: lambda_rel=%.3f -> k_c=%.3f (expect 1.762/0.285)"
+      % (_lr, C._timber_kc(_lr, 0.2)))
+# timber command: C24 100x200, My=5 kNm, k_mod=0.8 -> f_m,d=14.77, sigma=7.5, util~0.51
+dT = Doc(); FreeCAD.ActiveDocument = dT
+C.form_dialog = lambda title, fields: {"cls": "C24", "sc": "1", "dur": "medium",
+    "b": 100.0, "h": 200.0, "My": 5.0, "Mz": 0.0, "N": 0.0, "V": 0.0, "lef": 0.0}
+gT = {}; C.info = lambda m, g=gT: g.setdefault("msg", m)
+C.TimberEC5().Activated()
+tt = dT.getObject("Timber")
+assert tt is not None and tt._cells.get("A1", "").startswith("TIMBER EC5")
+# f_m,d = 0.8*24/1.3 = 14.77; sigma_m = 5e6/(100*200^2/6)=7.5 -> util 0.508
+assert "Governing utilisation = 0.51" in gT["msg"], gT["msg"]
+print("  timber command: %s" % gT["msg"].split(chr(10))[0])
+# base plate: 200x200 col, 400x400 plate, N=1000kN, C30/37, fy=235
+bp = C._base_plate(1e6, 200.0, 200.0, 400.0, 400.0, 30.0, 235.0)
+assert abs(bp["f_jd"] - 13.333) < 1e-2 and abs(bp["p"] - 6.25) < 1e-3
+assert abs(bp["A_req"] - 75000.0) < 50.0 and abs(bp["a"] - 100.0) < 1e-6
+assert abs(bp["t_req"] - 28.25) < 0.2 and bp["area_ok"]
+print("  base plate: f_jd=%.2f p=%.2f MPa, A_req=%.0f mm2, a=%.0f, t_req=%.1f mm "
+      "(expect 13.33/6.25/75000/100/28.3)"
+      % (bp["f_jd"], bp["p"], bp["A_req"], bp["a"], bp["t_req"]))
+dBP = Doc(); FreeCAD.ActiveDocument = dBP
+C.form_dialog = lambda title, fields: {"grade": "C30/37", "fy": 235.0, "N": 1000.0,
+    "bc": 200.0, "hc": 200.0, "bp": 400.0, "hp": 400.0, "tp": 30.0, "kj": 1.0}
+gBP = {}; C.info = lambda m, g=gBP: g.setdefault("msg", m)
+C.BasePlateEC3().Activated()
+bpt = dBP.getObject("BasePlate")
+assert bpt is not None and bpt._cells.get("A1", "").startswith("STEEL BASE PLATE EC3")
+assert "f_jd" in gBP["msg"] and "thickness" in gBP["msg"]
+print("  base plate command: %s" % gBP["msg"].split(chr(10))[0])
+print("EC5 timber + EC3 base plate OK")
+
 # ---------- SLS deflection check ----------
 print("\n== SLS deflection check ==")
 dl = C._defl_limits(10000.0)       # 10 m span

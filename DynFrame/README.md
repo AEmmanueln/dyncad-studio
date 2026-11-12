@@ -110,8 +110,12 @@ model is what you analyse. Commands are on the toolbars/menus
 7. **Support Settlement** — select supported node(s) → prescribe an imposed
    support movement (settlement) for a load case; the solve finds the forces
    it induces (see *Advanced analysis* below).
-8. **Load Combinations** — auto EN 1990 **ULS** (1.35G + 1.5Q) and **SLS**
-   (G + Q), or a custom factored combination (`1.35*DL1 + 1.5*LL1`).
+8. **Load Combinations** — the **full EN 1990** code combinations, the way
+   Robot does them (not a single 1.35G+1.5Q lump): **ULS** eq 6.10 (or eqs
+   6.10a/6.10b) with each variable action taken in turn as the **leading** one
+   and the others reduced by **ψ₀**, plus **SLS** characteristic, frequent (ψ₁/ψ₂)
+   and quasi-permanent (ψ₂) — or a custom factored combination
+   (`1.35*DL1 + 1.5*LL1`). ψ factors per EN 1990 Table A1.1.
 
 *Solve & results (DynFrame · Results):*
 9. **Calculate** — choose a case, a combination, or *All loads* (+ optional
@@ -182,6 +186,24 @@ spreadsheets at the root.
   thicker slab/drop panel). Validated: a 400×400 internal column, d=200, C30/37,
   ρ_l=0.01, V_Ed=800 kN → u₁=4113 mm, v_Rd,c=0.746 MPa, v_Ed=1.118 MPa,
   utilisation 1.50 — matching the hand calc.
+- **RC Beam Design (EC2)** — design a rectangular reinforced-concrete beam to
+  EN 1992-1-1: **flexural** steel by the rectangular stress block (singly
+  reinforced while K = M/bd²f_ck ≤ K′ = 0.167, **doubly reinforced** with
+  compression steel above that), and **shear links** by the variable-strut
+  method (V_Rd,c for the concrete, Asw/s from the chosen strut angle, with the
+  V_Rd,max crushing check), plus EC2 minimum/maximum steel. Enter the section,
+  grade and the ULS envelope M_Ed / V_Ed; results go to the `RcBeam` table.
+  (Validated: 300×450 d, C30/37, M=250 kN·m → K=0.137, z=387 mm, As≈1486 mm²;
+  M=400 kN·m → doubly reinforced, As2≈550, As≈2445 mm²; V=300 kN → V_Rd,c≈87 kN,
+  V_Rd,max≈442 kN, Asw/s≈682 mm²/m — all matching the textbook hand calc.)
+- **RC Column Design (EC2)** — check/design a symmetrically-reinforced
+  rectangular RC column to EN 1992-1-1 by its **N–M interaction**: the moment
+  capacity M_Rd at the design axial load N_Ed (rectangular stress block, steel
+  on both faces, strains from plane sections), the utilisation for M_Ed, and the
+  steel auto-sized if it fails. Enter the section, bars and ULS N_Ed / M_Ed;
+  results go to the `RcColumn` table. (Validated: 300×400, 2000 mm² symmetric,
+  C30/37 → squash load 3270 kN; at N=960 kN the capacity is M_Rd=246 kN·m,
+  matching the hand-calculated interaction point.)
 - **Wall U-value & Condensation (building physics)** — **Wall U-value &
   Condensation** analyses a layered wall/roof: the **U-value** (thermal
   transmittance) to EN ISO 6946 (R-values in series + surface resistances),
@@ -460,7 +482,17 @@ rely on. The checks it runs:
 > 50 kN·m/m → ≈757 mm²/m, min-steel and over-moment cases flagged); the
 > **EC2 punching shear** matches its hand calc (400×400 internal column,
 > d = 200, C30/37, V_Ed = 800 kN → u₁ = 4113 mm, v_Rd,c = 0.746 MPa,
-> utilisation 1.50); the
+> utilisation 1.50); the **full EN 1990 load combinations** are exact — ULS
+> eq 6.10 enumerates each variable action as leading with the others at γ_Q·ψ₀
+> (1.35G + 1.5·LL + 0.9·WL, and 1.35G + 1.05·LL + 1.5·WL), eqs 6.10a/6.10b carry
+> ξ = 0.85 on the permanent action, and SLS gives the characteristic, frequent
+> (ψ₁/ψ₂) and quasi-permanent (ψ₂) sets; the **EC2 RC beam design** matches the
+> textbook hand calc (300×450, C30/37: M = 250 kN·m → K = 0.137, z = 387 mm,
+> As ≈ 1486 mm²; M = 400 kN·m → doubly reinforced As2 ≈ 550, As ≈ 2445 mm²;
+> V = 300 kN → V_Rd,c ≈ 87 kN, V_Rd,max ≈ 442 kN, Asw/s ≈ 682 mm²/m); the
+> **EC2 RC column** N–M interaction matches the hand-calculated point (300×400,
+> 2000 mm² symmetric, C30/37: squash 3270 kN, and M_Rd = 246 kN·m at N = 960 kN);
+> the
 > **EN 1991-1-4 wind** pressure q_p(10 m, terrain II, v_b = 26 m/s) ≈ 0.99 kPa
 > (c_e ≈ 2.35, matching the exposure chart) with the applied base shear equal
 > to the pressure integral; and the **EC3 sway imperfection** gives φ =

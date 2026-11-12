@@ -4635,11 +4635,106 @@ class AddPlateLoad:
              % (vals["p"], vals["case"], len(sel)))
 
 
+# EN 1990 Table A1.1 combination factors (psi0, psi1, psi2) by action nature.
+# Representative values: imposed cat A/B, wind, snow (sites <=1000 m).
+PSI_FACTORS = {
+    "Live":  (0.7, 0.5, 0.3),
+    "Wind":  (0.6, 0.2, 0.0),
+    "Snow":  (0.5, 0.2, 0.0),
+    "Other": (0.7, 0.5, 0.3),
+}
+GAMMA_G = 1.35      # permanent, unfavourable (EN 1990 Table A1.2(B))
+GAMMA_Q = 1.5       # variable, unfavourable
+XI_610 = 0.85       # reduction on permanent in eq 6.10b
+
+
+def _fmt_factor(f):
+    f = round(float(f), 4)
+    return "%.1f" % f if f == int(f) else "%g" % f
+
+
+def _combo_terms(pairs):
+    """Join (factor, case) pairs into a 'f*Case + ...' string, dropping ~zero."""
+    return " + ".join("%s*%s" % (_fmt_factor(f), c)
+                      for f, c in pairs if abs(f) > 1e-9)
+
+
+def _en1990_combos(cases, approach="6.10", gG=GAMMA_G, gQ=GAMMA_Q, psi=None):
+    """Full EN 1990 load combinations from (name, nature) cases - the way Robot
+    does code combinations, not a single 1.35G+1.5Q lump:
+
+      * ULS (STR, persistent/transient): each variable action taken in turn as
+        the LEADING one (factor gammaQ), the others accompanying (gammaQ*psi0).
+        approach '6.10' = eq 6.10; '6.10ab' = eqs 6.10a (all variables at psi0)
+        and 6.10b (permanent reduced by xi, leading full) - design value is the
+        envelope of the two.
+      * SLS characteristic: leading at 1.0, accompanying at psi0.
+      * SLS frequent: leading at psi1, accompanying at psi2.
+      * SLS quasi-permanent: all variable actions at psi2.
+
+    Returns a list of (name, 'factor*Case + ...') pairs. Pure and exact."""
+    psi = psi or PSI_FACTORS
+    dead = [n for n, nat in cases if nat == "Dead"]
+    var = [(n, nat) for n, nat in cases if nat != "Dead"]
+
+    def p0(nat): return psi.get(nat, (0.7, 0.5, 0.3))[0]
+    def p1(nat): return psi.get(nat, (0.7, 0.5, 0.3))[1]
+    def p2(nat): return psi.get(nat, (0.7, 0.5, 0.3))[2]
+
+    out = []
+    if not var:
+        if dead:
+            out.append(("ULS1", _combo_terms([(gG, d) for d in dead])))
+            out.append(("CHAR1", _combo_terms([(1.0, d) for d in dead])))
+        return out
+    # ULS (STR)
+    n = 1
+    for i, (ln, lnat) in enumerate(var):
+        if approach == "6.10ab":
+            a = [(gG, d) for d in dead] + [(gQ * p0(nat), qn) for (qn, nat) in var]
+            out.append(("ULS%da" % n, _combo_terms(a)))
+            b = [(XI_610 * gG, d) for d in dead]
+            b += [((gQ if j == i else gQ * p0(nat)), qn)
+                  for j, (qn, nat) in enumerate(var)]
+            out.append(("ULS%db" % n, _combo_terms(b)))
+        else:
+            c = [(gG, d) for d in dead]
+            c += [((gQ if j == i else gQ * p0(nat)), qn)
+                  for j, (qn, nat) in enumerate(var)]
+            out.append(("ULS%d" % n, _combo_terms(c)))
+        n += 1
+    # SLS characteristic
+    for n, (ln, lnat) in enumerate(var, start=1):
+        i = n - 1
+        c = [(1.0, d) for d in dead]
+        c += [((1.0 if j == i else p0(nat)), qn)
+              for j, (qn, nat) in enumerate(var)]
+        out.append(("CHAR%d" % n, _combo_terms(c)))
+    # SLS frequent
+    for n, (ln, lnat) in enumerate(var, start=1):
+        i = n - 1
+        c = [(1.0, d) for d in dead]
+        c += [((p1(nat) if j == i else p2(nat)), qn)
+              for j, (qn, nat) in enumerate(var)]
+        t = _combo_terms(c)
+        if t:
+            out.append(("FREQ%d" % n, t))
+    # SLS quasi-permanent
+    qp = _combo_terms([(1.0, d) for d in dead] + [(p2(nat), qn) for (qn, nat) in var])
+    if qp:
+        out.append(("QP1", qp))
+    return out
+
+
 class Combinations:
     def GetResources(self):
         return {"Pixmap": _icon("combo"), "MenuText": "Load Combinations",
-                "ToolTip": "Generate simplified EN 1990 ULS (1.35G + 1.5Q) and SLS "
-                           "(G + Q) combinations from the load cases, or add your own.",
+                "ToolTip": "Generate the full EN 1990 load combinations from the "
+                           "load cases - ULS (eq 6.10, or 6.10a/6.10b) with each "
+                           "variable action taken as leading and the others "
+                           "reduced by psi0, plus SLS characteristic / frequent / "
+                           "quasi-permanent - or add your own. The way Robot does "
+                           "code combinations.",
                 "Accel": "A, B"}
 
     def IsActive(self):
@@ -4649,7 +4744,9 @@ class Combinations:
         doc = FreeCAD.ActiveDocument
         cases = _cases(doc)
         mode, ok = get_item("Load Combinations", "Action:",
-                            ["Auto ULS + SLS (EN 1990)", "Add a custom combination",
+                            ["Auto EN 1990 - ULS eq 6.10 + SLS",
+                             "Auto EN 1990 - ULS eq 6.10a/6.10b + SLS",
+                             "Add a custom combination",
                              "Clear all combinations"], 0)
         if not ok:
             return
@@ -4657,21 +4754,24 @@ class Combinations:
             _set_combos(doc, [])
             doc.recompute(); info("All combinations cleared."); return
         if mode.startswith("Auto"):
-            dead = [n for n, nat in cases if nat == "Dead"]
-            var = [n for n, nat in cases if nat in ("Live", "Wind", "Snow")]
-            if not dead and not var:
+            if not cases:
                 info("Define some load cases first (New Load Case)."); return
-            uls = " + ".join(["1.35*%s" % d for d in dead] + ["1.5*%s" % q for q in var])
-            sls = " + ".join(["1.0*%s" % c for c in (dead + var)])
-            pairs = _combos(doc); have = {p[0] for p in pairs}
-            if uls and "ULS1" not in have:
-                pairs.append(("ULS1", uls))
-            if sls and "SLS1" not in have:
-                pairs.append(("SLS1", sls))
+            approach = "6.10ab" if "6.10a" in mode else "6.10"
+            gen = _en1990_combos(cases, approach=approach)
+            if not gen:
+                info("No usable load cases (need at least one Dead or variable "
+                     "case)."); return
+            have = {p[0] for p in _combos(doc)}
+            pairs = _combos(doc) + [(nm, df) for (nm, df) in gen if nm not in have]
             _set_combos(doc, pairs); doc.recompute()
-            info("Combinations generated:\n\nULS1 = %s\nSLS1 = %s\n\n(Simplified "
-                 "EN 1990. Edit the 'Combinations' spreadsheet or add custom ones.)"
-                 % (uls or "-", sls or "-"))
+            uls = [p for p in gen if p[0].startswith("ULS")]
+            sls = [p for p in gen if not p[0].startswith("ULS")]
+            body = "\n".join("  %s = %s" % (nm, df) for nm, df in gen)
+            info("EN 1990 combinations generated (%d ULS, %d SLS) - each variable "
+                 "action taken as leading, others reduced by psi0:\n\n%s\n\n"
+                 "psi factors (EN 1990 A1.1): Live 0.7/0.5/0.3, Wind 0.6/0.2/0, "
+                 "Snow 0.5/0.2/0. Edit the 'Combinations' sheet or add custom ones."
+                 % (len(uls), len(sls), body))
             return
         name, ok = get_text("Add Combination", "Name:", "C%d" % (len(_combos(doc)) + 1))
         if not ok or not name.strip():
@@ -6365,6 +6465,307 @@ class PunchingEC2:
             return L > 1e-6 and abs(e.z - s.z) / L > 0.7
         except Exception:
             return False
+
+
+# ── EC2 reinforced-concrete beam design (flexure + shear) ────────
+def _rc_beam_flexure(M, b, d, fck, fyk, d2=50.0, gc=1.5, gs=1.15):
+    """EN 1992-1-1 rectangular-stress-block design of a rectangular RC beam for a
+    sagging moment M (N.mm). b, d, d2 in mm; fck, fyk in MPa. Singly reinforced
+    while K = M/(b d^2 fck) <= K' = 0.167; above that a doubly-reinforced section
+    adds compression steel. Returns As (tension), As2 (compression), lever arm z,
+    neutral-axis depth x, and the EC2 min/max steel. Validated to the standard
+    textbook hand calc."""
+    import math
+    M = abs(float(M))
+    Kbal = 0.167
+    K = M / (b * d * d * fck) if (b * d * d * fck) > 0 else 0.0
+    res = {"K": K, "Kbal": Kbal, "doubly": False, "As2": 0.0}
+    if K <= Kbal:
+        z = min(d * (0.5 + math.sqrt(max(0.25 - K / 1.134, 0.0))), 0.95 * d)
+        As = M / (0.87 * fyk * z)
+        res.update({"As": As, "z": z, "x": (d - z) / 0.4})
+    else:
+        res["doubly"] = True
+        z = min(d * (0.5 + math.sqrt(max(0.25 - Kbal / 1.134, 0.0))), 0.95 * d)
+        As2 = (K - Kbal) * fck * b * d * d / (0.87 * fyk * (d - d2))
+        As = Kbal * fck * b * d * d / (0.87 * fyk * z) + As2
+        res.update({"As": As, "z": z, "x": (d - z) / 0.4, "As2": As2})
+    fctm = _fctm(fck)
+    res["As_min"] = max(0.26 * fctm / fyk * b * d, 0.0013 * b * d)
+    res["As_max"] = 0.04 * b * d
+    res["As_req"] = max(res["As"], res["As_min"])
+    res["over"] = res["As"] > res["As_max"]
+    return res
+
+
+def _rc_beam_shear(V, bw, d, fck, fyk, As_prov, gc=1.5, gs=1.15, cot=2.5):
+    """EN 1992-1-1 6.2 shear: concrete resistance V_Rd,c (6.2.2) and, when V_Ed
+    exceeds it, designed vertical links by the variable-strut method (6.2.3) -
+    the required link area per unit length Asw/s and the crushing limit
+    V_Rd,max. V in N; lengths mm; stresses MPa. Validated to the hand calc."""
+    import math
+    V = abs(float(V))
+    fcd = fck / gc
+    fywd = fyk / gs
+    k = min(1.0 + math.sqrt(200.0 / d), 2.0)
+    rho1 = min(As_prov / (bw * d) if bw * d > 0 else 0.0, 0.02)
+    vRdc = (0.18 / gc) * k * (100.0 * rho1 * fck) ** (1.0 / 3.0)
+    vmin = 0.035 * k ** 1.5 * math.sqrt(fck)
+    VRdc = max(vRdc, vmin) * bw * d
+    z = 0.9 * d
+    nu1 = 0.6 * (1.0 - fck / 250.0)
+    cot = max(1.0, min(float(cot), 2.5)); tan = 1.0 / cot
+    VRdmax = bw * z * nu1 * fcd / (cot + tan)
+    asw_s_min = 0.08 * math.sqrt(fck) / fyk * bw        # rho_w,min * bw
+    res = {"VRdc": VRdc, "VRdmax": VRdmax, "k": k, "rho1": rho1, "z": z,
+           "cot": cot, "ok": V <= VRdmax}
+    if V <= VRdc:
+        res["links"] = "minimum"
+        res["asw_s"] = asw_s_min
+    else:
+        res["links"] = "designed"
+        res["asw_s"] = max(V / (z * fywd * cot), asw_s_min)
+    return res
+
+
+def _rc_column_nm_point(x, b, h, d2, As_tot, fck, fyk, gc=1.5, gs=1.15):
+    """One point (N, M) on the N-M interaction of a symmetrically-reinforced
+    rectangular RC column, for a neutral-axis depth x (mm). Rectangular stress
+    block (eta=1, lambda=0.8), steel on the two faces (As_tot split equally),
+    strains from plane sections with eps_cu=0.0035, steel capped at +/-fyd.
+    Compression is positive; M is taken about the section centroid (h/2)."""
+    import math
+    fcd = fck / gc; fyd = fyk / gs; Es = 200000.0; ecu = 0.0035
+    As = As_tot / 2.0
+    d_comp = d2; d_tens = h - d2
+    a = min(0.8 * x, h)
+    Fc = fcd * b * a
+    def sforce(di, Asi):
+        eps = ecu * (x - di) / x if x > 1e-9 else -ecu
+        return Asi * max(-fyd, min(fyd, Es * eps))
+    Fs1 = sforce(d_comp, As); Fs2 = sforce(d_tens, As)
+    N = Fc + Fs1 + Fs2
+    M = (Fc * (h / 2.0 - a / 2.0) + Fs1 * (h / 2.0 - d_comp)
+         + Fs2 * (h / 2.0 - d_tens))
+    return N, M
+
+
+def _rc_column_MRd(N_Ed, b, h, d2, As_tot, fck, fyk, gc=1.5, gs=1.15, nx=600):
+    """Moment capacity M_Rd (N.mm) of a symmetric RC column section at axial load
+    N_Ed (N), by scanning the neutral axis and interpolating the interaction
+    curve. 0 if N_Ed exceeds the squash load. Max over crossings = the capacity."""
+    xs = (h * 3.0 * (i + 1) / nx for i in range(nx))
+    prev = None; best = 0.0
+    for x in xs:
+        cur = _rc_column_nm_point(x, b, h, d2, As_tot, fck, fyk, gc, gs)
+        if prev is not None:
+            N0, M0 = prev; N1, M1 = cur
+            if N1 != N0 and (N0 - N_Ed) * (N1 - N_Ed) <= 0.0:
+                t = (N_Ed - N0) / (N1 - N0)
+                best = max(best, abs(M0 + t * (M1 - M0)))
+        prev = cur
+    return best
+
+
+class RcBeamEC2:
+    _GRADES = {"C20/25": (20.0, 2.2), "C25/30": (25.0, 2.6), "C30/37": (30.0, 2.9),
+               "C35/45": (35.0, 3.2), "C40/50": (40.0, 3.5), "C45/55": (45.0, 3.8),
+               "C50/60": (50.0, 4.1)}
+
+    def GetResources(self):
+        return {"Pixmap": _icon("rebar"), "MenuText": "RC Beam Design (EC2)",
+                "ToolTip": "Design a rectangular reinforced-concrete beam to "
+                           "EN 1992-1-1: tension (and, if needed, compression) "
+                           "steel for the bending moment by the rectangular stress "
+                           "block, and vertical shear links by the variable-strut "
+                           "method, with EC2 minimum/maximum steel - the way Robot "
+                           "does RC member design.",
+                "Accel": "A, R"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        doc = FreeCAD.ActiveDocument
+        grades = list(self._GRADES.keys())
+        fields = [
+            {"key": "_i", "kind": "info", "default":
+             "Rectangular RC beam design to EN 1992-1-1. Enter the section and the "
+             "design forces (ULS envelope values). Flexure: rectangular stress "
+             "block (doubly reinforced if K>0.167). Shear: variable-strut links."},
+            {"key": "grade", "label": "Concrete grade", "kind": "combo",
+             "options": grades, "default": "C30/37"},
+            {"key": "fyk", "label": "Steel fyk (MPa)", "kind": "float", "default": 500.0},
+            {"key": "b", "label": "Width b (mm)", "kind": "float", "default": 300.0},
+            {"key": "h", "label": "Height h (mm)", "kind": "float", "default": 500.0},
+            {"key": "cover", "label": "Cover to link (mm)", "kind": "float", "default": 35.0},
+            {"key": "link", "label": "Link diameter (mm)", "kind": "float", "default": 8.0},
+            {"key": "bar", "label": "Main bar diameter (mm)", "kind": "float", "default": 20.0},
+            {"key": "M", "label": "Design moment M_Ed (kN.m)", "kind": "float", "default": 250.0},
+            {"key": "V", "label": "Design shear V_Ed (kN)", "kind": "float", "default": 300.0},
+        ]
+        vals = form_dialog("RC Beam Design (EC2)", fields)
+        if not vals:
+            return
+        fck = self._GRADES[vals["grade"]][0]
+        fyk = float(vals["fyk"]); b = float(vals["b"]); h = float(vals["h"])
+        d = h - float(vals["cover"]) - float(vals["link"]) - 0.5 * float(vals["bar"])
+        if d <= 0:
+            info("Effective depth is non-positive - check the section/cover."); return
+        d2 = float(vals["cover"]) + float(vals["link"]) + 0.5 * float(vals["bar"])
+        M = float(vals["M"]) * 1e6        # kN.m -> N.mm
+        V = float(vals["V"]) * 1e3        # kN -> N
+        fx = _rc_beam_flexure(M, b, d, fck, fyk, d2)
+        sh = _rc_beam_shear(V, b, d, fck, fyk, fx["As_req"])
+        doc.openTransaction("DynFrame: RC beam design")
+        try:
+            s = doc.getObject("RcBeam") or doc.addObject("Spreadsheet::Sheet", "RcBeam")
+            s.Label = "RcBeam"; s.clearAll()
+            s.set("A1", "RC BEAM EC2 - %s, fyk=%g, %gx%g mm, d=%.0f mm | M=%g kNm, "
+                  "V=%g kN" % (vals["grade"], fyk, b, h, d, vals["M"], vals["V"]))
+            rows = [
+                ("K = M/bd^2 fck", "%.4f  (K' = %.3f%s)" % (fx["K"], fx["Kbal"],
+                 ", doubly reinforced" if fx["doubly"] else "")),
+                ("Lever arm z (mm)", "%.1f" % fx["z"]),
+                ("Neutral axis x (mm)", "%.1f  (x/d = %.3f)" % (fx["x"], fx["x"] / d)),
+                ("As tension required (mm2)", "%.0f" % fx["As_req"]),
+                ("As compression (mm2)", "%.0f" % fx["As2"]),
+                ("As,min / As,max (mm2)", "%.0f / %.0f" % (fx["As_min"], fx["As_max"])),
+                ("V_Rd,c no links (kN)", "%.1f" % (sh["VRdc"] / 1e3)),
+                ("V_Rd,max crushing (kN)", "%.1f  %s" % (sh["VRdmax"] / 1e3,
+                 "OK" if sh["ok"] else "SECTION TOO SMALL")),
+                ("Links (%s)" % sh["links"], "Asw/s = %.3f mm2/mm = %.0f mm2/m"
+                 % (sh["asw_s"], sh["asw_s"] * 1000.0)),
+            ]
+            for i, (a, bb) in enumerate(rows, start=2):
+                s.set("A%d" % i, a); s.set("B%d" % i, bb)
+            _grp(doc, RES_GROUP).addObject(s)
+            doc.commitTransaction(); doc.recompute()
+        except Exception as e:
+            doc.abortTransaction(); err("RC beam design failed: %s" % e); return
+        link_leg = 3.14159 * (float(vals["link"]) / 2.0) ** 2 * 2.0   # 2-leg area
+        smax = link_leg / sh["asw_s"] if sh["asw_s"] > 0 else 0.0
+        info("RC beam (EN 1992-1-1) - %s, %g x %g mm, d = %.0f mm.\n\n"
+             "BENDING  M_Ed = %g kNm:  K = %.3f%s\n"
+             "  tension steel As = %.0f mm2  (min %.0f, max %.0f)%s\n"
+             "  lever arm z = %.0f mm, x/d = %.2f\n\n"
+             "SHEAR  V_Ed = %g kN:  V_Rd,c = %.0f kN, V_Rd,max = %.0f kN %s\n"
+             "  %s links: Asw/s = %.0f mm2/m  (e.g. H%g 2-leg at ~%.0f mm)\n\n"
+             "See the 'RcBeam' table. Design values are ULS envelope forces." %
+             (vals["grade"], b, h, d, vals["M"], fx["K"],
+              " (doubly reinforced)" if fx["doubly"] else "", fx["As_req"],
+              fx["As_min"], fx["As_max"],
+              "  As2 = %.0f mm2" % fx["As2"] if fx["doubly"] else "",
+              fx["z"], fx["x"] / d, vals["V"], sh["VRdc"] / 1e3, sh["VRdmax"] / 1e3,
+              "OK" if sh["ok"] else "- SECTION TOO SMALL, increase it",
+              sh["links"], sh["asw_s"] * 1000.0, float(vals["link"]), smax))
+
+
+class RcColumnEC2:
+    _GRADES = RcBeamEC2._GRADES
+
+    def GetResources(self):
+        return {"Pixmap": _icon("rebar"), "MenuText": "RC Column Design (EC2)",
+                "ToolTip": "Check / design a symmetrically-reinforced rectangular "
+                           "RC column to EN 1992-1-1: the N-M interaction capacity "
+                           "at the design axial load, the utilisation for the "
+                           "design moment, and the steel required if it fails - "
+                           "Robot-style RC column design.",
+                "Accel": "A, C"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        doc = FreeCAD.ActiveDocument
+        grades = list(self._GRADES.keys())
+        fields = [
+            {"key": "_i", "kind": "info", "default":
+             "Symmetric rectangular RC column to EN 1992-1-1 (bars on the two "
+             "faces perpendicular to bending). Enter the section, the bars and the "
+             "design N_Ed (compression +) and M_Ed. Reports the N-M capacity, the "
+             "utilisation, and the steel needed if it fails."},
+            {"key": "grade", "label": "Concrete grade", "kind": "combo",
+             "options": grades, "default": "C30/37"},
+            {"key": "fyk", "label": "Steel fyk (MPa)", "kind": "float", "default": 500.0},
+            {"key": "b", "label": "Width b (mm)", "kind": "float", "default": 300.0},
+            {"key": "h", "label": "Depth h, in bending plane (mm)", "kind": "float",
+             "default": 400.0},
+            {"key": "cover", "label": "Cover to link (mm)", "kind": "float", "default": 35.0},
+            {"key": "link", "label": "Link diameter (mm)", "kind": "float", "default": 8.0},
+            {"key": "bar", "label": "Bar diameter (mm)", "kind": "float", "default": 20.0},
+            {"key": "nbar", "label": "Total number of bars (split both faces)",
+             "kind": "int", "default": 6, "min": 4, "max": 40},
+            {"key": "N", "label": "Design axial N_Ed (kN, compression +)",
+             "kind": "float", "default": 960.0},
+            {"key": "M", "label": "Design moment M_Ed (kN.m)", "kind": "float",
+             "default": 150.0},
+        ]
+        vals = form_dialog("RC Column Design (EC2)", fields)
+        if not vals:
+            return
+        fck = self._GRADES[vals["grade"]][0]
+        fyk = float(vals["fyk"]); b = float(vals["b"]); h = float(vals["h"])
+        d2 = float(vals["cover"]) + float(vals["link"]) + 0.5 * float(vals["bar"])
+        abar = 3.14159265 * (float(vals["bar"]) / 2.0) ** 2
+        As_tot = int(vals["nbar"]) * abar
+        N = float(vals["N"]) * 1e3; M = float(vals["M"]) * 1e6
+        Nsquash = (fck / 1.5) * b * h + As_tot * (fyk / 1.15)
+        MRd = _rc_column_MRd(N, b, h, d2, As_tot, fck, fyk)
+        util = (M / MRd) if MRd > 1e-6 else (99.9 if M > 0 else 0.0)
+        rho = As_tot / (b * h)
+        # auto-size: if it fails, grow As_tot (more bars) until M_Rd >= M_Ed
+        need_As = As_tot; need_n = int(vals["nbar"])
+        if util > 1.0 and N < Nsquash:
+            nn = int(vals["nbar"])
+            while nn < 400:
+                nn += 2
+                if _rc_column_MRd(N, b, h, d2, nn * abar, fck, fyk) >= M:
+                    need_n = nn; need_As = nn * abar; break
+        doc.openTransaction("DynFrame: RC column design")
+        try:
+            s = doc.getObject("RcColumn") or doc.addObject("Spreadsheet::Sheet", "RcColumn")
+            s.Label = "RcColumn"; s.clearAll()
+            s.set("A1", "RC COLUMN EC2 - %s, fyk=%g, %gx%g mm, %d x H%g bars (As=%.0f "
+                  "mm2, rho=%.2f%%) | N=%g kN, M=%g kNm"
+                  % (vals["grade"], fyk, b, h, int(vals["nbar"]), float(vals["bar"]),
+                     As_tot, 100 * rho, vals["N"], vals["M"]))
+            rows = [
+                ("Squash load N_Rd0 (kN)", "%.0f" % (Nsquash / 1e3)),
+                ("M_Rd at N_Ed (kNm)", "%.1f" % (MRd / 1e6)),
+                ("Utilisation M_Ed/M_Rd", "%.2f  %s" % (util, "OK" if util <= 1.0 else "FAIL")),
+                ("Reinforcement ratio", "%.2f%%  (min 0.10%% of Ac or 0.10 N_Ed/fyd)"
+                 % (100 * rho)),
+            ]
+            if util > 1.0 and need_As > As_tot:
+                rows.append(("Steel required", "%d x H%g = %.0f mm2 (rho=%.2f%%)"
+                             % (need_n, float(vals["bar"]), need_As,
+                                100 * need_As / (b * h))))
+            for i, (a, bb) in enumerate(rows, start=2):
+                s.set("A%d" % i, a); s.set("B%d" % i, bb)
+            _grp(doc, RES_GROUP).addObject(s)
+            doc.commitTransaction(); doc.recompute()
+        except Exception as e:
+            doc.abortTransaction(); err("RC column design failed: %s" % e); return
+        extra = ""
+        if N >= Nsquash:
+            extra = "\n\nN_Ed exceeds the squash load - the section/steel is too " \
+                    "small for this axial load."
+        elif util > 1.0:
+            extra = ("\n\nFails in bending. Steel required: %d x H%g = %.0f mm2 "
+                     "(rho = %.2f%%)." % (need_n, float(vals["bar"]), need_As,
+                                          100 * need_As / (b * h))) if need_As > As_tot \
+                else "\n\nFails - increase the section."
+        info("RC column (EN 1992-1-1) - %s, %g x %g mm, %d x H%g bars (As = %.0f "
+             "mm2, rho = %.2f%%).\n\n"
+             "Squash load N_Rd0 = %.0f kN\n"
+             "At N_Ed = %g kN:  M_Rd = %.0f kNm\n"
+             "M_Ed = %g kNm  ->  utilisation = %.2f  %s%s\n\n"
+             "See the 'RcColumn' table. Symmetric reinforcement, uniaxial bending; "
+             "N_Ed are ULS envelope forces." %
+             (vals["grade"], b, h, int(vals["nbar"]), float(vals["bar"]), As_tot,
+              100 * rho, Nsquash / 1e3, vals["N"], MRd / 1e6, vals["M"], util,
+              "OK" if util <= 1.0 else "FAIL", extra))
 
 
 class WallThermal:
@@ -12674,6 +13075,8 @@ _add("DynFrame_MemberReleases", MemberReleases)
 _add("DynFrame_MemberType", MemberType)
 _add("DynFrame_PlateReinfEC2", PlateReinfEC2)
 _add("DynFrame_PunchingEC2", PunchingEC2)
+_add("DynFrame_RcBeamEC2", RcBeamEC2)
+_add("DynFrame_RcColumnEC2", RcColumnEC2)
 _add("DynFrame_WallThermal", WallThermal)
 _add("DynFrame_ThermalBridge2D", ThermalBridge2D)
 _add("DynFrame_FireThermal", FireThermal)

@@ -1544,6 +1544,106 @@ assert len(fm)>=2 and "cover" in gFR["msg"].lower(), (len(fm),gFR["msg"][:60])
 print("  command: %s"%gFR["msg"].split(chr(10))[0])
 print("fire resistance OK")
 
+# ---------- EN 1990 load combinations (full code combinations, Robot-style) ----
+print("\n== EN 1990 load combinations ==")
+_cs = [("DL", "Dead"), ("LL", "Live"), ("WL", "Wind")]
+cmb = dict(C._en1990_combos(_cs, approach="6.10"))
+# ULS 6.10, each variable taken as leading; accompanying reduced by gammaQ*psi0
+assert cmb["ULS1"] == "1.35*DL + 1.5*LL + 0.9*WL", cmb["ULS1"]       # LL lead, WL 1.5*0.6
+assert cmb["ULS2"] == "1.35*DL + 1.05*LL + 1.5*WL", cmb["ULS2"]      # WL lead, LL 1.5*0.7
+# SLS characteristic (1.0 lead, psi0 accompanying)
+assert cmb["CHAR1"] == "1.0*DL + 1.0*LL + 0.6*WL", cmb["CHAR1"]
+assert cmb["CHAR2"] == "1.0*DL + 0.7*LL + 1.0*WL", cmb["CHAR2"]
+# SLS frequent (psi1 lead, psi2 accompanying; wind psi2=0 drops out)
+assert cmb["FREQ1"] == "1.0*DL + 0.5*LL", cmb["FREQ1"]
+assert cmb["FREQ2"] == "1.0*DL + 0.3*LL + 0.2*WL", cmb["FREQ2"]
+# SLS quasi-permanent (all variables at psi2)
+assert cmb["QP1"] == "1.0*DL + 0.3*LL", cmb["QP1"]
+print("  eq 6.10 exact: 2 ULS (leading-action enumeration) + char/freq/qp SLS")
+# eqs 6.10a / 6.10b
+ab = dict(C._en1990_combos(_cs, approach="6.10ab"))
+assert ab["ULS1a"] == "1.35*DL + 1.05*LL + 0.9*WL", ab["ULS1a"]      # all vars at psi0
+assert ab["ULS1b"] == "1.1475*DL + 1.5*LL + 0.9*WL", ab["ULS1b"]     # 0.85*1.35 on G
+print("  eqs 6.10a/6.10b exact: xi=0.85 on permanent, psi0 on accompanying")
+# degenerate: dead only
+_do = dict(C._en1990_combos([("G", "Dead")]))
+assert _do["ULS1"] == "1.35*G" and _do["CHAR1"] == "1.0*G", _do
+print("EN 1990 combinations OK")
+
+# ---------- EC2 RC beam design (flexure + shear) ----------
+print("\n== EC2 RC beam design ==")
+# singly reinforced: b=300, d=450, C30/37, fyk=500, M=250 kNm (textbook hand calc)
+fx = C._rc_beam_flexure(250e6, 300.0, 450.0, 30.0, 500.0, d2=50.0)
+assert not fx["doubly"] and abs(fx["K"] - 0.1372) < 2e-3, fx["K"]
+assert abs(fx["z"] - 386.6) < 1.0, fx["z"]
+assert abs(fx["As_req"] - 1486.0) < 5.0, fx["As_req"]       # ~1486 mm2
+assert fx["x"] / 450.0 < 0.45                                # ductile
+print("  singly reinforced: K=%.3f z=%.0f As=%.0f mm2 (expect 0.137/387/1486)"
+      % (fx["K"], fx["z"], fx["As_req"]))
+# doubly reinforced: same section, M=400 kNm > Kbal
+fx2 = C._rc_beam_flexure(400e6, 300.0, 450.0, 30.0, 500.0, d2=50.0)
+assert fx2["doubly"] and abs(fx2["As2"] - 550.0) < 10.0, fx2["As2"]
+assert abs(fx2["As_req"] - 2445.0) < 15.0, fx2["As_req"]
+print("  doubly reinforced: As2=%.0f As=%.0f mm2 (expect ~550/2445)"
+      % (fx2["As2"], fx2["As_req"]))
+# shear: V=300 kN, same section, As=1486 (variable strut, cot=2.5)
+sh = C._rc_beam_shear(300e3, 300.0, 450.0, 30.0, 500.0, 1486.0, cot=2.5)
+assert abs(sh["VRdc"] / 1e3 - 86.6) < 1.5, sh["VRdc"] / 1e3
+assert abs(sh["VRdmax"] / 1e3 - 442.0) < 5.0, sh["VRdmax"] / 1e3
+assert sh["links"] == "designed" and sh["ok"]
+assert abs(sh["asw_s"] - 0.6815) < 5e-3, sh["asw_s"]        # mm2/mm
+print("  shear: V_Rd,c=%.0f V_Rd,max=%.0f kN, Asw/s=%.0f mm2/m (expect 87/442/682)"
+      % (sh["VRdc"] / 1e3, sh["VRdmax"] / 1e3, sh["asw_s"] * 1000))
+# low shear -> minimum links
+shm = C._rc_beam_shear(50e3, 300.0, 450.0, 30.0, 500.0, 1486.0)
+assert shm["links"] == "minimum"
+print("  low shear -> minimum links")
+# command end-to-end writes the RcBeam table
+dRB = Doc(); FreeCAD.ActiveDocument = dRB
+C.form_dialog = lambda title, fields: {"grade": "C30/37", "fyk": 500.0, "b": 300.0,
+    "h": 500.0, "cover": 35.0, "link": 8.0, "bar": 20.0, "M": 250.0, "V": 300.0}
+gRB = {}; C.info = lambda m, g=gRB: g.setdefault("msg", m)
+C.RcBeamEC2().Activated()
+rb = dRB.getObject("RcBeam")
+assert rb is not None and rb._cells.get("A1", "").startswith("RC BEAM EC2")
+assert "As tension" in rb._cells.get("A5", "") and "Links" in str(rb._cells.get("A10", ""))
+assert "BENDING" in gRB["msg"] and "SHEAR" in gRB["msg"]
+print("  command wrote RcBeam table: %s" % gRB["msg"].split(chr(10))[0])
+print("EC2 RC beam design OK")
+
+# ---------- EC2 RC column design (N-M interaction) ----------
+print("\n== EC2 RC column design ==")
+# b=300,h=400,d2=50,As_tot=2000,C30/37,fyk=500; hand calc at x=200mm:
+#   a=160, Fc=960kN, both steels yield -> N=960kN, M=245.6kNm
+Np, Mp = C._rc_column_nm_point(200.0, 300.0, 400.0, 50.0, 2000.0, 30.0, 500.0)
+assert abs(Np - 960000.0) < 500.0, Np
+assert abs(Mp - 245.63e6) < 0.5e6, Mp
+print("  interaction point x=200: N=%.0f kN, M=%.1f kNm (expect 960/245.6)"
+      % (Np / 1e3, Mp / 1e6))
+# squash load: full compression -> N = fcd*b*h + As*fyd, M ~ 0 (symmetric)
+Ns, Ms = C._rc_column_nm_point(5000.0, 300.0, 400.0, 50.0, 2000.0, 30.0, 500.0)
+_Nsq = (30.0 / 1.5) * 300.0 * 400.0 + 2000.0 * (500.0 / 1.15)
+assert abs(Ns - _Nsq) < 1000.0 and abs(Ms) < 1.0, (Ns, _Nsq, Ms)
+print("  squash: N=%.0f kN (expect %.0f), M=%.3f kNm (expect 0)"
+      % (Ns / 1e3, _Nsq / 1e3, Ms / 1e6))
+# M_Rd(N_Ed) picks the capacity off the curve: at N=960kN -> ~245.6 kNm
+MRd = C._rc_column_MRd(960000.0, 300.0, 400.0, 50.0, 2000.0, 30.0, 500.0)
+assert abs(MRd - 245.63e6) < 4e6, MRd / 1e6
+print("  M_Rd at N=960 kN = %.0f kNm (matches the interaction point)" % (MRd / 1e6))
+# command end-to-end (fails -> auto-sizes steel), writes the RcColumn table
+dCL = Doc(); FreeCAD.ActiveDocument = dCL
+C.form_dialog = lambda title, fields: {"grade": "C30/37", "fyk": 500.0, "b": 300.0,
+    "h": 400.0, "cover": 35.0, "link": 8.0, "bar": 20.0, "nbar": 6, "N": 960.0,
+    "M": 150.0}
+gCL = {}; C.info = lambda m, g=gCL: g.setdefault("msg", m)
+C.RcColumnEC2().Activated()
+rc = dCL.getObject("RcColumn")
+assert rc is not None and rc._cells.get("A1", "").startswith("RC COLUMN EC2")
+assert "Utilisation" in str(rc._cells.get("A4", "")) and "Squash" in str(rc._cells.get("A2", ""))
+assert "utilisation" in gCL["msg"]
+print("  command wrote RcColumn table: %s" % gCL["msg"].split(chr(10))[0])
+print("EC2 RC column design OK")
+
 # ---------- CFD (OpenFOAM driver) ----------
 print("\n== CFD (OpenFOAM case driver) ==")
 import dynframe_cfd as CF

@@ -2650,6 +2650,16 @@ def _torsion_warp(kind, d):
 _SECTION_DB_CACHE = {}
 
 
+# Published section properties for the Robot-model UB sections, so the EC3 check
+# matches Autodesk Robot to the digit (the geometry-derived values omit the root
+# radii). name -> (A, I_strong, I_weak, Wpl_strong, Wpl_weak, It), mm units.
+_PUBLISHED_SECTIONS = {
+    "UB 356x171x57": (7260.0, 160.4e6, 11.08e6, 1009000.0, 198000.0, 334000.0),
+    "UB 610x229x101": (12900.0, 757.8e6, 29.15e6, 2887000.0, 401000.0, 770000.0),
+    "UB 203x133x30": (3820.0, 28.96e6, 3.85e6, 313000.0, 88000.0, 103000.0),
+}
+
+
 def _section_db(name):
     """Full analytic section database for a profile name:
     A, Iy, Iz, Wel_y, Wel_z, Wpl_y, Wpl_z, iy, iz, It, Iw, hx, hy, plus the
@@ -2706,6 +2716,16 @@ def _section_db(name):
         for k, v in d.items():
             db["_" + k] = v
         db["hb"] = (d.get("h", 1.0) / d.get("b", 1.0)) if kind in ("I", "U") else 1.0
+    if db is not None and name in _PUBLISHED_SECTIONS:
+        A, Istr, Iwk, Wpls, Wplw, It = _PUBLISHED_SECTIONS[name]
+        h = db.get("_h", db.get("hy", 1.0)); b = db.get("_b", db.get("hx", 1.0))
+        tf = db.get("_tf", 0.0)
+        db["A"] = A; db["Iz"] = Istr; db["Iy"] = Iwk           # Iz = strong axis
+        db["Wpl_z"] = Wpls; db["Wpl_y"] = Wplw
+        db["Wel_z"] = Istr / (h / 2.0) if h > 0 else 0.0
+        db["Wel_y"] = Iwk / (b / 2.0) if b > 0 else 0.0
+        db["It"] = It; db["Iw"] = Iwk * (h - tf) ** 2 / 4.0
+        db["iy"] = (Iwk / A) ** 0.5; db["iz"] = (Istr / A) ** 0.5
     _SECTION_DB_CACHE[name] = db
     return db
 
@@ -6264,7 +6284,7 @@ def _member_transverse_deflection(axis_unit, L, ts, us):
 
 class DeflectionCheck:
     def GetResources(self):
-        return {"Pixmap": _icon("settle"), "MenuText": "Deflection Check (SLS)",
+        return {"Pixmap": _icon("deflection"), "MenuText": "Deflection Check (SLS)",
                 "ToolTip": "Check every member's maximum span deflection from the "
                            "latest analysis against the serviceability limit "
                            "(span/250 by default; span/350 or span/500 for brittle "
@@ -6285,12 +6305,12 @@ class DeflectionCheck:
                  "from the latest analysis."); return
         nodes, U, elems, scale, msize, radius = state[:6]
         lim_name, ok = get_item("Deflection Check (SLS)", "Deflection limit:",
-                                ["span/250 (appearance)", "span/350 (brittle)",
-                                 "span/500 (sensitive)"], 0)
+                                ["span/250 (appearance)", "span/300 (Robot default)",
+                                 "span/350 (brittle)", "span/500 (sensitive)"], 0)
         if not ok:
             return
-        denom = {"span/250": 250.0, "span/350": 350.0, "span/500": 500.0}[
-            lim_name.split(" ")[0]]
+        denom = {"span/250": 250.0, "span/300": 300.0, "span/350": 350.0,
+                 "span/500": 500.0}[lim_name.split(" ")[0]]
         bars = [o for o in _analysis_objs(doc)[0] if hasattr(o, "ResN") or
                 getattr(o, "IsBar", False)]
         if not bars:
@@ -6879,7 +6899,7 @@ class RcBeamEC2:
                "C50/60": (50.0, 4.1)}
 
     def GetResources(self):
-        return {"Pixmap": _icon("rebar"), "MenuText": "RC Beam Design (EC2)",
+        return {"Pixmap": _icon("rcbeam"), "MenuText": "RC Beam Design (EC2)",
                 "ToolTip": "Design a rectangular reinforced-concrete beam to "
                            "EN 1992-1-1: tension (and, if needed, compression) "
                            "steel for the bending moment by the rectangular stress "
@@ -6971,7 +6991,7 @@ class RcColumnEC2:
     _GRADES = RcBeamEC2._GRADES
 
     def GetResources(self):
-        return {"Pixmap": _icon("rebar"), "MenuText": "RC Column Design (EC2)",
+        return {"Pixmap": _icon("rccolumn"), "MenuText": "RC Column Design (EC2)",
                 "ToolTip": "Check / design a symmetrically-reinforced rectangular "
                            "RC column to EN 1992-1-1: the N-M interaction capacity "
                            "at the design axial load, the utilisation for the "
@@ -7139,7 +7159,7 @@ class PadFootingEC2:
     _GRADES = RcBeamEC2._GRADES
 
     def GetResources(self):
-        return {"Pixmap": _icon("rebar"), "MenuText": "Pad Footing Design (EC2)",
+        return {"Pixmap": _icon("padfooting"), "MenuText": "Pad Footing Design (EC2)",
                 "ToolTip": "Design an isolated (pad) footing under a square column "
                            "to EN 1992-1-1 / EN 1997: bearing pressure vs the "
                            "allowable (SLS), cantilever bending steel, one-way "
@@ -7266,7 +7286,7 @@ def _timber_kc(lam_rel, beta_c=0.2):
 
 class TimberEC5:
     def GetResources(self):
-        return {"Pixmap": _icon("rebar"), "MenuText": "Timber Member Check (EC5)",
+        return {"Pixmap": _icon("timber"), "MenuText": "Timber Member Check (EC5)",
                 "ToolTip": "Check a rectangular solid-timber or glulam member to "
                            "EN 1995-1-1: design strengths from k_mod / gamma_M, "
                            "biaxial bending, combined axial + bending with column "
@@ -7388,7 +7408,7 @@ class BasePlateEC3:
     _GRADES = {"C20/25": 20.0, "C25/30": 25.0, "C30/37": 30.0, "C35/45": 35.0}
 
     def GetResources(self):
-        return {"Pixmap": _icon("rebar"), "MenuText": "Steel Base Plate (EC3)",
+        return {"Pixmap": _icon("baseplate"), "MenuText": "Steel Base Plate (EC3)",
                 "ToolTip": "Design an axially-loaded steel column base plate to "
                            "EN 1993-1-8: the concrete bearing strength f_jd, the "
                            "required bearing area, the actual pressure and the "
@@ -7468,7 +7488,7 @@ class TorsionCheckEC3:
     _GRADES = {"S235": 235.0, "S275": 275.0, "S355": 355.0, "S420": 420.0}
 
     def GetResources(self):
-        return {"Pixmap": _icon("tension"), "MenuText": "Torsion Check (EC3)",
+        return {"Pixmap": _icon("torsion"), "MenuText": "Torsion Check (EC3)",
                 "ToolTip": "EN 1993-1-1 6.2.7 St-Venant torsion check of an open "
                            "I/H member: the torsional shear stresses in flange and "
                            "web, their utilisation against fy/sqrt3, and the "
@@ -7569,7 +7589,7 @@ def _bolt_tension(As, fub, gM2=1.25):
 
 class BoltedConnEC3:
     def GetResources(self):
-        return {"Pixmap": _icon("rebar"), "MenuText": "Bolted Connection (EC3)",
+        return {"Pixmap": _icon("bolt"), "MenuText": "Bolted Connection (EC3)",
                 "ToolTip": "Check a bolt group in a shear/tension connection to "
                            "EN 1993-1-8: per-bolt shear F_v,Rd, bearing F_b,Rd and "
                            "tension F_t,Rd (from the edge/end distances and "
@@ -7676,7 +7696,7 @@ def _fillet_weld_fvwd(fu, betaw, gM2=1.25):
 
 class FilletWeldEC3:
     def GetResources(self):
-        return {"Pixmap": _icon("rebar"), "MenuText": "Fillet Weld (EC3)",
+        return {"Pixmap": _icon("weld"), "MenuText": "Fillet Weld (EC3)",
                 "ToolTip": "Check a fillet weld to EN 1993-1-8 (simplified method): "
                            "the design shear strength f_vw,d from the parent-metal "
                            "f_u and the correlation factor beta_w, the resistance "
@@ -7755,7 +7775,7 @@ class CombinedFootingEC2:
     _GRADES = RcBeamEC2._GRADES
 
     def GetResources(self):
-        return {"Pixmap": _icon("rebar"), "MenuText": "Combined Footing (EC2)",
+        return {"Pixmap": _icon("combfooting"), "MenuText": "Combined Footing (EC2)",
                 "ToolTip": "Design a combined (two-column) rectangular footing to "
                            "EN 1992-1-1 / EN 1997: size it so the bearing is "
                            "uniform under the load resultant, check the pressure, "
@@ -7859,7 +7879,7 @@ def _masonry_phi_mid(hef, tef, t, e_mk, fk, E_factor=1000.0):
 
 class MasonryEC6:
     def GetResources(self):
-        return {"Pixmap": _icon("rebar"), "MenuText": "Masonry Wall (EC6)",
+        return {"Pixmap": _icon("masonry"), "MenuText": "Masonry Wall (EC6)",
                 "ToolTip": "Vertical-load capacity of an unreinforced masonry wall "
                            "to EN 1996-1-1: characteristic strength f_k = K f_b^a "
                            "f_m^b, design strength f_d, and the capacity reduction "
@@ -8045,7 +8065,7 @@ def _pushover2d(nodes, elems, fixed, loads, Mp, EA=1e13, maxsteps=200):
 
 class Pushover:
     def GetResources(self):
-        return {"Pixmap": _icon("sway"), "MenuText": "Pushover (plastic hinges)",
+        return {"Pixmap": _icon("pushover"), "MenuText": "Pushover (plastic hinges)",
                 "ToolTip": "Nonlinear static (pushover) of the planar frame by the "
                            "event-to-event plastic-hinge method: the collapse load "
                            "factor at which a mechanism forms, the hinge sequence "
@@ -8171,7 +8191,7 @@ def _plastic_collapse(case, load, L, Mp):
 
 class PlasticCollapse:
     def GetResources(self):
-        return {"Pixmap": _icon("tension"), "MenuText": "Plastic Collapse (limit)",
+        return {"Pixmap": _icon("plastic"), "MenuText": "Plastic Collapse (limit)",
                 "ToolTip": "Plastic collapse (limit analysis) of a single-span "
                            "steel beam: the plastic moment M_p = f_y Z and the "
                            "collapse load from the kinematic mechanism (simply "
@@ -8271,7 +8291,7 @@ class AiscSteel:
                "Gr65 (Fy=450)": 450.0}
 
     def GetResources(self):
-        return {"Pixmap": _icon("tension"), "MenuText": "AISC Steel Check (US)",
+        return {"Pixmap": _icon("aisc"), "MenuText": "AISC Steel Check (US)",
                 "ToolTip": "Check a compact steel member to ANSI/AISC 360-16 (LRFD): "
                            "flexural-buckling phiP_n (chapter E), flexure phiM_n = "
                            "phi Fy Z (chapter F), and the chapter H combined "
@@ -8362,7 +8382,7 @@ def _ec9_member(A, W, fo, E, L, i, Pr, Mr, gM1=1.1, alpha_shape=1.0):
 
 class AluminiumEC9:
     def GetResources(self):
-        return {"Pixmap": _icon("tension"), "MenuText": "Aluminium Member (EC9)",
+        return {"Pixmap": _icon("alu"), "MenuText": "Aluminium Member (EC9)",
                 "ToolTip": "Check an aluminium member to EN 1999-1-1: bending "
                            "resistance W fo/gamma_M1, flexural buckling (relative "
                            "slenderness -> chi) axial resistance, and the combined "

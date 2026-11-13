@@ -1942,6 +1942,19 @@ print("  Member 41 UB203x133x30 S355 (LTB governs): class %d, Nc,Rd=%.0f, "
                        _rs["Mcr"] / 1e6, _rs["chiLT"]))
 print("DynFrame vs Robot COMPLETE - all 3 sections, resistances/buckling/LTB/"
       "torsion reproduced to the digit")
+# the 3 Robot sections are now in the profile catalog with published properties
+_cat = C._section_db("UB 356x171x57")
+assert _cat is not None and abs(_cat["A"] - 7260.0) < 1.0, _cat and _cat.get("A")
+assert abs(_cat["Iz"] - 160.4e6) < 1e3 and abs(_cat["Wpl_z"] - 1009000.0) < 1.0
+_rc = C._ec3_member_check(_cat, 355.0, 210000.0, 80769.0, N=-409.76e3,
+        My=0.0, Mz=47.57e6, Lcr_maj=5000.0, Lcr_min=5000.0, Lltb=0.0,
+        C1=1.0, Cmy=0.9, Cmz=0.9, CmLT=0.9, gM0=1.0, gM1=1.0)
+assert abs(_rc["NcRd"] / 1e3 - 2577.30) < 1.0 and abs(_rc["McyRd"] / 1e6 - 358.19) < 0.5
+assert C._section_db("UB 610x229x101")["A"] == 12900.0
+assert C._section_db("UB 203x133x30")["A"] == 3820.0
+print("  all 3 Robot UB sections in the catalog -> build the frame and the checks "
+      "match Robot (UB356x171x57: Nc,Rd=%.0f, My,cRd=%.1f)"
+      % (_rc["NcRd"] / 1e3, _rc["McyRd"] / 1e6))
 
 # ---------- SLS deflection check ----------
 print("\n== SLS deflection check ==")

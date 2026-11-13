@@ -2804,10 +2804,14 @@ def _classify(db, fy, N, Mmaj):
     return cls, "flange c/t=%.1f(cl%d) web c/t=%.1f(cl%d)" % (rf, cls_f, rw, cls_w)
 
 
-def _mcr(db, E, G, L, C1):
-    """Elastic critical moment for major-axis lateral-torsional buckling
-    (fork supports, no load eccentricity). None for sections not susceptible
-    to LTB (hollow/round)."""
+def _mcr(db, E, G, L, C1, C2=0.0, zg=0.0):
+    """Elastic critical moment for major-axis lateral-torsional buckling, fork
+    supports (EN 1993-1-1 / ENV 1993-1-1 F.2 general form):
+      Mcr = C1 (pi^2 E Iz/L^2) [ sqrt( Iw/Iz + L^2 G It/(pi^2 E Iz) + (C2 zg)^2 )
+            - C2 zg ]
+    C2 and zg (load height above the shear centre, +ve = destabilising top-flange
+    load) model a transverse load not applied at the shear centre; C2=zg=0 gives
+    the uniform-moment case. None for sections not susceptible to LTB."""
     import math
     if db["kind"] in ("box", "CHS", "round"):
         return None
@@ -2815,8 +2819,9 @@ def _mcr(db, E, G, L, C1):
     if Imin <= 0 or L <= 0:
         return None
     t1 = math.pi ** 2 * E * Imin / L ** 2
-    inside = db["Iw"] / Imin + L ** 2 * G * db["It"] / (math.pi ** 2 * E * Imin)
-    return C1 * t1 * inside ** 0.5
+    inside = (db["Iw"] / Imin + L ** 2 * G * db["It"] / (math.pi ** 2 * E * Imin)
+              + (C2 * zg) ** 2)
+    return C1 * t1 * (inside ** 0.5 - C2 * zg)
 
 
 def _chi_lt(lam_lt, hb):
@@ -2832,7 +2837,8 @@ def _chi_lt(lam_lt, hb):
 
 
 def _ec3_member_check(db, fy, E, G, N, My, Mz, Lcr_maj, Lcr_min, Lltb,
-                      C1, Cmy, Cmz, CmLT, gM0, gM1, susceptible=None):
+                      C1, Cmy, Cmz, CmLT, gM0, gM1, susceptible=None,
+                      C2=0.0, zg=0.0):
     """Full EN 1993-1-1 member verification. My/Mz are the stored moments
     about the section's local y/z (Iy/Iz) axes; the major axis is the larger-I
     one. Returns a dict of class, resistances, reduction factors and the
@@ -2870,7 +2876,7 @@ def _ec3_member_check(db, fy, E, G, N, My, Mz, Lcr_maj, Lcr_min, Lltb,
         lam_min = (NRk / Ncr_min) ** 0.5
         chiy = _chi_buckling(lam_maj, _ALPHA_CURVE[cmaj])
         chiz = _chi_buckling(lam_min, _ALPHA_CURVE[cmin])
-    Mc = _mcr(db, E, G, Lltb, C1)
+    Mc = _mcr(db, E, G, Lltb, C1, C2, zg)
     if Mc is not None and Mc > 0:
         lam_lt = (Wy * fy / Mc) ** 0.5
         chiLT = _chi_lt(lam_lt, db.get("hb", 2.0))
@@ -6374,9 +6380,12 @@ class CodeCheck:
         return FreeCAD.ActiveDocument is not None
 
     # moment-distribution presets -> (C1 for LTB, Cm for interaction)
-    _SHAPES = {"Uniform (conservative)": (1.0, 1.0),
-               "Parabolic / UDL": (1.13, 0.95),
-               "Triangular / linear": (1.77, 0.60)}
+    # moment-distribution preset -> (C1 for Mcr, Cm for interaction, C2 load-height)
+    _SHAPES = {"Uniform (conservative)": (1.0, 1.0, 0.0),
+               "Parabolic / UDL": (1.13, 0.95, 0.459),
+               "Triangular / linear": (1.77, 0.60, 0.0)}
+    _LOADPOS = {"At shear centre": 0.0, "Top flange (destabilising)": 0.5,
+                "Bottom flange (stabilising)": -0.5}
 
     def Activated(self):
         doc = FreeCAD.ActiveDocument
@@ -6400,13 +6409,16 @@ class CodeCheck:
              "options": list(self._SHAPES.keys()), "default": "Uniform (conservative)"},
             {"key": "susc", "label": "LTB-susceptible (torsion)", "kind": "combo",
              "options": ["Auto", "Yes", "No (restrained)"], "default": "Auto"},
+            {"key": "loadpos", "label": "LTB load position", "kind": "combo",
+             "options": list(self._LOADPOS.keys()), "default": "At shear centre"},
         ])
         if not vals:
             return
         gM0 = max(vals["gm0"], 1e-6); gM1 = max(vals["gm1"], 1e-6)
         ky = max(vals["ky"], 1e-6); kz = max(vals["kz"], 1e-6)
         klt = max(vals["klt"], 1e-6)
-        C1, Cm = self._SHAPES.get(vals["shape"], (1.0, 1.0))
+        C1, Cm, C2 = self._SHAPES.get(vals["shape"], (1.0, 1.0, 0.0))
+        zgfac = self._LOADPOS.get(vals.get("loadpos", "At shear centre"), 0.0)
         susc = {"Auto": None, "Yes": True, "No (restrained)": False}[vals.get("susc", "Auto")]
         rows = []; worst = 0.0; worstbar = "-"; skipped = 0; cls4 = 0
         doc.openTransaction("DynFrame: code check")
@@ -6419,8 +6431,9 @@ class CodeCheck:
             N = getattr(o, "ResN", 0.0)
             My = getattr(o, "ResMy", 0.0); Mz = getattr(o, "ResMz", 0.0)
             L = getattr(o, "ResL", 1000.0)
+            zg = zgfac * db.get("_h", 0.0)        # load height above shear centre
             r = _ec3_member_check(db, Fy, E, Gm, N, My, Mz, ky * L, kz * L,
-                                  klt * L, C1, Cm, Cm, Cm, gM0, gM1, susc)
+                                  klt * L, C1, Cm, Cm, Cm, gM0, gM1, susc, C2, zg)
             U = r["U"]
             if r["cls"] >= 4:
                 cls4 += 1

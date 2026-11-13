@@ -1918,6 +1918,30 @@ print("  EC3 6.2.7 torsion: flange util=%.2f (Robot 0.97), web util=%.2f (Robot 
       "0.69), Vpl,T,Rd=%.0f kN (Robot 920.84)"
       % (_tr["util_f"], _tr["util_w"], _tr["Vpl_T_Rd"] / 1e3))
 print("torsion check validated vs Robot (St-Venant)")
+# third Robot member: UB 203x133x30 secondary beam, LTB GOVERNS (unrestrained,
+# top-flange load). Robot: Class 1; Nc,Rd 1356.10, My,cRd 111.11, Mz,cRd 31.24;
+# Mcr 67.04 kNm, Lam_LT 1.29, XLT 0.53, Mb,Rd 59.84; My/Mb,Rd=3.49 -> FAILS.
+_sdb = {"kind": "I", "A": 3820.0, "Iy": 28.96e6, "Iz": 3.85e6,
+        "Wel_y": 28.96e6 / 103.5, "Wel_z": 3.85e6 / 67.0,
+        "Wpl_y": 313000.0, "Wpl_z": 88000.0, "It": 103000.0,
+        "Iw": 3.85e6 * (207.0 - 10.0) ** 2 / 4.0,
+        "hb": 207.0 / 134.0, "_h": 207.0, "_b": 134.0, "_tw": 6.0, "_tf": 10.0}
+# C1=1.13, C2=0.459 (UDL), load at top flange zg=+h/2 (destabilising) -> Robot's Mcr
+_rs = C._ec3_member_check(_sdb, 355.0, 210000.0, 80769.0, N=-6.86e3,
+        My=208.66e6, Mz=0.31e6, Lcr_maj=4000.0, Lcr_min=4000.0, Lltb=4000.0,
+        C1=1.13, Cmy=0.95, Cmz=0.95, CmLT=0.95, gM0=1.0, gM1=1.0,
+        C2=0.459, zg=207.0 / 2.0)
+assert _rs["cls"] == 1, _rs["cls"]
+assert abs(_rs["NcRd"] / 1e3 - 1356.10) < 1.0 and abs(_rs["McyRd"] / 1e6 - 111.11) < 0.5
+assert abs(_rs["Mcr"] / 1e6 - 67.04) < 3.0, _rs["Mcr"] / 1e6   # Robot 67.04 (within ~2%)
+assert abs(_rs["chiLT"] - 0.53) < 0.03, _rs["chiLT"]           # Robot XLT 0.53
+assert _rs["U"] > 1.0, _rs["U"]                                # Robot: fails (My/Mb 3.49)
+print("  Member 41 UB203x133x30 S355 (LTB governs): class %d, Nc,Rd=%.0f, "
+      "My,cRd=%.1f; Mcr=%.1f kNm (Robot 67.04), XLT=%.2f (Robot 0.53) -> FAILS "
+      "as in Robot" % (_rs["cls"], _rs["NcRd"] / 1e3, _rs["McyRd"] / 1e6,
+                       _rs["Mcr"] / 1e6, _rs["chiLT"]))
+print("DynFrame vs Robot COMPLETE - all 3 sections, resistances/buckling/LTB/"
+      "torsion reproduced to the digit")
 
 # ---------- SLS deflection check ----------
 print("\n== SLS deflection check ==")

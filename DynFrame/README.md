@@ -675,11 +675,19 @@ the digit**:
 - **Main beam** (UB 610×229×101, S355): **Class 1**; N_c,Rd = 4579.50 kN,
   M_y,c,Rd = 1024.88 kN·m; LTB-restrained so **χ_LT = 1.00** and M_y,Ed/M_b,Rd =
   0.28 — all matching Robot.
+- **Secondary beam** (UB 203×133×30, S355), where **LTB governs and the member
+  is grossly overloaded**: **Class 1**; N_c,Rd = 1356.10 kN, M_y,c,Rd = 111.11
+  kN·m; with a top-flange (destabilising) UDL the elastic critical moment
+  **M_cr = 68.6 kN·m** (Robot 67.04), **χ_LT = 0.54** (Robot 0.53) — and the
+  member **fails** (M_y,Ed/M_b,Rd ≈ 3.5), the same verdict as Robot.
 
-These two members are asserted in `validate.py` (the *DynFrame vs Autodesk
-Robot* block). To match Robot's beam-column interaction exactly, the Steel Code
-Check has an **LTB-susceptible (torsion)** option (Auto / Yes / No) that selects
-Annex-B Table B.1 vs B.2 for the k-factors.
+All three members (all three sections) are asserted in `validate.py` (the
+*DynFrame vs Autodesk Robot* block). Two Steel Code Check options let you match
+Robot's assumptions exactly: **LTB-susceptible (torsion)** (Auto / Yes / No,
+selecting Annex-B Table B.1 vs B.2 for the k-factors), and **LTB load position**
+(shear centre / top flange / bottom flange), which adds the C₂·z_g load-height
+term to the elastic critical moment M_cr — that is what reproduces the secondary
+beam's M_cr = 68.6 kN·m above.
 
 The beam also carried a small **torsion** (T_t,Ed = 10.33 kN·m). The new
 **Torsion Check (EC3)** (EN 1993-1-1 6.2.7) reproduces it too: flange

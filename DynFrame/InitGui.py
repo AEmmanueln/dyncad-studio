@@ -65,6 +65,7 @@ class DynFrameWorkbench(FreeCADGui.Workbench):
                    "DynFrame_ImportGroundMotion", "DynFrame_GMSpectrum",
                    "DynFrame_TimeHistory", "DynFrame_Envelope",
                    "DynFrame_MovingLoad", "DynFrame_CodeCheck",
+                   "DynFrame_OptimiseSectionEC3",
                    "DynFrame_PlateReinfEC2", "DynFrame_PunchingEC2",
                    "DynFrame_RcBeamEC2", "DynFrame_RcColumnEC2",
                    "DynFrame_PadFootingEC2", "DynFrame_CombinedFootingEC2",

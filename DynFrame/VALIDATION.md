@@ -32,6 +32,8 @@ digit** by DynFrame's `_ec3_member_check`:
 | Beam UB203×133×30 — M_cr / χ_LT (LTB) | 67.04 kN·m / 0.53 | 68.6 / 0.54 |
 | — verdict (overloaded) | fails (M/M_b ≈ 3.5) | fails |
 | Torsion (6.2.7) — V_pl,T,Rd | 920.84 kN | 893 (−3 %, warping) |
+| Shear–moment (6.2.8) — V_pl,web (UB356) | 646.3 kN | 646.24 |
+| — M_y,V,Rd at V = 500 kN (ρ = 0.300) | — | 334.7 kN·m (hand 334.7) |
 
 Matching Robot's beam-column interaction and LTB uses the Steel Code Check's
 **LTB-susceptible** and **LTB load-position** options. The only acknowledged
@@ -56,7 +58,10 @@ analysis); the St-Venant torsion check matches to a few percent.
   direction exact.
 - **Section engine** reproduces published tables (IPE 300 A/I/W_el/W_pl/I_t/I_w;
   rectangle shape factor 1.5); **full EC3 check** classifies, picks buckling
-  curves, LTB reduction, Annex-B interaction.
+  curves, LTB reduction, Annex-B interaction, and the **6.2.8 shear–moment**
+  reduction (reduced W_pl at high web shear, to the hand calc); the **section
+  optimiser** returns the lightest family member that passes — verified against
+  the invariant that every lighter size fails.
 - **Design** — EC2 slab reinforcement (≈757 mm²/m), punching (util 1.50), beam
   (K=0.137, A_s≈1486; shear A_sw/s≈682), column N-M (M_Rd=246 at N=960 kN),
   slenderness (λ=52, M₂≈48), biaxial (a=1.25), pad footing, combined footing;

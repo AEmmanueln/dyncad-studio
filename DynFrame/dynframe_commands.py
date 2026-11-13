@@ -2653,10 +2653,18 @@ _SECTION_DB_CACHE = {}
 # Published section properties for the Robot-model UB sections, so the EC3 check
 # matches Autodesk Robot to the digit (the geometry-derived values omit the root
 # radii). name -> (A, I_strong, I_weak, Wpl_strong, Wpl_weak, It), mm units.
+# name -> (A, I_strong, I_weak, Wpl_strong, Wpl_weak, It, Av_flange, Av_web)
+# Av_flange = shear area for shear parallel to the flanges (minor-axis bending);
+# Av_web = shear area for shear parallel to the web (major-axis bending). These
+# are Robot's published Ay / Az for the section (they carry the root radii, so
+# they slightly exceed the simple geometric web/flange areas).
 _PUBLISHED_SECTIONS = {
-    "UB 356x171x57": (7260.0, 160.4e6, 11.08e6, 1009000.0, 198000.0, 334000.0),
-    "UB 610x229x101": (12900.0, 757.8e6, 29.15e6, 2887000.0, 401000.0, 770000.0),
-    "UB 203x133x30": (3820.0, 28.96e6, 3.85e6, 313000.0, 88000.0, 103000.0),
+    "UB 356x171x57": (7260.0, 160.4e6, 11.08e6, 1009000.0, 198000.0, 334000.0,
+                      4736.0, 3153.0),
+    "UB 610x229x101": (12900.0, 757.8e6, 29.15e6, 2887000.0, 401000.0, 770000.0,
+                       7150.0, 6694.0),
+    "UB 203x133x30": (3820.0, 28.96e6, 3.85e6, 313000.0, 88000.0, 103000.0,
+                      2717.0, 1456.0),
 }
 
 
@@ -2716,8 +2724,18 @@ def _section_db(name):
         for k, v in d.items():
             db["_" + k] = v
         db["hb"] = (d.get("h", 1.0) / d.get("b", 1.0)) if kind in ("I", "U") else 1.0
+        # EN 1993-1-1 6.2.6 shear areas for a rolled I/H section (root radii
+        # omitted -> conservative). Av_web carries the shear parallel to the web
+        # (accompanies major-axis bending); Av_flange the shear parallel to the
+        # flanges (minor-axis bending).
+        if kind == "I":
+            _h = d.get("h", 0.0); _b = d.get("b", 0.0)
+            _tw = d.get("tw", 0.0); _tf = d.get("tf", 0.0)
+            db["Av_web"] = max(db["A"] - 2.0 * _b * _tf + _tw * _tf,
+                               (_h - 2.0 * _tf) * _tw)
+            db["Av_flange"] = 2.0 * _b * _tf
     if db is not None and name in _PUBLISHED_SECTIONS:
-        A, Istr, Iwk, Wpls, Wplw, It = _PUBLISHED_SECTIONS[name]
+        A, Istr, Iwk, Wpls, Wplw, It, Afl, Aweb = _PUBLISHED_SECTIONS[name]
         h = db.get("_h", db.get("hy", 1.0)); b = db.get("_b", db.get("hx", 1.0))
         tf = db.get("_tf", 0.0)
         db["A"] = A; db["Iz"] = Istr; db["Iy"] = Iwk           # Iz = strong axis
@@ -2726,6 +2744,7 @@ def _section_db(name):
         db["Wel_y"] = Iwk / (b / 2.0) if b > 0 else 0.0
         db["It"] = It; db["Iw"] = Iwk * (h - tf) ** 2 / 4.0
         db["iy"] = (Iwk / A) ** 0.5; db["iz"] = (Istr / A) ** 0.5
+        db["Av_flange"] = Afl; db["Av_web"] = Aweb
     _SECTION_DB_CACHE[name] = db
     return db
 
@@ -2858,7 +2877,7 @@ def _chi_lt(lam_lt, hb):
 
 def _ec3_member_check(db, fy, E, G, N, My, Mz, Lcr_maj, Lcr_min, Lltb,
                       C1, Cmy, Cmz, CmLT, gM0, gM1, susceptible=None,
-                      C2=0.0, zg=0.0):
+                      C2=0.0, zg=0.0, Vy=0.0, Vz=0.0):
     """Full EN 1993-1-1 member verification. My/Mz are the stored moments
     about the section's local y/z (Iy/Iz) axes; the major axis is the larger-I
     one. Returns a dict of class, resistances, reduction factors and the
@@ -2878,6 +2897,24 @@ def _ec3_member_check(db, fy, E, G, N, My, Mz, Lcr_maj, Lcr_min, Lltb,
     Wy = Wpl_maj if plastic else Wel_maj
     Wz = Wpl_min if plastic else Wel_min
     A = db["A"]; comp = max(0.0, -N)
+    Wy_lt = Wy    # full modulus kept for the LTB slenderness (6.3.2.2)
+
+    # EN 1993-1-1 6.2.8 shear-moment interaction: where the shear accompanying
+    # major-axis bending exceeds 0.5*Vpl,Rd, the major-axis moment resistance is
+    # reduced with a web whose yield is (1-rho)*fy. The web carries the shear
+    # paired with the major moment; the FE convention is Mz<->Vy and My<->Vz, so
+    # that shear is Vy when the major axis is z and Vz when it is y. For an I
+    # section (6.2.8(5)) Wpl,y is reduced by rho*Aw^2/(4*tw) with Aw = hw*tw.
+    Vmaj = abs(Vy) if maj_is_z else abs(Vz)
+    Av_web = db.get("Av_web", 0.5 * A)
+    VplwRd = Av_web * fy / (3.0 ** 0.5) / gM0
+    rho_v = 0.0
+    if plastic and VplwRd > 0.0 and Vmaj > 0.5 * VplwRd:
+        rho_v = (2.0 * Vmaj / VplwRd - 1.0) ** 2
+        tw_ = db.get("_tw", 0.0)
+        hw_ = db.get("_h", 0.0) - 2.0 * db.get("_tf", 0.0)
+        if tw_ > 0.0 and hw_ > 0.0:
+            Wy = max(Wy - rho_v * (hw_ * tw_) ** 2 / (4.0 * tw_), 0.5 * Wy)
 
     NRk = A * fy; MyRk = Wy * fy; MzRk = Wz * fy
     NcRd = A * fy / gM0
@@ -2898,7 +2935,7 @@ def _ec3_member_check(db, fy, E, G, N, My, Mz, Lcr_maj, Lcr_min, Lltb,
         chiz = _chi_buckling(lam_min, _ALPHA_CURVE[cmin])
     Mc = _mcr(db, E, G, Lltb, C1, C2, zg)
     if Mc is not None and Mc > 0:
-        lam_lt = (Wy * fy / Mc) ** 0.5
+        lam_lt = (Wy_lt * fy / Mc) ** 0.5
         chiLT = _chi_lt(lam_lt, db.get("hb", 2.0))
     NbyRd = chiy * NRk / gM1; NbzRd = chiz * NRk / gM1
     MbRd = chiLT * Wy * fy / gM1
@@ -2932,7 +2969,8 @@ def _ec3_member_check(db, fy, E, G, N, My, Mz, Lcr_maj, Lcr_min, Lltb,
             "Mmin": Mmin, "U_sec": U_sec, "U61": U61, "U62": U62, "U": U,
             "gov": gov, "chiy": chiy, "chiz": chiz, "chiLT": chiLT,
             "lam_lt": lam_lt, "Mcr": Mc, "NcRd": NcRd, "McyRd": McyRd0,
-            "MbRd": MbRd, "curves": (cmaj, cmin)}
+            "MbRd": MbRd, "curves": (cmaj, cmin), "rho_v": rho_v,
+            "VplwRd": VplwRd, "Vmaj": Vmaj}
 
 
 def _ec3_torsion(T_Ed, It, tw, tf, Az, fy, gM0=1.0):
@@ -6450,10 +6488,12 @@ class CodeCheck:
                 continue
             N = getattr(o, "ResN", 0.0)
             My = getattr(o, "ResMy", 0.0); Mz = getattr(o, "ResMz", 0.0)
+            Vy = getattr(o, "ResVy", 0.0); Vz = getattr(o, "ResVz", 0.0)
             L = getattr(o, "ResL", 1000.0)
             zg = zgfac * db.get("_h", 0.0)        # load height above shear centre
             r = _ec3_member_check(db, Fy, E, Gm, N, My, Mz, ky * L, kz * L,
-                                  klt * L, C1, Cm, Cm, Cm, gM0, gM1, susc, C2, zg)
+                                  klt * L, C1, Cm, Cm, Cm, gM0, gM1, susc, C2, zg,
+                                  Vy, Vz)
             U = r["U"]
             if r["cls"] >= 4:
                 cls4 += 1
@@ -6508,6 +6548,183 @@ class CodeCheck:
              "marginally conservative versus a rolled section with root fillets." %
              (len(rows), worst, worstbar,
               "PASS" if worst <= 1.0 else "FAIL - over-stressed members", notes))
+
+
+class OptimiseSectionEC3:
+    """Robot-style 'code-group design': from a family of rolled sections, find
+    the LIGHTEST size that passes the full EN 1993-1-1 member check for a given
+    set of design forces, buckling lengths and LTB assumptions, and rank every
+    size by mass with its utilisation. A standalone design calculator - it does
+    not need a solved model (type the governing forces straight in)."""
+
+    _GRADES = {"S235": 235.0, "S275": 275.0, "S355": 355.0,
+               "S420": 420.0, "S460": 460.0}
+    _FAMS = ["I-beam (UB)", "I-beam (IPE)", "H-beam (HEA)", "H-beam (HEB)",
+             "Channel (UPN)", "Square tube (SHS)", "Rectangular tube (RHS)",
+             "Round tube (CHS)"]
+
+    def GetResources(self):
+        return {"Pixmap": _icon("optimise"),
+                "MenuText": "Optimise Section (EC3)",
+                "ToolTip": "Code-group design (like Autodesk Robot): choose a "
+                           "family of rolled sections and enter the governing "
+                           "design forces - DynFrame runs the full EN 1993-1-1 "
+                           "member check on every size and reports the LIGHTEST "
+                           "that passes (classification, flexural + lateral-"
+                           "torsional buckling, Annex-B interaction, 6.2.8 shear), "
+                           "with every size ranked by mass and utilisation.",
+                "Accel": "A, O"}
+
+    def IsActive(self):
+        return True
+
+    def Activated(self):
+        fams = [f for f in self._FAMS if f in profiles.families()]
+        extra = [f for f in sorted(profiles.families()) if f not in fams]
+        fams = fams + extra
+        if not fams:
+            info("No rolled-section families are available in the profile "
+                 "library.")
+            return
+        vals = form_dialog(
+            "Optimise Section - Code-group design (EN 1993-1-1)", [
+                {"key": "_i", "kind": "info", "default":
+                 "Pick a section family and enter the governing design forces. "
+                 "DynFrame runs the full EC3 member check on every size in the "
+                 "family and reports the lightest one that passes, plus a ranked "
+                 "table. Axial is + for tension and - for compression; My/Mz are "
+                 "about the section's local y/z axes (the larger-inertia axis is "
+                 "the major one)."},
+                {"key": "fam", "label": "Section family", "kind": "combo",
+                 "options": fams, "default": fams[0]},
+                {"key": "grade", "label": "Steel grade", "kind": "combo",
+                 "options": list(self._GRADES.keys()), "default": "S355"},
+                {"key": "N", "label": "Axial N (kN, + tension / - compression)",
+                 "kind": "float", "default": -200.0},
+                {"key": "My", "label": "Moment My about local y (kNm)",
+                 "kind": "float", "default": 0.0},
+                {"key": "Mz", "label": "Moment Mz about local z (kNm)",
+                 "kind": "float", "default": 150.0},
+                {"key": "Vy", "label": "Shear Vy (kN)", "kind": "float",
+                 "default": 0.0},
+                {"key": "Vz", "label": "Shear Vz (kN)", "kind": "float",
+                 "default": 0.0},
+                {"key": "L", "label": "Member / system length L (m)",
+                 "kind": "float", "default": 6.0},
+                {"key": "ky", "label": "Buckling length factor, major axis",
+                 "kind": "float", "default": 1.0},
+                {"key": "kz", "label": "Buckling length factor, minor axis",
+                 "kind": "float", "default": 1.0},
+                {"key": "klt", "label": "LTB length factor (restraint spacing/L)",
+                 "kind": "float", "default": 1.0},
+                {"key": "shape", "label": "Moment distribution", "kind": "combo",
+                 "options": list(CodeCheck._SHAPES.keys()),
+                 "default": "Uniform (conservative)"},
+                {"key": "susc", "label": "LTB-susceptible (torsion)",
+                 "kind": "combo", "options": ["Auto", "Yes", "No (restrained)"],
+                 "default": "Auto"},
+                {"key": "loadpos", "label": "LTB load position", "kind": "combo",
+                 "options": list(CodeCheck._LOADPOS.keys()),
+                 "default": "At shear centre"},
+                {"key": "gm0", "label": "gamma_M0", "kind": "float",
+                 "default": 1.0},
+                {"key": "gm1", "label": "gamma_M1", "kind": "float",
+                 "default": 1.0},
+                {"key": "target", "label": "Max allowable utilisation",
+                 "kind": "float", "default": 1.0},
+            ])
+        if not vals:
+            return
+        fy = self._GRADES.get(vals["grade"], 355.0)
+        E = 210000.0; G = 80769.0
+        N = vals["N"] * 1e3; My = vals["My"] * 1e6; Mz = vals["Mz"] * 1e6
+        Vy = vals["Vy"] * 1e3; Vz = vals["Vz"] * 1e3
+        L = max(vals["L"], 1e-6) * 1e3
+        ky = max(vals["ky"], 1e-6); kz = max(vals["kz"], 1e-6)
+        klt = max(vals["klt"], 1e-6)
+        C1, Cm, C2 = CodeCheck._SHAPES.get(vals["shape"], (1.0, 1.0, 0.0))
+        zgfac = CodeCheck._LOADPOS.get(vals.get("loadpos", "At shear centre"), 0.0)
+        susc = {"Auto": None, "Yes": True,
+                "No (restrained)": False}[vals.get("susc", "Auto")]
+        gM0 = max(vals["gm0"], 1e-6); gM1 = max(vals["gm1"], 1e-6)
+        target = max(vals["target"], 1e-6)
+
+        ranked = []
+        for (nm, _b) in profiles.families().get(vals["fam"], []):
+            db = _section_db(nm)
+            if db is None or db.get("A", 0.0) <= 0.0:
+                continue
+            zg = zgfac * db.get("_h", 0.0)
+            try:
+                r = _ec3_member_check(db, fy, E, G, N, My, Mz, ky * L, kz * L,
+                                      klt * L, C1, Cm, Cm, Cm, gM0, gM1, susc,
+                                      C2, zg, Vy, Vz)
+            except Exception:
+                continue
+            mass = db["A"] * 7.85e-3          # kg/m for steel
+            ranked.append((db["A"], mass, nm, r["U"], r["cls"], r["gov"]))
+        if not ranked:
+            info("No sections in '%s' could be checked (profile data missing)."
+                 % vals["fam"])
+            return
+        ranked.sort(key=lambda t: t[0])       # lightest (smallest area) first
+        passing = [t for t in ranked if t[3] <= target and t[4] < 4]
+        best = passing[0] if passing else None
+
+        # spreadsheet (if a document is open) + message
+        doc = FreeCAD.ActiveDocument
+        if doc is not None:
+            try:
+                sh = (doc.getObject("SectionOptimiser")
+                      or doc.addObject("Spreadsheet::Sheet", "SectionOptimiser"))
+                sh.Label = "SectionOptimiser"; sh.clearAll()
+                sh.set("A1", "SECTION OPTIMISER (EN 1993-1-1) - family %s, grade "
+                       "%s, N=%.0fkN My=%.0f Mz=%.0fkNm L=%.2fm" %
+                       (vals["fam"], vals["grade"], vals["N"], vals["My"],
+                        vals["Mz"], vals["L"]))
+                for c, h in zip("ABCDEF", ["Rank", "Section", "Mass (kg/m)",
+                                           "Class", "U (gov)", "Verdict"]):
+                    sh.set("%s2" % c, h)
+                rr = 3
+                for i, (_a, mass, nm, U, cls, gov) in enumerate(ranked, 1):
+                    verdict = ("PASS" if (U <= target and cls < 4)
+                               else ("Class 4" if cls >= 4 else "fail"))
+                    for c, v in zip("ABCDEF", [i, nm, "%.1f" % mass, cls,
+                                               "%.3f (%s)" % (U, gov), verdict]):
+                        sh.set("%s%d" % (c, rr), str(v))
+                    rr += 1
+                _grp(doc, RES_GROUP).addObject(sh)
+                doc.recompute()
+            except Exception as e:
+                FreeCAD.Console.PrintError(
+                    "DynFrame: optimiser table failed (%s)\n" % e)
+
+        # lightest few for the message box
+        top = ranked[:12]
+        listing = "\n".join(
+            "   %-22s %6.1f kg/m   Class %d   U=%.2f (%s)%s" %
+            (nm, mass, cls, U, gov, "" if (U <= target and cls < 4) else "  x")
+            for (_a, mass, nm, U, cls, gov) in top)
+        if best is not None:
+            _a, bmass, bnm, bU, bcls, bgov = best
+            headline = ("LIGHTEST PASSING SECTION:  %s\n"
+                        "   %.1f kg/m   Class %d   utilisation %.2f (governed by "
+                        "%s)" % (bnm, bmass, bcls, bU, bgov))
+        else:
+            nearest = min(ranked, key=lambda t: t[3])
+            _a, nmass, nnm, nU, ncls, ngov = nearest
+            headline = ("No section in '%s' passes at U <= %.2f.\n"
+                        "   Closest: %s (%.1f kg/m, U=%.2f) - increase the "
+                        "section family, grade or restraint." %
+                        (vals["fam"], target, nnm, nmass, nU))
+        info("Code-group design complete (EN 1993-1-1).\n\n%s\n\n"
+             "Sizes by mass (x = does not pass):\n%s\n\n"
+             "Every size is run through the full member check - classification, "
+             "flexural buckling (auto curve), lateral-torsional buckling via Mcr, "
+             "the Annex-B interaction (6.61/6.62) and the 6.2.8 shear-moment "
+             "reduction. The ranked table is written to the 'SectionOptimiser' "
+             "spreadsheet. Class-4 sizes are reported but not auto-selected "
+             "(effective-section reduction is not applied)." % (headline, listing))
 
 
 class PlateReinfEC2:
@@ -14789,6 +15006,7 @@ _add("DynFrame_ImportGroundMotion", ImportGroundMotion)
 _add("DynFrame_GMSpectrum", GMSpectrum)
 _add("DynFrame_TimeHistory", TimeHistory)
 _add("DynFrame_CodeCheck", CodeCheck)
+_add("DynFrame_OptimiseSectionEC3", OptimiseSectionEC3)
 _add("DynFrame_ShowDiagram", ShowDiagram)
 _add("DynFrame_ResultsViewer", ResultsViewer)
 _add("DynFrame_ClearAnalysis", ClearAnalysis)

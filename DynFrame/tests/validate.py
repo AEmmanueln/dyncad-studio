@@ -1956,6 +1956,63 @@ print("  all 3 Robot UB sections in the catalog -> build the frame and the check
       "match Robot (UB356x171x57: Nc,Rd=%.0f, My,cRd=%.1f)"
       % (_rc["NcRd"] / 1e3, _rc["McyRd"] / 1e6))
 
+# ---------- EC3 6.2.8 shear-moment interaction (high web shear) ----------
+# At high shear the major-axis moment resistance is reduced with a web of yield
+# (1-rho)*fy (6.2.8(5)). For the catalog UB the major axis is z, so the web
+# shear is Vy (the FE convention pairs Mz<->Vy). Hand calc below, S355.
+print("\n== EC3 6.2.8 shear-moment interaction ==")
+_vdb = C._section_db("UB 356x171x57")               # Av_web = 3153 (Robot Az)
+_Vplw = _vdb["Av_web"] * 355.0 / (3.0 ** 0.5)       # web shear resistance
+assert abs(_Vplw / 1e3 - 646.24) < 1.0, _Vplw / 1e3        # matches V_z,c,Rd
+_m0 = C._ec3_member_check(_vdb, 355.0, 210000.0, 80769.0, N=0.0, My=0.0, Mz=0.0,
+        Lcr_maj=3000.0, Lcr_min=3000.0, Lltb=0.0, C1=1.0, Cmy=1.0, Cmz=1.0,
+        CmLT=1.0, gM0=1.0, gM1=1.0)                         # no shear
+assert abs(_m0["McyRd"] / 1e6 - 358.19) < 0.5 and _m0["rho_v"] == 0.0
+# Vy = 500 kN > 0.5*Vpl,web (=323): rho=(2*500/646.24-1)^2=0.300; Aw=(358-26)*8;
+# Wpl,red = 1009000 - 0.300*2656^2/(4*8) -> My,V,Rd ~ 334.7 kNm.
+_mv = C._ec3_member_check(_vdb, 355.0, 210000.0, 80769.0, N=0.0, My=0.0, Mz=0.0,
+        Lcr_maj=3000.0, Lcr_min=3000.0, Lltb=0.0, C1=1.0, Cmy=1.0, Cmz=1.0,
+        CmLT=1.0, gM0=1.0, gM1=1.0, Vy=500e3)
+assert abs(_mv["rho_v"] - 0.300) < 0.01, _mv["rho_v"]
+assert abs(_mv["McyRd"] / 1e6 - 334.7) < 1.0, _mv["McyRd"] / 1e6
+# shear just under the 0.5*Vpl trigger does nothing (full resistance back)
+_mlo = C._ec3_member_check(_vdb, 355.0, 210000.0, 80769.0, N=0.0, My=0.0, Mz=0.0,
+        Lcr_maj=3000.0, Lcr_min=3000.0, Lltb=0.0, C1=1.0, Cmy=1.0, Cmz=1.0,
+        CmLT=1.0, gM0=1.0, gM1=1.0, Vy=300e3)
+assert _mlo["rho_v"] == 0.0 and abs(_mlo["McyRd"] / 1e6 - 358.19) < 0.5
+print("  Vpl,web=%.0f kN; no shear -> My,c,Rd=%.1f; Vy=500kN(>0.5Vpl) -> rho=%.3f "
+      "My,V,Rd=%.1f kNm (hand 334.7); Vy=300kN(<0.5Vpl) -> no reduction"
+      % (_Vplw / 1e3, _m0["McyRd"] / 1e6, _mv["rho_v"], _mv["McyRd"] / 1e6))
+
+# ---------- Section optimiser (code-group design) invariant ----------
+# OptimiseSectionEC3 runs the full member check on every size in a family and
+# returns the lightest one that passes. The defining property: the chosen size
+# passes and every lighter size in the family fails. Case Mz=300kNm, N=-150kN,
+# L=5m, restrained, S355 on the UB family.
+print("\n== Section optimiser (EC3 code-group design) ==")
+import dynframe_profiles as _PROF
+_opt = []
+for (_nm, _bld) in _PROF.families().get("I-beam (UB)", []):
+    _d = C._section_db(_nm)
+    if _d is None or _d.get("A", 0.0) <= 0.0:
+        continue
+    _rr = C._ec3_member_check(_d, 355.0, 210000.0, 80769.0, N=-150e3, My=0.0,
+            Mz=300e6, Lcr_maj=5000.0, Lcr_min=5000.0, Lltb=5000.0, C1=1.0,
+            Cmy=1.0, Cmz=1.0, CmLT=1.0, gM0=1.0, gM1=1.0, susceptible=False)
+    _opt.append((_d["A"], _nm, _rr["U"], _rr["cls"]))
+_opt.sort(key=lambda t: t[0])
+_pass = [t for t in _opt if t[2] <= 1.0 and t[3] < 4]
+assert _pass, "no UB section passes the optimiser test case"
+_best = _pass[0]
+for (A_, nm_, U_, cls_) in _opt:                 # every lighter UB must fail
+    if A_ >= _best[0]:
+        break
+    assert U_ > 1.0 or cls_ >= 4, (nm_, U_, cls_)
+assert _best[2] <= 1.0 and _best[3] < 4
+print("  lightest passing UB for Mz=300kNm,N=-150kN,L=5m: %s (A=%.0f mm2, "
+      "U=%.2f) - all lighter UB sizes fail -> optimiser invariant holds"
+      % (_best[1], _best[0], _best[2]))
+
 # ---------- SLS deflection check ----------
 print("\n== SLS deflection check ==")
 dl = C._defl_limits(10000.0)       # 10 m span

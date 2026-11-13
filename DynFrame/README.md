@@ -366,12 +366,23 @@ spreadsheets at the root.
   the buckling curve chosen **automatically** from the section type (EC3
   Table 6.2), **lateral-torsional buckling** through the elastic critical
   moment **Mcr** (from the section's torsion It and warping Iw constants), and
-  the **Annex-B beam-column interaction** (equations 6.61 and 6.62). You set
-  γ_M0 / γ_M1, the buckling-length factors for each axis and the LTB restraint
-  spacing, and pick the moment distribution (which sets the C1 / Cm factors).
-  The `CodeCheck` table lists the class, χ_LT and both interaction
-  utilisations per member, with the governing check and OK/FAIL, and members
-  are coloured green→red by utilisation.
+  the **Annex-B beam-column interaction** (equations 6.61 and 6.62). Where the
+  shear accompanying major-axis bending exceeds half the plastic shear
+  resistance, the **6.2.8 shear–moment interaction** reduces the moment
+  resistance with a web of reduced yield (1−ρ)f_y — the same My,V,Rd reduction
+  Robot reports. You set γ_M0 / γ_M1, the buckling-length factors for each axis
+  and the LTB restraint spacing, and pick the moment distribution (which sets
+  the C1 / Cm factors). The `CodeCheck` table lists the class, χ_LT and both
+  interaction utilisations per member, with the governing check and OK/FAIL,
+  and members are coloured green→red by utilisation.
+- **Optimise Section (EC3)** — *code-group design*, the way Robot picks a
+  member size: choose a section family (UB, IPE, HEA/HEB, channels, hollow
+  sections) and enter the governing design forces, and DynFrame runs the full
+  member check above on **every size in the family** and reports the
+  **lightest one that passes**, with every size ranked by mass and utilisation
+  in a `SectionOptimiser` table. It is a standalone calculator — type the
+  forces straight in, no solved model needed — so you can size a member, or
+  check how much lighter you could go, in one click.
 - **Modal Analysis** — natural frequencies and mode shapes (consistent-mass
   eigenvalue analysis, each bar meshed into sub-elements); first *N*
   frequencies in a `ModalFrequencies` table, Mode 1 drawn as a mode-shape

@@ -372,9 +372,15 @@ spreadsheets at the root.
   resistance with a web of reduced yield (1−ρ)f_y — the same My,V,Rd reduction
   Robot reports. You set γ_M0 / γ_M1, the buckling-length factors for each axis
   and the LTB restraint spacing, and pick the moment distribution (which sets
-  the C1 / Cm factors). The `CodeCheck` table lists the class, χ_LT and both
-  interaction utilisations per member, with the governing check and OK/FAIL,
-  and members are coloured green→red by utilisation.
+  the C1 / Cm factors). After a single-combination Calculate the check runs at
+  **every station along each member on the simultaneous force state** (N, M_y,
+  M_z, V_y, V_z acting together) and reports the **governing position** (x/L) in
+  a `Pos` column — the detailed verification Robot does, which avoids the
+  over-conservatism of combining each component's envelope maximum from
+  different points; after an Envelope or moving/time-history run it falls back
+  to the enveloped maxima (`Pos = env`). The `CodeCheck` table lists the class,
+  χ_LT and both interaction utilisations per member, with the governing check,
+  its position and OK/FAIL, and members are coloured green→red by utilisation.
 - **Optimise Section (EC3)** — *code-group design*, the way Robot picks a
   member size: choose a section family (UB, IPE, HEA/HEB, channels, hollow
   sections) and enter the governing design forces, and DynFrame runs the full

@@ -5422,6 +5422,17 @@ class RunAnalysis:
                 _set(o, "App::PropertyFloat", "ResVz", float(max(abs(v) for v in samp["Vz"])))
                 _set(o, "App::PropertyFloat", "ResUtil", float(util))
                 _set(o, "App::PropertyFloat", "ResL", float(L))
+                # signed per-station samples so the code check can verify the
+                # SIMULTANEOUS force state at each point along the member (the
+                # detailed verification Robot does), not just the independent
+                # component maxima. Only this single-combination solve stores a
+                # coherent force state; envelope/moving/time-history paths clear
+                # these so the code check falls back to their enveloped maxima.
+                _set(o, "App::PropertyFloatList", "ResSN", [float(v) for v in samp["N"]])
+                _set(o, "App::PropertyFloatList", "ResSVy", [float(v) for v in samp["Vy"]])
+                _set(o, "App::PropertyFloatList", "ResSVz", [float(v) for v in samp["Vz"]])
+                _set(o, "App::PropertyFloatList", "ResSMy", [float(v) for v in samp["My"]])
+                _set(o, "App::PropertyFloatList", "ResSMz", [float(v) for v in samp["Mz"]])
             except Exception:
                 pass
 
@@ -6486,21 +6497,44 @@ class CodeCheck:
             if db is None:
                 skipped += 1
                 continue
-            N = getattr(o, "ResN", 0.0)
-            My = getattr(o, "ResMy", 0.0); Mz = getattr(o, "ResMz", 0.0)
-            Vy = getattr(o, "ResVy", 0.0); Vz = getattr(o, "ResVz", 0.0)
             L = getattr(o, "ResL", 1000.0)
             zg = zgfac * db.get("_h", 0.0)        # load height above shear centre
-            r = _ec3_member_check(db, Fy, E, Gm, N, My, Mz, ky * L, kz * L,
-                                  klt * L, C1, Cm, Cm, Cm, gM0, gM1, susc, C2, zg,
-                                  Vy, Vz)
-            U = r["U"]
+            sN = list(getattr(o, "ResSN", []) or [])
+            sVy = list(getattr(o, "ResSVy", []) or [])
+            sVz = list(getattr(o, "ResSVz", []) or [])
+            sMy = list(getattr(o, "ResSMy", []) or [])
+            sMz = list(getattr(o, "ResSMz", []) or [])
+            ns = len(sN)
+            station_wise = (ns >= 2 and len(sVy) == ns and len(sVz) == ns
+                            and len(sMy) == ns and len(sMz) == ns)
+            if station_wise:
+                # detailed verification: check the SIMULTANEOUS force state at
+                # every station; the worst utilisation (and its position x/L)
+                # governs, like Robot's member verification along the length.
+                r = None; U = -1.0; gpos = 0.0; N = 0.0
+                for i in range(ns):
+                    ri = _ec3_member_check(db, Fy, E, Gm, sN[i], sMy[i], sMz[i],
+                                           ky * L, kz * L, klt * L, C1, Cm, Cm,
+                                           Cm, gM0, gM1, susc, C2, zg,
+                                           sVy[i], sVz[i])
+                    if ri["U"] > U:
+                        U = ri["U"]; r = ri; gpos = i / (ns - 1.0); N = sN[i]
+                posstr = "%.2fL" % gpos
+            else:
+                N = getattr(o, "ResN", 0.0)
+                My = getattr(o, "ResMy", 0.0); Mz = getattr(o, "ResMz", 0.0)
+                Vy = getattr(o, "ResVy", 0.0); Vz = getattr(o, "ResVz", 0.0)
+                r = _ec3_member_check(db, Fy, E, Gm, N, My, Mz, ky * L, kz * L,
+                                      klt * L, C1, Cm, Cm, Cm, gM0, gM1, susc,
+                                      C2, zg, Vy, Vz)
+                U = r["U"]
+                posstr = "env"
             if r["cls"] >= 4:
                 cls4 += 1
             verdict = "OK" if U <= 1.0 else "FAIL"
             rows.append((str(o.Label), _elem_section(o), r["cls"], N / 1e3,
                          r["Mmaj"] / 1e6, r["Mmin"] / 1e6, r["chiLT"],
-                         r["U61"], r["U62"], U, r["gov"], verdict))
+                         r["U61"], r["U62"], U, r["gov"], posstr, verdict))
             if U > worst:
                 worst = U; worstbar = str(o.Label)
             try:
@@ -6516,12 +6550,12 @@ class CodeCheck:
                    "moment shape: %s (C1=%.2f, Cm=%.2f)" % (gM0, gM1, vals["shape"], C1, Cm))
             heads = ["Member", "Section", "Class", "N (kN)", "My,maj (kNm)",
                      "Mz,min (kNm)", "chi_LT", "U (6.61)", "U (6.62)",
-                     "U (gov)", "Governs", "Verdict"]
-            for c, h in zip("ABCDEFGHIJKL", heads):
+                     "U (gov)", "Governs", "Pos", "Verdict"]
+            for c, h in zip("ABCDEFGHIJKLM", heads):
                 sh.set("%s2" % c, h)
             rr = 3
             for row in rows:
-                for c, v in zip("ABCDEFGHIJKL", row):
+                for c, v in zip("ABCDEFGHIJKLM", row):
                     sh.set("%s%d" % (c, rr), ("%.4g" % v if isinstance(v, float) else str(v)))
                 rr += 1
             _grp(doc, RES_GROUP).addObject(sh)
@@ -6541,8 +6575,14 @@ class CodeCheck:
              "Each member is classified (Class 1-4) and checked for cross-section "
              "resistance, flexural buckling (curve chosen automatically from the "
              "section), lateral-torsional buckling via the elastic critical moment "
-             "Mcr, and the Annex-B interaction equations 6.61/6.62. Members are "
-             "coloured green->red by utilisation; the 'CodeCheck' table lists class, "
+             "Mcr, the Annex-B interaction equations 6.61/6.62 and the 6.2.8 "
+             "shear-moment reduction. After a single-combination Calculate the "
+             "check is run at every station along each member on the SIMULTANEOUS "
+             "force state (N, My, Mz, Vy, Vz together) and the worst position "
+             "governs - the 'Pos' column gives that location as x/L (0=start, "
+             "1=end); after an Envelope or moving/time-history run it uses the "
+             "enveloped maxima instead (Pos='env'). Members are coloured "
+             "green->red by utilisation; the 'CodeCheck' table lists class, "
              "chi_LT and both interaction utilisations.%s\n\nSection properties use "
              "the idealised (sharp-corner) profile, so the torsion constant is "
              "marginally conservative versus a rolled section with root fillets." %
@@ -12359,6 +12399,7 @@ class Envelope:
             # store the governing envelope forces so a code check uses them
             Ngov = e["Nc"] if abs(e["Nc"]) >= abs(e["Nt"]) else e["Nt"]
             _set(o, "App::PropertyFloat", "ResN", float(Ngov))
+            _set(o, "App::PropertyFloatList", "ResSN", [])   # enveloped -> no coherent state
             _set(o, "App::PropertyFloat", "ResMy", float(e["My"]))
             _set(o, "App::PropertyFloat", "ResMz", float(e["Mz"]))
             _set(o, "App::PropertyFloat", "ResUtil", float(e["util"]))
@@ -12772,6 +12813,7 @@ class MovingLoad:
                 _set(o, "App::PropertyFloat", "ResVz", float(max(el["samp"]["Vz"])))
                 _set(o, "App::PropertyFloat", "ResUtil",
                      float(max(el["samp"]["Stress"]) / el["Fy"]) if el["Fy"] > 0 else 0.0)
+                _set(o, "App::PropertyFloatList", "ResSN", [])   # enveloped samples
             except Exception:
                 pass
 
@@ -13323,6 +13365,7 @@ class TimeHistory:
                 _set(o, "App::PropertyFloat", "ResVz", float(max(el["samp"]["Vz"])))
                 _set(o, "App::PropertyFloat", "ResN",
                      float(max(el["samp"]["N"], key=abs) if el["samp"]["N"] else 0.0))
+                _set(o, "App::PropertyFloatList", "ResSN", [])   # enveloped samples
             except Exception:
                 pass
         doc.openTransaction("DynFrame: time-history")

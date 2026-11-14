@@ -59,7 +59,10 @@ analysis); the St-Venant torsion check matches to a few percent.
 - **Section engine** reproduces published tables (IPE 300 A/I/W_el/W_pl/I_t/I_w;
   rectangle shape factor 1.5); **full EC3 check** classifies, picks buckling
   curves, LTB reduction, Annex-B interaction, and the **6.2.8 shear–moment**
-  reduction (reduced W_pl at high web shear, to the hand calc); the **section
+  reduction (reduced W_pl at high web shear, to the hand calc); the **detailed
+  station-wise check** evaluates the simultaneous force state along the member
+  and picks the governing position (verified: a linearly varying moment governs
+  at the max-moment end, x = 1.00 L, not a blend of maxima); the **section
   optimiser** returns the lightest family member that passes — verified against
   the invariant that every lighter size fails.
 - **Design** — EC2 slab reinforcement (≈757 mm²/m), punching (util 1.50), beam

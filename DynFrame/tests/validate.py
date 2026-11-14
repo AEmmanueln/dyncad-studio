@@ -387,16 +387,53 @@ got={}; C.info=lambda m,g=got: g.setdefault("msg",m)
 C.CodeCheck().Activated()
 cc=doc7.getObject("CodeCheck")
 cls=int(cc._cells.get("C3")); U=float(cc._cells.get("J3"))
-gov=cc._cells.get("K3"); verdict=cc._cells.get("L3")
+gov=cc._cells.get("K3"); pos=cc._cells.get("L3"); verdict=cc._cells.get("M3")
 # hand calc (IPE300 no-fillet A=5188, curve b minor): chi_z=0.452, Nb,z=551kN,
 # U = 400/551 = 0.726, minor-axis flexural buckling governs (Eq.6.62)
-print("  class=%d utilisation=%.3f governs=%s verdict=%s (hand calc U=0.726)"
-      %(cls,U,gov,verdict))
+print("  class=%d utilisation=%.3f governs=%s pos=%s verdict=%s (hand calc U=0.726)"
+      %(cls,U,gov,pos,verdict))
 # web is Class 2/3 under heavy compression (combined-loading alpha); plastic
 # resistance (<=Cl2) still applies and the column is axial-governed anyway
 assert cls in (2,3), cls
 assert abs(U-0.726)<0.02 and gov.startswith("Eq.6.6") and verdict=="OK", (U,gov,verdict)
+assert pos=="env", pos   # no per-station samples stored -> enveloped-maxima path
 print("EC3 code check OK")
+
+print("\n=== EC3 code check: station-wise (simultaneous forces along member) ===")
+# Same IPE300 column, but now with per-station samples as a single-combination
+# RunAnalysis stores them: linearly varying moment Mz from 0 at the start to
+# 120 kNm at the end, constant N=-100 kN. The detailed check must pick the END
+# station (x=L, max moment) as governing - not a blend of independent maxima.
+doc7s=Doc(); FreeCAD.ActiveDocument=doc7s
+obs=doc7s.addObject("Part::Feature","Col1s"); obs.Shape=Shape(0,[Vec(0,0,0),Vec(0,0,4000)])
+obs.IsBar=True; obs.Section="IPE 300"; obs.Material="Steel S235"
+obs.BarStart=Vec(0,0,0); obs.BarEnd=Vec(0,0,4000)
+_ns=11
+obs.ResN=-100000.0; obs.ResMy=0.0; obs.ResMz=120.0e6; obs.ResVy=0.0; obs.ResVz=0.0
+obs.ResL=4000.0
+obs.ResSN=[-100000.0]*_ns
+obs.ResSVy=[0.0]*_ns; obs.ResSVz=[0.0]*_ns; obs.ResSMy=[0.0]*_ns
+obs.ResSMz=[120.0e6*i/(_ns-1) for i in range(_ns)]   # 0 .. 120 kNm linearly
+C.form_dialog=lambda title,fields: {"gm0":1.0,"gm1":1.0,"ky":1.0,"kz":1.0,
+                                     "klt":1.0,"shape":"Uniform (conservative)"}
+got={}; C.info=lambda m,g=got: g.setdefault("msg",m)
+C.CodeCheck().Activated()
+ccs=doc7s.getObject("CodeCheck")
+Us=float(ccs._cells.get("J3")); poss=ccs._cells.get("L3")
+Mmaj_s=float(ccs._cells.get("E3"))     # reported governing major moment (kNm)
+# the governing station is the end (x=1.00L) where Mz=120 kNm; the reported
+# major moment there must be ~120, not an enveloped value, and pos must be 1.00L
+print("  governing U=%.3f at pos=%s, My,maj reported=%.1f kNm (expect pos=1.00L, M=120)"
+      %(Us,poss,Mmaj_s))
+assert poss=="1.00L", poss
+assert abs(Mmaj_s-120.0)<1.0, Mmaj_s
+# a mid station (x=0.5L, Mz=60) would give roughly half the moment utilisation,
+# so the end station must dominate -> U strictly greater than the mid check
+_rmid=C._ec3_member_check(C._section_db("IPE 300"),235.0,210000.0,80769.0,
+        N=-100000.0,My=0.0,Mz=60.0e6,Lcr_maj=4000.0,Lcr_min=4000.0,Lltb=4000.0,
+        C1=1.0,Cmy=1.0,Cmz=1.0,CmLT=1.0,gM0=1.0,gM1=1.0)
+assert Us>_rmid["U"], (Us,_rmid["U"])
+print("EC3 station-wise code check OK")
 
 print("\n=== EC3 LTB: long laterally-unrestrained beam, chi_LT < 1 ===")
 doc7b=Doc(); FreeCAD.ActiveDocument=doc7b

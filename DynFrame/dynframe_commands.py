@@ -2020,13 +2020,30 @@ def _member_cond(o):
 
 
 def _beam_T(n1, n2):
+    """Local triad of a bar element, CONSISTENT with the drawn profile
+    orientation (orient_placement): local y = the face-Y (depth/web) direction
+    of the swept profile, local z = x cross y (= -face-X). With the element
+    stiffness pairing deflection-along-y with Iz and deflection-along-z with
+    Iy, a horizontal member drawn web-vertical then bends about its STRONG
+    axis (Iz, moment Mz) under gravity, and about the weak axis (Iy, My) for
+    horizontal loads - matching the EC3 check's major = Mz convention. The
+    same reference choice as orient_placement (world-Z unless the member is
+    near-vertical, then world-X) keeps analysis and geometry agreeing for
+    every member direction."""
     import numpy as np
     x = np.array([n2.x - n1.x, n2.y - n1.y, n2.z - n1.z])
     L = float(np.linalg.norm(x))
     x = x / L
-    ref = np.array([0.0, 0.0, 1.0]) if abs(x @ np.array([0.0, 0.0, 1.0])) < 0.99 else np.array([0.0, 1.0, 0.0])
-    y = np.cross(ref, x); y /= np.linalg.norm(y)
-    z = np.cross(x, y)
+    wz = np.array([0.0, 0.0, 1.0])
+    ref = wz if abs(x @ wz) < 0.9 else np.array([1.0, 0.0, 0.0])
+    xf = np.cross(ref, x)                    # face-X (width) direction
+    nf = np.linalg.norm(xf)
+    if nf < 1e-9:
+        xf = np.cross(np.array([0.0, 1.0, 0.0]), x)
+        nf = np.linalg.norm(xf)
+    xf = xf / nf
+    y = np.cross(x, xf)                      # face-Y (depth/web) direction
+    z = np.cross(x, y)                       # = -xf
     R = np.array([x, y, z])
     T = np.zeros((12, 12))
     for bk in range(4):
@@ -5674,8 +5691,9 @@ RESULT_LABELS = {"Disp": "Displacement (mm)", "N": "N - axial force (N)",
                  "_plateWAxt": "Plate Wood-Armer top X (N.mm/mm)",
                  "_plateWAyt": "Plate Wood-Armer top Y (N.mm/mm)",
                  "_plateT1": "Plate M1 trajectories (N.mm/mm)",
-                 "_plateT2": "Plate M2 trajectories (N.mm/mm)"}
-RESULT_ORDER = ["Disp", "N", "Vy", "Vz", "Mx", "My", "Mz", "Stress"]
+                 "_plateT2": "Plate M2 trajectories (N.mm/mm)",
+                 "Ratio": "Ratio - EC3 code-check utilisation"}
+RESULT_ORDER = ["Disp", "N", "Vy", "Vz", "Mx", "My", "Mz", "Stress", "Ratio"]
 
 
 class ShowDiagram:
@@ -6435,6 +6453,49 @@ class DeflectionCheck:
               "%.0f" % worst if worst < 1e11 else "inf", denom))
 
 
+def _check_member_stored(o, db, Fy, E, Gm, ky, kz, klt, C1, Cm, C2, zgfac,
+                         susc, gM0, gM1):
+    """Full EC3 member check of a bar on its STORED analysis forces, for the
+    section database `db` (which may be a candidate section different from the
+    solved one - the code-group design loop). When the single-combination solve
+    left per-station samples (ResSN...), the SIMULTANEOUS force state at every
+    station is verified and the worst position governs; otherwise one check on
+    the enveloped maxima. Returns (U, r, posstr, N, ratios): the governing
+    utilisation, its full result dict, the position ('0.40L' / 'env'), the
+    axial force at the governing station, and the per-station utilisation list
+    ([] on the enveloped path)."""
+    L = getattr(o, "ResL", 1000.0)
+    zg = zgfac * db.get("_h", 0.0)        # load height above shear centre
+    sN = list(getattr(o, "ResSN", []) or [])
+    sVy = list(getattr(o, "ResSVy", []) or [])
+    sVz = list(getattr(o, "ResSVz", []) or [])
+    sMy = list(getattr(o, "ResSMy", []) or [])
+    sMz = list(getattr(o, "ResSMz", []) or [])
+    ns = len(sN)
+    if (ns >= 2 and len(sVy) == ns and len(sVz) == ns
+            and len(sMy) == ns and len(sMz) == ns):
+        # detailed verification: check the SIMULTANEOUS force state at every
+        # station; the worst utilisation (and its position x/L) governs, like
+        # Robot's member verification along the length.
+        r = None; U = -1.0; gpos = 0.0; N = 0.0; ratios = []
+        for i in range(ns):
+            ri = _ec3_member_check(db, Fy, E, Gm, sN[i], sMy[i], sMz[i],
+                                   ky * L, kz * L, klt * L, C1, Cm, Cm,
+                                   Cm, gM0, gM1, susc, C2, zg,
+                                   sVy[i], sVz[i])
+            ratios.append(ri["U"])
+            if ri["U"] > U:
+                U = ri["U"]; r = ri; gpos = i / (ns - 1.0); N = sN[i]
+        return U, r, "%.2fL" % gpos, N, ratios
+    N = getattr(o, "ResN", 0.0)
+    My = getattr(o, "ResMy", 0.0); Mz = getattr(o, "ResMz", 0.0)
+    Vy = getattr(o, "ResVy", 0.0); Vz = getattr(o, "ResVz", 0.0)
+    r = _ec3_member_check(db, Fy, E, Gm, N, My, Mz, ky * L, kz * L,
+                          klt * L, C1, Cm, Cm, Cm, gM0, gM1, susc,
+                          C2, zg, Vy, Vz)
+    return r["U"], r, "env", N, []
+
+
 class CodeCheck:
     def GetResources(self):
         return {"Pixmap": _icon("check"), "MenuText": "Steel Code Check (EC3)",
@@ -6490,6 +6551,7 @@ class CodeCheck:
         zgfac = self._LOADPOS.get(vals.get("loadpos", "At shear centre"), 0.0)
         susc = {"Auto": None, "Yes": True, "No (restrained)": False}[vals.get("susc", "Auto")]
         rows = []; worst = 0.0; worstbar = "-"; skipped = 0; cls4 = 0
+        ratio_map = {}        # member Name -> (per-station U list, governing U)
         doc.openTransaction("DynFrame: code check")
         for o in bars:
             db = _section_db(_elem_section(o))
@@ -6497,38 +6559,10 @@ class CodeCheck:
             if db is None:
                 skipped += 1
                 continue
-            L = getattr(o, "ResL", 1000.0)
-            zg = zgfac * db.get("_h", 0.0)        # load height above shear centre
-            sN = list(getattr(o, "ResSN", []) or [])
-            sVy = list(getattr(o, "ResSVy", []) or [])
-            sVz = list(getattr(o, "ResSVz", []) or [])
-            sMy = list(getattr(o, "ResSMy", []) or [])
-            sMz = list(getattr(o, "ResSMz", []) or [])
-            ns = len(sN)
-            station_wise = (ns >= 2 and len(sVy) == ns and len(sVz) == ns
-                            and len(sMy) == ns and len(sMz) == ns)
-            if station_wise:
-                # detailed verification: check the SIMULTANEOUS force state at
-                # every station; the worst utilisation (and its position x/L)
-                # governs, like Robot's member verification along the length.
-                r = None; U = -1.0; gpos = 0.0; N = 0.0
-                for i in range(ns):
-                    ri = _ec3_member_check(db, Fy, E, Gm, sN[i], sMy[i], sMz[i],
-                                           ky * L, kz * L, klt * L, C1, Cm, Cm,
-                                           Cm, gM0, gM1, susc, C2, zg,
-                                           sVy[i], sVz[i])
-                    if ri["U"] > U:
-                        U = ri["U"]; r = ri; gpos = i / (ns - 1.0); N = sN[i]
-                posstr = "%.2fL" % gpos
-            else:
-                N = getattr(o, "ResN", 0.0)
-                My = getattr(o, "ResMy", 0.0); Mz = getattr(o, "ResMz", 0.0)
-                Vy = getattr(o, "ResVy", 0.0); Vz = getattr(o, "ResVz", 0.0)
-                r = _ec3_member_check(db, Fy, E, Gm, N, My, Mz, ky * L, kz * L,
-                                      klt * L, C1, Cm, Cm, Cm, gM0, gM1, susc,
-                                      C2, zg, Vy, Vz)
-                U = r["U"]
-                posstr = "env"
+            U, r, posstr, N, ratios = _check_member_stored(
+                o, db, Fy, E, Gm, ky, kz, klt, C1, Cm, C2, zgfac, susc,
+                gM0, gM1)
+            ratio_map[str(o.Name)] = (list(ratios), float(U))
             if r["cls"] >= 4:
                 cls4 += 1
             verdict = "OK" if U <= 1.0 else "FAIL"
@@ -6561,6 +6595,39 @@ class CodeCheck:
             _grp(doc, RES_GROUP).addObject(sh)
         except Exception as e:
             FreeCAD.Console.PrintError("DynFrame: code-check table failed (%s)\n" % e)
+        # store the per-station utilisation on the solved state so the 'Ratio'
+        # result (Robot's code-check ratio diagram along each member) can be
+        # drawn by Show Result / Results Viewer like any force component.
+        try:
+            import json as _json
+            st = doc.getObject("AnalysisState")
+            if st is not None:
+                names = _json.loads(getattr(st, "StNames", "[]"))
+                sampst = _json.loads(getattr(st, "StSamp", "[]"))
+                if names and len(names) == len(sampst):
+                    rmax = 0.0; got = False
+                    for bi, nm in enumerate(names):
+                        nsamp = len(sampst[bi].get("N", [])) or 11
+                        rl, Ug = ratio_map.get(nm, (None, 0.0))
+                        if rl is None:
+                            rl = [0.0] * nsamp          # unchecked member
+                        elif len(rl) != nsamp:
+                            rl = [Ug] * nsamp           # enveloped: constant U
+                        else:
+                            got = True
+                        sampst[bi]["Ratio"] = [float(x) for x in rl]
+                        rmax = max(rmax, max(rl) if rl else 0.0)
+                        got = got or nm in ratio_map
+                    if got:
+                        _set(st, "App::PropertyString", "StSamp",
+                             _json.dumps(sampst))
+                        cm = _json.loads(getattr(st, "StCompMax", "{}"))
+                        cm["Ratio"] = float(rmax)
+                        _set(st, "App::PropertyString", "StCompMax",
+                             _json.dumps(cm))
+        except Exception as e:
+            FreeCAD.Console.PrintError("DynFrame: ratio diagram store failed "
+                                       "(%s)\n" % e)
         doc.commitTransaction(); doc.recompute()
         notes = ""
         if skipped:
@@ -6583,7 +6650,10 @@ class CodeCheck:
              "1=end); after an Envelope or moving/time-history run it uses the "
              "enveloped maxima instead (Pos='env'). Members are coloured "
              "green->red by utilisation; the 'CodeCheck' table lists class, "
-             "chi_LT and both interaction utilisations.%s\n\nSection properties use "
+             "chi_LT and both interaction utilisations, and 'Show Result / "
+             "Diagram' now offers 'Ratio' - the utilisation drawn ALONG each "
+             "member (red = 1.0, the code limit), like Robot's ratio map.%s\n\n"
+             "Section properties use "
              "the idealised (sharp-corner) profile, so the torsion constant is "
              "marginally conservative versus a rolled section with root fillets." %
              (len(rows), worst, worstbar,
@@ -6765,6 +6835,200 @@ class OptimiseSectionEC3:
              "reduction. The ranked table is written to the 'SectionOptimiser' "
              "spreadsheet. Class-4 sizes are reported but not auto-selected "
              "(effective-section reduction is not applied)." % (headline, listing))
+
+
+class DesignGroupsEC3:
+    """Robot's 'code group design' run on the SOLVED model: members are grouped
+    (the current selection as one group, else by their current section) and
+    each group gets ONE section - the lightest size of the group's family that
+    passes the full EN 1993-1-1 member check for EVERY member in the group, on
+    the stored analysis forces (station-wise where a single-combination solve
+    stored them). Optionally applies the chosen sections to the members."""
+
+    def GetResources(self):
+        return {"Pixmap": _icon("groups"),
+                "MenuText": "Code Group Design (EC3)",
+                "ToolTip": "Size the solved model the way Robot's code groups "
+                           "do: members sharing a section (or the selected "
+                           "members) form a group, and DynFrame finds the "
+                           "LIGHTEST size in that family for which every member "
+                           "of the group passes the full EN 1993-1-1 check on "
+                           "its stored forces. Reports current vs proposed size, "
+                           "the governing member and the mass saved; optionally "
+                           "applies the sections (re-run Calculate after).",
+                "Accel": "A, G"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        doc = FreeCAD.ActiveDocument
+        bars = [o for o in doc.Objects
+                if is_analysis_elem(o) and hasattr(o, "ResN")]
+        if not bars:
+            info("Run Calculate first - the group design sizes each group for "
+                 "the stored member forces.")
+            return
+        try:
+            import FreeCADGui
+            picked = set(id(x) for x in FreeCADGui.Selection.getSelection())
+            sel = [o for o in bars if id(o) in picked]
+        except Exception:
+            sel = []
+        vals = form_dialog("Code Group Design (EN 1993-1-1)", [
+            {"key": "_i", "kind": "info", "default":
+             "Members are grouped %s. Every size of each group's section family "
+             "is checked against ALL the group's members (station-wise detailed "
+             "check where available) and the lightest passing size is proposed. "
+             "Forces are from the last solve - after applying new sections, run "
+             "Calculate again and re-check (section changes redistribute "
+             "forces in a frame)." %
+             ("from the current selection (one group)" if sel
+              else "by their current section")},
+            {"key": "ky", "label": "Buckling length factor, major axis",
+             "kind": "float", "default": 1.0},
+            {"key": "kz", "label": "Buckling length factor, minor axis",
+             "kind": "float", "default": 1.0},
+            {"key": "klt", "label": "LTB length factor (restraint spacing/L)",
+             "kind": "float", "default": 1.0},
+            {"key": "shape", "label": "Moment distribution", "kind": "combo",
+             "options": list(CodeCheck._SHAPES.keys()),
+             "default": "Uniform (conservative)"},
+            {"key": "susc", "label": "LTB-susceptible (torsion)",
+             "kind": "combo", "options": ["Auto", "Yes", "No (restrained)"],
+             "default": "Auto"},
+            {"key": "loadpos", "label": "LTB load position", "kind": "combo",
+             "options": list(CodeCheck._LOADPOS.keys()),
+             "default": "At shear centre"},
+            {"key": "gm0", "label": "gamma_M0", "kind": "float", "default": 1.0},
+            {"key": "gm1", "label": "gamma_M1", "kind": "float", "default": 1.0},
+            {"key": "target", "label": "Max allowable utilisation",
+             "kind": "float", "default": 1.0},
+            {"key": "apply", "label": "Result", "kind": "combo",
+             "options": ["Report only",
+                         "Apply chosen sections to the members"],
+             "default": "Report only"},
+        ])
+        if not vals:
+            return
+        ky = max(vals["ky"], 1e-6); kz = max(vals["kz"], 1e-6)
+        klt = max(vals["klt"], 1e-6)
+        C1, Cm, C2 = CodeCheck._SHAPES.get(vals["shape"], (1.0, 1.0, 0.0))
+        zgfac = CodeCheck._LOADPOS.get(vals.get("loadpos", "At shear centre"), 0.0)
+        susc = {"Auto": None, "Yes": True,
+                "No (restrained)": False}[vals.get("susc", "Auto")]
+        gM0 = max(vals["gm0"], 1e-6); gM1 = max(vals["gm1"], 1e-6)
+        target = max(vals["target"], 1e-6)
+        do_apply = str(vals.get("apply", "")).startswith("Apply")
+
+        fam_of = {}
+        for fam, lst in profiles.families().items():
+            for (nm, _b) in lst:
+                fam_of[nm] = fam
+
+        groups = {}
+        if sel:
+            groups["Selection"] = sel
+        else:
+            for o in bars:
+                groups.setdefault(_elem_section(o), []).append(o)
+
+        def group_check(members, db):
+            """(all_pass, worst U, governing member label, its position)."""
+            wU = -1.0; wM = "-"; wpos = "-"; allok = True
+            for o in members:
+                E, Gm, Fy, _rho = _material(_elem_material(o))
+                U, r, pos, _N, _rl = _check_member_stored(
+                    o, db, Fy, E, Gm, ky, kz, klt, C1, Cm, C2, zgfac,
+                    susc, gM0, gM1)
+                if U > wU:
+                    wU = U; wM = str(o.Label); wpos = pos
+                if U > target or r["cls"] >= 4:
+                    allok = False
+            return allok, wU, wM, wpos
+
+        rows = []; applied = 0; skipped = 0; saved = 0.0
+        for gname, members in sorted(groups.items()):
+            cursec = _elem_section(members[0])
+            fam = fam_of.get(cursec)
+            curdb = _section_db(cursec)
+            if fam is None or curdb is None:
+                skipped += 1
+                continue
+            # the group's current state (each member on its own section)
+            _ok0, U0, gov0, _p0 = group_check(members, curdb)
+            cand = []
+            for (nm, _b) in profiles.families().get(fam, []):
+                d = _section_db(nm)
+                if d is not None and d.get("A", 0.0) > 0.0:
+                    cand.append((d["A"], nm))
+            cand.sort()
+            best = None; bestU = 0.0; bestgov = "-"; bestpos = "-"
+            for (_a, nm) in cand:
+                d = _section_db(nm)
+                ok, wU, wM, wpos = group_check(members, d)
+                if ok:
+                    best = nm; bestU = wU; bestgov = wM; bestpos = wpos
+                    break
+            glen = sum(getattr(o, "ResL", 0.0) for o in members) / 1e3  # m
+            if best is None:
+                rows.append((gname, len(members), fam, cursec, U0, "-none "
+                             "passes-", 0.0, 0.0, gov0, "-", "FAIL"))
+                continue
+            dm = (curdb["A"] - _section_db(best)["A"]) * 7.85e-3   # kg/m saved
+            saved += dm * glen
+            rows.append((gname, len(members), fam, cursec, U0, best,
+                         _section_db(best)["A"] * 7.85e-3, bestU, bestgov,
+                         bestpos, "OK"))
+            if do_apply:
+                for o in members:
+                    try:
+                        o.Section = best; applied += 1
+                    except Exception:
+                        pass
+        if not rows:
+            info("No group could be designed (sections not in the profile "
+                 "library)." if skipped else "Nothing to design.")
+            return
+
+        doc.openTransaction("DynFrame: group design")
+        try:
+            sh = (doc.getObject("GroupDesign")
+                  or doc.addObject("Spreadsheet::Sheet", "GroupDesign"))
+            sh.Label = "GroupDesign"; sh.clearAll()
+            sh.set("A1", "CODE GROUP DESIGN (EN 1993-1-1) - target U <= %.2f, "
+                   "forces from the last solve" % target)
+            heads = ["Group", "Members", "Family", "Current", "U now",
+                     "Proposed", "kg/m", "U proposed", "Governing member",
+                     "Pos", "Verdict"]
+            for c, h in zip("ABCDEFGHIJK", heads):
+                sh.set("%s2" % c, h)
+            rr = 3
+            for row in rows:
+                for c, v in zip("ABCDEFGHIJK", row):
+                    sh.set("%s%d" % (c, rr),
+                           ("%.3g" % v if isinstance(v, float) else str(v)))
+                rr += 1
+            _grp(doc, RES_GROUP).addObject(sh)
+        except Exception as e:
+            FreeCAD.Console.PrintError("DynFrame: group-design table failed "
+                                       "(%s)\n" % e)
+        doc.commitTransaction(); doc.recompute()
+        lines = "\n".join(
+            "   %-18s (%d bars, %s): %s (U=%.2f) -> %s (U=%.2f, governs: %s)"
+            % (g, n, fam, cur, U0, new, Un, gov)
+            for (g, n, fam, cur, U0, new, _m, Un, gov, _p, _v) in rows[:10])
+        info("Code group design complete (EN 1993-1-1).\n\n%s\n\n"
+             "Total steel saved vs current sections: %.0f kg.%s\n\n"
+             "Each group's family was swept lightest-first and every member "
+             "checked on its stored forces (station-wise detailed check where "
+             "available); the first size that passes for the WHOLE group is "
+             "proposed. See the 'GroupDesign' table.%s"
+             % (lines, saved,
+                ("\nApplied to %d member(s) - run Calculate again: changing "
+                 "sections redistributes forces." % applied) if do_apply else "",
+                ("\n%d group(s) skipped (section not in the library)."
+                 % skipped) if skipped else ""))
 
 
 class PlateReinfEC2:
@@ -12793,7 +13057,8 @@ class MovingLoad:
                 nn = -fend[0]
                 nr = nrange[id(el)]
                 nr[0] = min(nr[0], nn); nr[1] = max(nr[1], nn)
-                mymax = max(abs(v) for v in samp["My"])
+                mymax = max(max(abs(v) for v in samp["My"]),
+                            max(abs(v) for v in samp["Mz"]))
                 if mymax > peak_my:
                     peak_my = mymax; u_gov = u.copy()
 
@@ -12839,7 +13104,11 @@ class MovingLoad:
                               _tube_radius(msize),
                               "Moving load %s %s" % (vals["dir"], train), comp_max)
         doc.commitTransaction()
-        _render_result(doc, "My", scale_mult=1.0)
+        # show the dominant bending envelope (gravity lanes bend the strong
+        # axis = Mz; a transverse lane would load My)
+        _mshow = "Mz" if comp_max.get("Mz", 0.0) >= comp_max.get("My", 0.0) \
+            else "My"
+        _render_result(doc, _mshow, scale_mult=1.0)
 
         # envelope table
         try:
@@ -12866,12 +13135,13 @@ class MovingLoad:
             FreeCAD.Console.PrintError("DynFrame: moving env table failed (%s)\n" % ex)
         doc.recompute()
         info("Moving load envelope done: %s %s stepped over %d positions on a "
-             "%d-member lane.\n\nPeak |My| anywhere = %.0f N.mm; showing the My "
+             "%d-member lane.\n\nPeak |%s| anywhere = %.0f N.mm; showing the %s "
              "envelope (worst moment at every section) with the deformed shape at "
              "the governing position. Per-member worst forces are in the "
              "'MovingEnvelope' table, and the envelope is stored so 'Steel Code "
              "Check' verifies against it."
-             % (train, vals["dir"], NSTA, len(laneels), comp_max["My"]))
+             % (train, vals["dir"], NSTA, len(laneels), _mshow,
+                comp_max[_mshow], _mshow))
 
 
 def _parse_motion(text, fmt="Auto", dt=0.02):
@@ -13506,6 +13776,8 @@ def _store_analysis_state(doc, nodes, u, elems, dscale, msize, radius, run_name,
          for el in elems]))
     _set(st, "App::PropertyString", "StSections",
          json.dumps([str(el.get("sec", "")) for el in elems]))
+    _set(st, "App::PropertyString", "StNames",
+         json.dumps([str(getattr(el.get("o", None), "Name", "")) for el in elems]))
     _set(st, "App::PropertyString", "StCompMax",
          json.dumps({k: float(comp_max.get(k, 0.0)) for k in ["Disp"] + DIAG_KINDS}))
     try:
@@ -13582,7 +13854,9 @@ def _render_result(doc, kind, scale_mult=1.0, solid=None):
     nodes, u, elpairs, base, msize, radius, samp, sections, compmax = state
     if solid is None:
         solid = _SOLID_BEAMS
-    kind = kind if kind in (["Disp"] + DIAG_KINDS) else "Disp"
+    kind = kind if kind in (["Disp", "Ratio"] + DIAG_KINDS) else "Disp"
+    if kind == "Ratio" and float(compmax.get("Ratio", 0.0)) <= 1e-12:
+        kind = "Disp"            # no code check stored yet - show displacement
     if kind == "Disp":
         scale = base * max(float(scale_mult), 0.0)
         perbar0, _ = _deformed_points(nodes, u, elpairs, scale)
@@ -13596,6 +13870,10 @@ def _render_result(doc, kind, scale_mult=1.0, solid=None):
             vals = samp[bi].get(kind, []) if bi < len(samp) else []
             perbar.append((pts, [abs(v) for v in vals]))
         vmax = float(compmax.get(kind, 0.0))
+        if kind == "Ratio":
+            # anchor the colour scale at 1.0 so full red means the code limit
+            # is reached (Robot's ratio map); beyond it the scale stretches
+            vmax = max(vmax, 1.0)
         title = RESULT_LABELS.get(kind, kind); label = "%s result" % kind
     # clear the previously shown result (contour, legend, peak label) and hide
     # any mode/buckling/seismic shape
@@ -15050,6 +15328,7 @@ _add("DynFrame_GMSpectrum", GMSpectrum)
 _add("DynFrame_TimeHistory", TimeHistory)
 _add("DynFrame_CodeCheck", CodeCheck)
 _add("DynFrame_OptimiseSectionEC3", OptimiseSectionEC3)
+_add("DynFrame_DesignGroupsEC3", DesignGroupsEC3)
 _add("DynFrame_ShowDiagram", ShowDiagram)
 _add("DynFrame_ResultsViewer", ResultsViewer)
 _add("DynFrame_ClearAnalysis", ClearAnalysis)

@@ -381,6 +381,23 @@ spreadsheets at the root.
   to the enveloped maxima (`Pos = env`). The `CodeCheck` table lists the class,
   χ_LT and both interaction utilisations per member, with the governing check,
   its position and OK/FAIL, and members are coloured green→red by utilisation.
+  After a check, *Show Result / Diagram* offers **Ratio** — the utilisation
+  drawn **along** each member as a colour contour with red anchored at 1.0
+  (the code limit), exactly like Robot's ratio map.
+- **Code Group Design (EC3)** — Robot's *code groups* on the solved model:
+  members sharing a section (or the current selection) form a group, and
+  DynFrame sweeps the group's section family lightest-first until **every
+  member of the group passes** the full member check on its stored forces
+  (station-wise where available). The `GroupDesign` table reports current vs
+  proposed size, the governing member and its position, and the steel saved;
+  optionally the chosen sections are applied to the members (re-run Calculate
+  after — section changes redistribute forces).
+- **Members bend about their drawn axes** — the analysis local axes follow the
+  swept profile exactly: a horizontal member drawn web-vertical bends about
+  its **strong axis under gravity** (moment `Mz`, the EC3 major axis) and
+  about the weak axis (`My`) for horizontal loads; columns resist with the
+  axes they are drawn with. (Validated against closed-form deflections on the
+  13×-different I of an IPE 300 in both planes — see VALIDATION.md.)
 - **Optimise Section (EC3)** — *code-group design*, the way Robot picks a
   member size: choose a section family (UB, IPE, HEA/HEB, channels, hollow
   sections) and enter the governing design forces, and DynFrame runs the full

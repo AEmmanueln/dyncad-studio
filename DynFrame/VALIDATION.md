@@ -45,7 +45,11 @@ analysis); the St-Venant torsion check matches to a few percent.
 - **Static FE** — cantilever/simply-supported/fixed beams, both planes, all six
   force components and load-case superposition, exact (wL⁴/8EI, 5wL⁴/384EI,
   wL²/8, wL²/12); bar loads exact (PL³/3EI, PL, UDL, triangular); releases give
-  the propped cantilever (wL²/8).
+  the propped cantilever (wL²/8). **Axis convention**: the element triad follows
+  the drawn profile, so a gravity-loaded IPE 300 beam deflects PL³/3EI_strong
+  (0.1590 vs 0.1588 exact, moment in Mz = the EC3 major axis) and a horizontal
+  load gives PL³/3EI_weak (2.1070 vs 2.1069) — a 13× stiffness ratio caught to
+  three figures in both planes, for beams and columns.
 - **Modal** f₁ = (1.875²/2π)√(EI/ρAL⁴) to 4 figures; **buckling** P_cr = π²EI/(2L)²
   (ratio 1.000); **P-Δ** the 1/(1−P/P_cr) amplification.
 - **Dynamics** — time-history (Newmark-β) DAF = 2.0, period T₁, heavy-damping
@@ -62,9 +66,13 @@ analysis); the St-Venant torsion check matches to a few percent.
   reduction (reduced W_pl at high web shear, to the hand calc); the **detailed
   station-wise check** evaluates the simultaneous force state along the member
   and picks the governing position (verified: a linearly varying moment governs
-  at the max-moment end, x = 1.00 L, not a blend of maxima); the **section
-  optimiser** returns the lightest family member that passes — verified against
-  the invariant that every lighter size fails.
+  at the max-moment end, x = 1.00 L, not a blend of maxima; a solved SS beam
+  governs at 0.50 L with the **ratio diagram** 0→max→0 along the member); the
+  **section optimiser** returns the lightest family member that passes —
+  verified against the invariant that every lighter size fails; **code group
+  design** sizes a group for its governing member (verified: the proposed size
+  passes both members, every lighter size fails the loaded one, and the
+  sections are applied).
 - **Design** — EC2 slab reinforcement (≈757 mm²/m), punching (util 1.50), beam
   (K=0.137, A_s≈1486; shear A_sw/s≈682), column N-M (M_Rd=246 at N=960 kN),
   slenderness (λ=52, M₂≈48), biaxial (a=1.25), pad footing, combined footing;

@@ -453,7 +453,10 @@ print("  chi_LT=%.3f utilisation=%.3f (My=50kNm, expect chi_LT~0.5, U~0.67)"%(ch
 assert 0.4<chilt<0.65 and 0.55<U2<0.85, (chilt,U2)
 print("EC3 LTB OK")
 
-print("\n=== Member release: fixed-fixed beam + release My at end j -> propped cantilever ===")
+print("\n=== Member release: fixed-fixed beam + release Mz at end j -> propped cantilever ===")
+# a horizontal beam drawn web-vertical bends about its STRONG axis under
+# gravity: the bending plane is local x-y (moment Mz, rotation rz), so the
+# moment release for the gravity plane is rz.
 def run_beam_release(relj):
     d=Doc(); FreeCAD.ActiveDocument=d
     b=d.addObject("Part::Feature","B1"); b.Shape=Shape(0,[Vec(0,0,0),Vec(2000,0,0)])
@@ -465,15 +468,17 @@ def run_beam_release(relj):
     C.info=lambda m: None
     C.get_item=lambda t,l,items,cur=0:("All loads",True)
     C.RunAnalysis().Activated(run_pick="All loads", include_sw=False)
-    return getattr(b,"ResMy",0.0)
+    return getattr(b,"ResMz",0.0)
 m_fixed=run_beam_release(None)
-m_rel  =run_beam_release("000010")   # release ry (My) at end j
-print("fixed-fixed max|My| = %.0f (expect wL^2/12 = %.0f)"%(m_fixed, 10*2000**2/12))
-print("released   max|My| = %.0f (expect wL^2/8  = %.0f)"%(m_rel, 10*2000**2/8))
+m_rel  =run_beam_release("000001")   # release rz (Mz) at end j
+print("fixed-fixed max|Mz| = %.0f (expect wL^2/12 = %.0f)"%(m_fixed, 10*2000**2/12))
+print("released   max|Mz| = %.0f (expect wL^2/8  = %.0f)"%(m_rel, 10*2000**2/8))
 assert abs(m_fixed-10*2000**2/12)<1e3 and abs(m_rel-10*2000**2/8)<1e3, (m_fixed,m_rel)
 print("member release OK")
 
-print("\n=== Nodal moment: cantilever tip moment My -> constant member moment ===")
+print("\n=== Nodal moment: cantilever tip moment about global Y -> constant member moment ===")
+# a tip moment about global Y bends the X-beam in its vertical (web) plane =
+# STRONG-axis bending = local Mz under the geometry-consistent triad.
 d8=Doc(); FreeCAD.ActiveDocument=d8
 bb=d8.addObject("Part::Feature","B1"); bb.Shape=Shape(0,[Vec(0,0,0),Vec(1000,0,0)])
 bb.IsBar=True; bb.Section="IPE 200"; bb.Material="Steel S235"; bb.BarStart=Vec(0,0,0); bb.BarEnd=Vec(1000,0,0)
@@ -482,9 +487,9 @@ nl=d8.addObject("Part::Feature","NL"); nl.LoadType="Nodal"; nl.LoadCase="DL1"
 nl.LoadVec=Vec(0,0,0); nl.LoadMom=Vec(0,2.0e6,0); nl.AtNode=Vec(1000,0,0)
 C.info=lambda m: None; C.get_item=lambda t,l,items,cur=0:("All loads",True)
 C.RunAnalysis().Activated(run_pick="All loads", include_sw=False)
-resmy=getattr(bb,"ResMy",0.0)
-print("member max|My| = %.0f (expect applied My = 2.0e6, constant)"%resmy)
-assert abs(resmy-2.0e6)<1e3, resmy
+resmz=getattr(bb,"ResMz",0.0)
+print("member max|Mz| = %.0f (expect applied M = 2.0e6, constant)"%resmz)
+assert abs(resmz-2.0e6)<1e3, resmz
 print("nodal moment OK")
 
 print("\n=== Envelope: max across ULS and SLS combos ===")
@@ -500,16 +505,136 @@ for case,w in (("DL1",-3.0),("LL1",-5.0)):
 C._set_combos(d9,[("ULS1","1.35*DL1 + 1.5*LL1"),("SLS1","1.0*DL1 + 1.0*LL1")])
 C.info=lambda m: None
 C.Envelope().Activated()
-envmy=getattr(bb,"ResMy",0.0)  # after envelope, stored = max across combos
+envmz=getattr(bb,"ResMz",0.0)  # after envelope, stored = max across combos
 # ULS mid moment (SS, no self-weight effect since Live+Dead only here; sw dead factor applies)
 # w_uls = 1.35*3 + 1.5*5 = 4.05+7.5=11.55 N/mm (+ self-weight*1.35, small). mid M=w*L^2/8
 w_uls=1.35*3+1.5*5
 # fixed-fixed end moment = w L^2/12; envelope keeps the ULS (larger) value
-print("envelope max|My| = %.0f  (>= ULS wL^2/12 = %.0f; self-weight adds a little)"%(envmy, w_uls*2000**2/12))
+# (gravity bending of the X-beam is strong-axis = Mz)
+print("envelope max|Mz| = %.0f  (>= ULS wL^2/12 = %.0f; self-weight adds a little)"%(envmz, w_uls*2000**2/12))
 ev=d9.getObject("Envelope")
 print("Envelope table present:", ev is not None and "A3" in ev._cells)
-assert envmy >= w_uls*2000**2/12 - 1 and ev is not None  # at least the ULS value
+assert envmz >= w_uls*2000**2/12 - 1 and ev is not None  # at least the ULS value
 print("envelope OK")
+
+print("\n=== Axis convention: analysis bends members about the DRAWN axes ===")
+# The profile is swept with face-Y (the depth/web) vertical for horizontal
+# members and along +X for columns (orient_placement). The solver triad now
+# follows the same mapping, so a gravity beam bends about its STRONG axis
+# (Iz, moment Mz) - the 13x-stiffer plane for an IPE 300 - and a horizontal
+# load bends the weak axis (Iy, My). Robot behaves the same way.
+_saved_spn = C._section_props_from_name       # the harness mock, restored below
+C._section_props_from_name = lambda name: (lambda d: None if d is None else
+    (d["A"], d["Iy"], d["Iz"], d["It"],
+     max(d["hx"], d["hy"]) / 2.0))(C._section_db(name))
+_dbx = C._section_db("IPE 300")
+_Eax = 210000.0; _Pax = 1000.0; _Lax = 2000.0
+def _axis_case(end, load):
+    d = Doc(); FreeCAD.ActiveDocument = d
+    b = d.addObject("Part::Feature", "Bm"); b.Shape = Shape(0, [Vec(0, 0, 0), Vec(*end)])
+    b.IsBar = True; b.Section = "IPE 300"; b.Material = "Steel S235"
+    b.BarStart = Vec(0, 0, 0); b.BarEnd = Vec(*end)
+    s = d.addObject("Part::Feature", "S"); s.Restrain = "111111"; s.AtNode = Vec(0, 0, 0)
+    C._apply_point(d, "DL1", Vec(*load), 1.0, [b])
+    g = {}; C.info = lambda m, gg=g: gg.setdefault("msg", m)
+    C.RunAnalysis().Activated(run_pick="All loads", include_sw=False,
+                              second_order=False)
+    md = float(re.search(r"Max displacement:\s*([\d.]+)", g["msg"]).group(1))
+    return md, getattr(b, "ResMy", 0.0), getattr(b, "ResMz", 0.0)
+_dstr = _Pax * _Lax ** 3 / (3 * _Eax * _dbx["Iz"])     # strong-axis tip defl
+_dwk = _Pax * _Lax ** 3 / (3 * _Eax * _dbx["Iy"])      # weak-axis tip defl
+md, my_, mz_ = _axis_case((_Lax, 0, 0), (0, 0, -_Pax))   # beam, gravity
+assert abs(md / _dstr - 1.0) < 0.01 and mz_ > 10 * max(my_, 1.0), (md, _dstr, my_, mz_)
+md2, my2, mz2 = _axis_case((_Lax, 0, 0), (0, -_Pax, 0))  # beam, horizontal
+assert abs(md2 / _dwk - 1.0) < 0.01 and my2 > 10 * max(mz2, 1.0), (md2, _dwk)
+md3, my3, mz3 = _axis_case((0, 0, _Lax), (_Pax, 0, 0))   # column, X push
+assert abs(md3 / _dstr - 1.0) < 0.01 and mz3 > 10 * max(my3, 1.0), (md3, _dstr)
+print("  gravity beam: defl=%.4f (strong-axis exact %.4f), moment in Mz;"
+      % (md, _dstr))
+print("  horizontal load: defl=%.4f (weak-axis exact %.4f), moment in My;"
+      % (md2, _dwk))
+print("  column +X: strong axis (Mz) - all three match the drawn orientation")
+print("axis convention OK (gravity = strong axis, like the drawn member)")
+
+print("\n=== Ratio result: code-check utilisation drawn along the members ===")
+# solve a simply-supported gravity beam, run the code check, and the stored
+# state gains a per-station 'Ratio' field: zero at the pins, maximum at
+# midspan (the parabolic moment), rendered like any force diagram.
+dR = Doc(); FreeCAD.ActiveDocument = dR
+bR = dR.addObject("Part::Feature", "RatioBeam"); bR.Shape = Shape(0, [Vec(0, 0, 0), Vec(4000, 0, 0)])
+bR.IsBar = True; bR.Section = "IPE 300"; bR.Material = "Steel S235"
+bR.BarStart = Vec(0, 0, 0); bR.BarEnd = Vec(4000, 0, 0)
+dR.addObject("Part::Feature", "SA").Restrain = "111101"; dR.Objects[-1].AtNode = Vec(0, 0, 0)
+dR.addObject("Part::Feature", "SB").Restrain = "011101"; dR.Objects[-1].AtNode = Vec(4000, 0, 0)
+ldR = dR.addObject("Part::Feature", "L"); ldR.LoadType = "Member"
+ldR.LoadCase = "DL1"; ldR.OnMember = "RatioBeam"; ldR.LoadVec = Vec(0, 0, -20.0)
+C.info = lambda m: None
+C.get_item = lambda t, l, items, cur=0: ("All loads", True)
+C.RunAnalysis().Activated(run_pick="All loads", include_sw=False)
+C.form_dialog = lambda title, fields: {"gm0": 1.0, "gm1": 1.0, "ky": 1.0,
+                                       "kz": 1.0, "klt": 1.0,
+                                       "shape": "Uniform (conservative)"}
+C.CodeCheck().Activated()
+ccR = dR.getObject("CodeCheck")
+UR = float(ccR._cells.get("J3")); posR = ccR._cells.get("L3")
+assert posR == "0.50L", posR            # SS + UDL governs at midspan
+import json as _jn
+stR = dR.getObject("AnalysisState")
+sampR = _jn.loads(stR.StSamp); cmR = _jn.loads(stR.StCompMax)
+ratR = sampR[0]["Ratio"]
+assert len(ratR) == 11 and abs(max(ratR) - UR) < 5e-4, (len(ratR), max(ratR), UR)
+assert ratR.index(max(ratR)) == 5, ratR          # peak at midspan station
+assert ratR[0] < 0.2 * max(ratR), ratR           # ~zero at the pin
+assert abs(cmR["Ratio"] - UR) < 5e-4             # (table cell is %.4g rounded)
+assert C._render_result(dR, "Ratio") is True
+assert [o for o in dR.Objects if str(getattr(o, "DiagKind", "")) == "Ratio"]
+assert any(k == "Ratio" for (_l, k, knd) in C._result_list(dR) if knd == "diag")
+print("  SS beam ratio: U=%.3f at 0.50L, Ratio samples 0->max->0 along the "
+      "member, rendered + listed as a result" % UR)
+print("ratio diagram OK")
+
+print("\n=== Code group design: one section per group, worst member governs ===")
+# two bars share the lightest UB size; GB is overloaded on it. The group gets
+# the lightest UB that passes BOTH members; every lighter size must fail GB.
+dG = Doc(); FreeCAD.ActiveDocument = dG
+def _gbar(nm, mz):
+    b = dG.addObject("Part::Feature", nm); b.Shape = Shape(0, [Vec(0, 0, 0), Vec(3000, 0, 0)])
+    b.IsBar = True; b.Section = "UB 203x133x25"; b.Material = "Steel S235"
+    b.BarStart = Vec(0, 0, 0); b.BarEnd = Vec(3000, 0, 0)
+    b.ResN = 0.0; b.ResMy = 0.0; b.ResMz = mz; b.ResVy = 0.0; b.ResVz = 0.0
+    b.ResL = 3000.0
+    return b
+gA = _gbar("GA", 15.0e6); gB = _gbar("GB", 150.0e6)
+C.form_dialog = lambda title, fields: {
+    "ky": 1.0, "kz": 1.0, "klt": 1.0, "shape": "Uniform (conservative)",
+    "susc": "No (restrained)", "loadpos": "At shear centre", "gm0": 1.0,
+    "gm1": 1.0, "target": 1.0, "apply": "Apply chosen sections to the members"}
+gotG = {}; C.info = lambda m, g=gotG: g.setdefault("msg", m)
+C.DesignGroupsEC3().Activated()
+gsh = dG.getObject("GroupDesign")
+assert gsh is not None and gsh._cells.get("K3") == "OK", gsh and gsh._cells.get("K3")
+proposed = gsh._cells.get("F3"); govm = gsh._cells.get("I3")
+assert proposed and proposed.startswith("UB "), proposed
+assert govm == "GB", govm                       # the loaded bar governs
+assert gA.Section == proposed and gB.Section == proposed   # applied
+# invariant: proposed passes GB, every lighter UB fails GB
+import dynframe_profiles as _PR
+_pdb = C._section_db(proposed)
+for (_nmG, _bG) in _PR.families()["I-beam (UB)"]:
+    _dG = C._section_db(_nmG)
+    if _dG is None or _dG["A"] > _pdb["A"]:
+        continue
+    _UG, _rG, _pG, _NG, _rlG = C._check_member_stored(
+        gB, _dG, 235.0, 210000.0, 80769.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0,
+        0.0, False, 1.0, 1.0)
+    if _dG["A"] < _pdb["A"]:
+        assert _UG > 1.0 or _rG["cls"] >= 4, (_nmG, _UG)
+    elif _nmG == proposed:
+        assert _UG <= 1.0 and _rG["cls"] < 4, (_nmG, _UG)
+print("  group of 2 on UB 203x133x25 -> %s (governing member GB); all "
+      "lighter UB sizes fail GB; sections applied" % proposed)
+print("code group design OK")
+C._section_props_from_name = _saved_spn       # back to the harness mock
 
 print("\n=== Buckling: cantilever column, axial P -> critical factor ===")
 import math
@@ -1154,14 +1279,15 @@ assert abs(H.x-phiP)/phiP<0.01 and abs(H.y)<1e-9 and abs(H.z)<1e-9, (H.x,phiP)
 assert abs(FreeCAD.Vector(ehf[0].AtNode).z-Hc)<1.0   # applied at the column top
 print("EC3 sway imperfection OK")
 
-print("\n=== Moving load envelope: SS beam, max My = PL/4 ===")
+print("\n=== Moving load envelope: SS beam, max M = PL/4 ===")
 C._section_props_from_name=lambda name:(2000.0,1.0e6,1.0e6,2.0e6,100.0)
 dM=Doc(); FreeCAD.ActiveDocument=dM
 Lb=6000.; Pm=100000.
 bm=dM.addObject("Part::Feature","Gird"); bm.Shape=Shape(0,[Vec(0,0,0),Vec(Lb,0,0)])
 bm.IsBar=True; bm.Section="IPE 200"; bm.Material="Steel S235"
 bm.BarStart=Vec(0,0,0); bm.BarEnd=Vec(Lb,0,0)
-# simply supported for in-plane (X-Z) bending: dz fixed both ends, ry free
+# simply supported for GRAVITY bending: deflection along global Z, rotation
+# about global Y (free ry). Locally this is the STRONG-axis plane (moment Mz).
 dM.addObject("Part::Feature","SA").Restrain="111101"; dM.Objects[-1].AtNode=Vec(0,0,0)
 dM.addObject("Part::Feature","SB").Restrain="011101"; dM.Objects[-1].AtNode=Vec(Lb,0,0)
 C.selected_elems=lambda: [bm]
@@ -1169,18 +1295,18 @@ C.form_dialog=lambda title,fields:{"P":Pm,"dir":"-Z (gravity)","naxle":1,
                                    "spacing":1500.0,"nsta":21}
 gotM={}; C.info=lambda m,g=gotM: g.setdefault("msg",m)
 C.MovingLoad().Activated()
-rmy=getattr(bm,"ResMy",0.0)
-print("  single axle envelope max|My|=%.0f  (exact PL/4=%.0f)  ratio=%.4f"
-      %(rmy,Pm*Lb/4,rmy/(Pm*Lb/4)))
-assert abs(rmy-Pm*Lb/4)/(Pm*Lb/4)<0.02, (rmy,Pm*Lb/4)
-# max shear envelope approaches P (load next to a support)
-rvz=getattr(bm,"ResVz",0.0)
-print("  envelope max|Vz|=%.0f  (expect ~P=%.0f near support)"%(rvz,Pm))
-assert 0.85*Pm < rvz <= 1.05*Pm, rvz
-# envelope stored + rendered as a My contour, and the table exists
+rmz=getattr(bm,"ResMz",0.0)
+print("  single axle envelope max|Mz|=%.0f  (exact PL/4=%.0f)  ratio=%.4f"
+      %(rmz,Pm*Lb/4,rmz/(Pm*Lb/4)))
+assert abs(rmz-Pm*Lb/4)/(Pm*Lb/4)<0.02, (rmz,Pm*Lb/4)
+# max shear envelope approaches P (load next to a support); gravity shear = Vy
+rvy=getattr(bm,"ResVy",0.0)
+print("  envelope max|Vy|=%.0f  (expect ~P=%.0f near support)"%(rvy,Pm))
+assert 0.85*Pm < rvy <= 1.05*Pm, rvy
+# envelope stored + rendered as the dominant moment contour (Mz for gravity)
 me=dM.getObject("MovingEnvelope")
-assert me is not None and me._cells.get("C2","").startswith("max|My|") and "C3" in me._cells
-assert [o for o in dM.Objects if str(getattr(o,"DiagKind",""))=="My"], "My envelope rendered"
+assert me is not None and me._cells.get("D2","").startswith("max|Mz|") and "D3" in me._cells
+assert [o for o in dM.Objects if str(getattr(o,"DiagKind",""))=="Mz"], "Mz envelope rendered"
 stM=dM.getObject("AnalysisState"); assert stM is not None and hasattr(stM,"StU")
 assert "envelope" in gotM["msg"].lower(), gotM["msg"]
 # the stored envelope lets the EC3 code check run against it
@@ -1190,7 +1316,7 @@ C.form_dialog=lambda title,fields:{"gm0":1.0,"gm1":1.0,"ky":1.0,"kz":1.0,
 C.info=lambda m: None
 C.CodeCheck().Activated()
 assert dM.getObject("CodeCheck") is not None
-# multi-axle: two axles a hair apart ~ one 2P load -> max My ~ (2P)L/4 = PL/2
+# multi-axle: two axles a hair apart ~ one 2P load -> max Mz ~ (2P)L/4 = PL/2
 dM2=Doc(); FreeCAD.ActiveDocument=dM2
 b2=dM2.addObject("Part::Feature","Gird2"); b2.Shape=Shape(0,[Vec(0,0,0),Vec(Lb,0,0)])
 b2.IsBar=True; b2.Section="IPE 200"; b2.Material="Steel S235"
@@ -1202,10 +1328,10 @@ C.form_dialog=lambda title,fields:{"P":Pm,"dir":"-Z (gravity)","naxle":2,
                                    "spacing":1.0,"nsta":81}
 C.info=lambda m: None
 C.MovingLoad().Activated()
-rmy2=getattr(b2,"ResMy",0.0)
-print("  two axles (spacing~0) max|My|=%.0f  (exact (2P)L/4=%.0f)  ratio=%.4f"
-      %(rmy2,2*Pm*Lb/4,rmy2/(2*Pm*Lb/4)))
-assert abs(rmy2-2*Pm*Lb/4)/(2*Pm*Lb/4)<0.02, (rmy2,2*Pm*Lb/4)
+rmz2=getattr(b2,"ResMz",0.0)
+print("  two axles (spacing~0) max|Mz|=%.0f  (exact (2P)L/4=%.0f)  ratio=%.4f"
+      %(rmz2,2*Pm*Lb/4,rmz2/(2*Pm*Lb/4)))
+assert abs(rmz2-2*Pm*Lb/4)/(2*Pm*Lb/4)<0.02, (rmz2,2*Pm*Lb/4)
 print("moving load envelope OK")
 
 print("\n=== EC2 punching shear (hand calc + command) ===")

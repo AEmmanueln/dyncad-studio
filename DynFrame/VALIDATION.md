@@ -78,13 +78,25 @@ analysis); the St-Venant torsion check matches to a few percent.
   slenderness (λ=52, M₂≈48), biaxial (a=1.25), pad footing, combined footing;
   EC5 timber (f_m,d, buckling k_c=0.285); EC6 masonry (f_k=4.06, Φ Annex G);
   EC9 aluminium; AISC 360 (F_cr=306.9, φP_n=2762); connections (bolt
-  94.1/88.3/141.1 kN, weld 233.7 MPa); EN 1990 combinations exact; SLS deflection.
+  94.1/88.3/141.1 kN, weld 233.7 MPa; **end-plate joint** T-stub modes
+  412.5/248.5/282.2 kN with the thick→mode-3 / thin→mode-1 flips, the 6.2.7.2
+  row allocation M_j = 90 kN·m exact, and a UB356 joint's V_wp,Rd / F_c,fb to
+  the digit); EN 1990 combinations exact; SLS deflection.
+- **Seismic (EC8)** — all four design-spectrum S_d(T) branches to the hand
+  calc; the **lateral force method** gives F_b = S_d(T1)·m exactly on a
+  2-storey column (T1 = C_t·H^¾ on the plateau), split F_b/2 per level by
+  eq 4.11, into a ready load case.
+- **Plates on elastic foundation** — a free raft on Winkler springs under
+  uniform pressure settles w = q/k uniformly (0.2000 mm exact), independent
+  of plate stiffness, with no nodal supports.
 - **Building physics** — EN ISO 6946 U-value, Glaser condensation, EN ISO 13786
   thermal mass, 2D thermal bridge, EN 1991-1-2 fire vs the erf solution.
 
 ## 3. Scope and honest limits
 
 DynFrame reproduces **Robot's workflow and core engineering** on FreeCAD's
-kernel. Known gaps (see the README): open-section warping torsion; detailed
-connection components (moment end-plates); pile groups; automatic code
+kernel. Known gaps (see the README): open-section warping torsion; joint
+rotational stiffness S_j (the end-plate joint gives M_j,Rd, not the
+semi-rigid spring); the Table-6.6 α effective-length chart (enter l_eff
+manually for a row beside the beam flange); pile groups; automatic code
 detailing/drawings. CFD stays with OpenFOAM (see `CFD_with_OpenFOAM.md`).

@@ -4648,7 +4648,9 @@ class AddPlate:
              "stiffness; mesh divisions set the accuracy (more = finer)."},
             {"key": "thk", "label": "Thickness (mm)", "kind": "float", "default": 150.0},
             {"key": "mat", "label": "Material", "kind": "combo",
-             "options": mats, "default": DEFAULT_MAT}]
+             "options": mats, "default": DEFAULT_MAT},
+            {"key": "kf", "label": "Elastic foundation k (N/mm3, 0 = none)",
+             "kind": "float", "default": 0.0}]
         if isquad:
             fields += [
                 {"key": "nx", "label": "Mesh divisions, side 1", "kind": "float", "default": 6},
@@ -4665,13 +4667,20 @@ class AddPlate:
             tris = [[pts[0], pts[1], pts[2]]]
         doc.openTransaction("DynFrame: add plate")
         o = _make_plate(doc, tris, vals["thk"], vals["mat"])
+        kf = max(float(vals.get("kf", 0.0) or 0.0), 0.0)
+        if o is not None and kf > 0.0:
+            _set(o, "App::PropertyFloat", "ShellKfound", kf)
         doc.commitTransaction(); doc.recompute()
         if o is None:
             info("Could not build the plate (degenerate corners?)."); return
-        info("Plate created: %d triangle element(s), t=%g mm, %s.\n\nAdd supports "
+        info("Plate created: %d triangle element(s), t=%g mm, %s.%s\n\nAdd supports "
              "at its edge nodes, a pressure (Add Plate Pressure) or other loads, "
              "then Calculate. The plate von Mises stress appears in the Results "
-             "Viewer and the 'PlateForces' table." % (len(tris), vals["thk"], vals["mat"]))
+             "Viewer and the 'PlateForces' table."
+             % (len(tris), vals["thk"], vals["mat"],
+                ("\nElastic (Winkler) foundation k = %g N/mm3 along the plate "
+                 "normal - a raft on soil; it also acts as the vertical "
+                 "support." % kf) if kf > 0 else ""))
 
 
 class AddPlateLoad:
@@ -5067,10 +5076,12 @@ class RunAnalysis:
                             springs.append((i, _json.loads(spj)))
                         except Exception:
                             pass
-        if not fixed and not springs:
+        has_found = any(float(getattr(sh["o"], "ShellKfound", 0.0) or 0.0) > 0
+                        for sh in shells)
+        if not fixed and not springs and not has_found:
             err("No supports defined.\n\nSelect base node vertices and run "
                 "'Define Support' (Fixed / Pinned / Roller / Elastic spring), "
-                "then Calculate.")
+                "or give a plate an elastic foundation, then Calculate.")
             return
 
         cases = _cases(doc); combos = _combos(doc)
@@ -5181,6 +5192,22 @@ class RunAnalysis:
                 for n in ni:
                     dofs += [6 * n + i for i in range(6)]
                 K[np.ix_(dofs, dofs)] += Ke
+        # plates on an elastic (Winkler) foundation: the modulus of subgrade
+        # reaction k (N/mm^3) acts along the plate normal; each triangle adds
+        # k*Area/3 * (n x n^T) to its nodes' translational stiffness - soil
+        # under a raft / bedding under a slab, like Robot's elastic ground.
+        for sh in shells:
+            kf = float(getattr(sh["o"], "ShellKfound", 0.0) or 0.0)
+            if kf <= 0.0:
+                continue
+            for (ni, pts) in sh["tris"]:
+                nrm, area = _tri_normal_area(pts)
+                ks = kf * area / 3.0
+                nv = [nrm.x, nrm.y, nrm.z]
+                for n in ni:
+                    for a in range(3):
+                        for b2 in range(3):
+                            K[6 * n + a, 6 * n + b2] += ks * nv[a] * nv[b2]
         # elastic (spring) supports: add stiffness to the node DOFs
         for (i, sp) in springs:
             for k in range(min(6, len(sp))):
@@ -6320,6 +6347,252 @@ class ResponseSpectrum:
               len(rows), method,
               "" if sum_mass >= 90.0 else "Note: < 90%% modal mass - include more "
               "modes for a code-compliant run."))
+
+
+def _ec8_lateral_forces(zmass, base_z, Fb):
+    """EN 1998-1 eq 4.11: Fi = Fb * zi*mi / sum(zj*mj) over the masses, zi
+    measured above the base. zmass = [(z, m, key)]; returns [(key, Fi)] for
+    the masses above the base (the base itself takes no lateral force)."""
+    wz = [(k, (z - base_z) * m) for (z, m, k) in zmass
+          if z > base_z + 1e-6 and m > 0.0]
+    tot = sum(w for (_k, w) in wz)
+    if tot <= 0.0:
+        return []
+    return [(k, Fb * w / tot) for (k, w) in wz]
+
+
+class LateralForceEC8:
+    """EN 1998-1 4.3.3.2 lateral force method (Robot's 'seismic - equivalent
+    static'): base shear Fb = Sd(T1) * m * lambda from the EC8 design spectrum,
+    distributed over the member-end masses as Fi = Fb zi mi / sum zj mj and
+    written into a seismic load case of nodal loads, ready to Calculate and
+    combine. T1 from the model's own modes or the Ct H^(3/4) estimate."""
+
+    _CT = {"From modal analysis": None,
+           "Estimate Ct=0.085 (steel moment frame)": 0.085,
+           "Estimate Ct=0.075 (concrete / braced steel)": 0.075,
+           "Estimate Ct=0.050 (other structures)": 0.050}
+
+    def GetResources(self):
+        return {"Pixmap": _icon("lateral"),
+                "MenuText": "Seismic Lateral Forces (EC8)",
+                "ToolTip": "EN 1998-1 lateral force method: design-spectrum "
+                           "base shear Fb = Sd(T1) m lambda, distributed up "
+                           "the height (Fi = Fb zi mi / sum zj mj) and stored "
+                           "as a seismic load case of nodal loads - Robot's "
+                           "equivalent-static seismic. T1 from the model's "
+                           "modes or Ct H^3/4; storey table included.",
+                "Accel": "A, Q"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        import math
+        import numpy as np
+        doc = FreeCAD.ActiveDocument
+        objs = [o for o in doc.Objects if is_analysis_elem(o)]
+        if not objs:
+            info("No members. Build the frame (Insert Members / Add Bars) "
+                 "first.")
+            return
+        vals = form_dialog("Seismic Lateral Forces (EN 1998-1)", [
+            {"key": "_i", "kind": "info", "default":
+             "Equivalent-static seismic per EN 1998-1 4.3.3.2: the design "
+             "spectrum Sd(T1) gives the base shear Fb = Sd m lambda, "
+             "distributed over the member-end masses by height. The forces "
+             "are written into the load case below - run Calculate on it (or "
+             "combine it) afterwards. Mass is the structure self-weight; add "
+             "non-structural mass as extra members or verify with the "
+             "Response Spectrum command."},
+            {"key": "dir", "label": "Direction", "kind": "combo",
+             "options": ["X", "Y"], "default": "X"},
+            {"key": "ag", "label": "Ground accel. ag (x g)", "kind": "float",
+             "default": 0.25},
+            {"key": "soil", "label": "Ground type", "kind": "combo",
+             "options": list(EC8_SOILS.keys()), "default": "B"},
+            {"key": "q", "label": "Behaviour factor q", "kind": "float",
+             "default": 1.5},
+            {"key": "t1", "label": "Fundamental period T1", "kind": "combo",
+             "options": list(self._CT.keys()),
+             "default": "From modal analysis"},
+            {"key": "case", "label": "Load case name", "kind": "text",
+             "default": "EQX"},
+        ])
+        if not vals:
+            return
+        comp = {"X": 0, "Y": 1}[vals["dir"]]
+        ag = vals["ag"] * 9810.0                       # mm/s^2
+        S, TB, TC, TD = EC8_SOILS[vals["soil"]]
+        q = max(vals["q"], 1e-3)
+        case = str(vals.get("case") or "EQX").strip() or "EQX"
+
+        # member-end node masses (tonnes): half of each bar's rho*A*L per end
+        nodes = []
+
+        def nid(p, make=True):
+            for i, qv in enumerate(nodes):
+                if qv.distanceToPoint(p) <= 1.0:
+                    return i
+            if not make:
+                return -1
+            nodes.append(FreeCAD.Vector(p)); return len(nodes) - 1
+
+        bardata = []
+        for o in objs:
+            sp = _section_props_from_name(_elem_section(o))
+            if sp is None:
+                continue
+            A, Iy, Iz, J, c = sp
+            s, e = _elem_ends(o)
+            n1, n2 = nid(s), nid(e)
+            if n1 == n2:
+                continue
+            E, Gm, Fy, rho = _material(_elem_material(o))
+            L = s.distanceToPoint(e)
+            bardata.append({"n1": n1, "n2": n2, "A": A, "Iy": Iy, "Iz": Iz,
+                            "J": J, "E": E, "G": Gm, "rho": rho, "L": L})
+        if not bardata:
+            info("Could not build a model (check section names)."); return
+        nmass = [0.0] * len(nodes)
+        for b in bardata:
+            half = b["rho"] * 1e-3 * b["A"] * b["L"] / 2.0     # tonnes
+            nmass[b["n1"]] += half; nmass[b["n2"]] += half
+        total_m = sum(nmass)
+
+        sup_z = [FreeCAD.Vector(getattr(o, "AtNode")).z for o in doc.Objects
+                 if getattr(o, "Restrain", None)
+                 and getattr(o, "AtNode", None) is not None]
+        base_z = min(sup_z) if sup_z else min(p.z for p in nodes)
+        H = max(p.z for p in nodes) - base_z                    # mm
+        levels = _storey_levels([p.z for p in nodes if p.z > base_z + 1.0])
+
+        # T1: the model's dominant mode in this direction, or Ct H^0.75
+        Ct = self._CT.get(vals.get("t1"), 0.085)
+        t1src = vals.get("t1", "")
+        if Ct is None:
+            fixed = set()
+            for o in doc.Objects:
+                r = getattr(o, "Restrain", None); at = getattr(o, "AtNode", None)
+                if r and at is not None:
+                    i = nid(FreeCAD.Vector(at), make=False)
+                    if i >= 0:
+                        for k, ch in enumerate(str(r)):
+                            if ch == "1":
+                                fixed.add(6 * i + k)
+            if not fixed:
+                err("No supports defined - add supports first."); return
+            ndof = 6 * len(nodes)
+            K = np.zeros((ndof, ndof)); M = np.zeros((ndof, ndof))
+            for b in bardata:
+                T, L = _beam_T(nodes[b["n1"]], nodes[b["n2"]])
+                kl = _beam_k_local(b["E"], b["G"], b["A"], b["Iy"], b["Iz"],
+                                   b["J"], L)
+                ml = _beam_mass_local(b["rho"] * 1e-3, b["A"], b["J"], L)
+                dofs = [6 * b["n1"] + i for i in range(6)] \
+                    + [6 * b["n2"] + i for i in range(6)]
+                ix = np.ix_(dofs, dofs)
+                K[ix] += T.T @ kl @ T; M[ix] += T.T @ ml @ T
+            free = [d for d in range(ndof) if d not in fixed]
+            try:
+                Kf = K[np.ix_(free, free)]; Mf = M[np.ix_(free, free)]
+                Lc = np.linalg.cholesky(Mf); Lci = np.linalg.inv(Lc)
+                Astd = Lci @ Kf @ Lci.T; Astd = 0.5 * (Astd + Astd.T)
+                w2, Y = np.linalg.eigh(Astd)
+            except Exception:
+                err("Modal solve failed - check supports; or pick a Ct "
+                    "estimate for T1.")
+                return
+            r = np.zeros(ndof)
+            for i in range(len(nodes)):
+                r[6 * i + comp] = 1.0
+            Mrf = Mf @ r[free]
+            best = None; bestme = -1.0
+            for idx in np.argsort(w2):
+                if w2[idx] <= 1e-6:
+                    continue
+                phi = Lci.T @ Y[:, idx]
+                me = float(phi @ Mrf) ** 2
+                if me > bestme:
+                    bestme = me; best = idx
+            if best is None:
+                err("No valid mode found - check the model."); return
+            T1 = 2.0 * math.pi / float(np.sqrt(w2[best]))
+            t1src = "modal (dominant mode, %.0f%% of mass)" % (
+                100.0 * bestme / total_m if total_m > 0 else 0.0)
+        else:
+            T1 = Ct * (H / 1000.0) ** 0.75
+            t1src = "Ct=%.3f, H=%.2f m" % (Ct, H / 1000.0)
+
+        Sd = _ec8_sd(T1, ag, S, TB, TC, TD, q)
+        lam = 0.85 if (T1 <= 2.0 * TC and len(levels) > 2) else 1.0
+        Fb = Sd * total_m * lam                       # N
+        zmass = [(nodes[i].z, nmass[i], i) for i in range(len(nodes))]
+        fis = _ec8_lateral_forces(zmass, base_z, Fb)
+        if not fis:
+            info("No mass above the base - nothing to distribute."); return
+
+        doc.openTransaction("DynFrame: EC8 lateral forces")
+        _add_case(doc, case, "Seismic")
+        for o in list(doc.Objects):                   # replace a previous run
+            if getattr(o, "EC8Auto", False) and getattr(o, "LoadCase", "") == case:
+                try:
+                    doc.removeObject(o.Name)
+                except Exception:
+                    pass
+        vecd = (FreeCAD.Vector(1, 0, 0) if comp == 0
+                else FreeCAD.Vector(0, 1, 0))
+        for (i, Fi) in fis:
+            ob = doc.addObject("Part::Feature", "EC8Load")
+            _set(ob, "App::PropertyString", "LoadType", "Nodal")
+            _set(ob, "App::PropertyString", "LoadCase", case)
+            _set(ob, "App::PropertyVector", "LoadVec", vscale(vecd, Fi))
+            _set(ob, "App::PropertyVector", "LoadMom", FreeCAD.Vector(0, 0, 0))
+            _set(ob, "App::PropertyVector", "AtNode", nodes[i])
+            _set(ob, "App::PropertyBool", "EC8Auto", True)
+            ob.Label = "EC8 %s %.0f N @ z=%.0f" % (case, Fi, nodes[i].z)
+        # storey table
+        try:
+            sh = (doc.getObject("LateralForce")
+                  or doc.addObject("Spreadsheet::Sheet", "LateralForce"))
+            sh.Label = "LateralForce"; sh.clearAll()
+            sh.set("A1", "EC8 LATERAL FORCE METHOD - dir %s, ag=%.2fg, soil %s"
+                   ", q=%.2f -> case '%s'" % (vals["dir"], vals["ag"],
+                                              vals["soil"], q, case))
+            for c, h in zip("ABCD", ["Storey z (mm)", "Mass (t)", "F (N)",
+                                     "Shear below (N)"]):
+                sh.set("%s2" % c, h)
+            fmap = {}
+            for (i, Fi) in fis:
+                fmap[i] = Fi
+            rr = 3; cum = 0.0
+            for lv in sorted(levels, reverse=True):
+                ms = sum(nmass[i] for i in range(len(nodes))
+                         if abs(nodes[i].z - lv) <= 1.0)
+                Fl = sum(Fi for (i, Fi) in fis
+                         if abs(nodes[i].z - lv) <= 1.0)
+                cum += Fl
+                sh.set("A%d" % rr, "%.0f" % lv); sh.set("B%d" % rr, "%.4f" % ms)
+                sh.set("C%d" % rr, "%.1f" % Fl); sh.set("D%d" % rr, "%.1f" % cum)
+                rr += 1
+            sh.set("A%d" % (rr + 1), "T1 = %.4f s (%s)" % (T1, t1src))
+            sh.set("A%d" % (rr + 2), "Sd(T1) = %.4f g; m = %.4f t; "
+                   "lambda = %.2f" % (Sd / 9810.0, total_m, lam))
+            sh.set("A%d" % (rr + 3), "Base shear Fb = %.1f N" % Fb)
+            _grp(doc, RES_GROUP).addObject(sh)
+        except Exception as e:
+            FreeCAD.Console.PrintError("DynFrame: lateral-force table failed "
+                                       "(%s)\n" % e)
+        doc.commitTransaction(); doc.recompute()
+        info("EC8 lateral force method complete (dir %s).\n\n"
+             "T1 = %.3f s (%s)\nSd(T1) = %.3f g\nSeismic mass m = %.3f t\n"
+             "lambda = %.2f\nBase shear Fb = %.1f kN\n\n"
+             "%d nodal force(s) written to load case '%s' (Fi = Fb zi mi / "
+             "sum zj mj, EN 1998-1 eq 4.11) - run Calculate on '%s' or put it "
+             "in a seismic combination. Storey forces and shears are in the "
+             "'LateralForce' table. Re-running replaces the case's forces."
+             % (vals["dir"], T1, t1src, Sd / 9810.0, total_m, lam,
+                Fb / 1000.0, len(fis), case, case))
 
 
 def _defl_limits(span):
@@ -7923,6 +8196,212 @@ def _base_plate(N, bc, hc, bp, hp, fck, fy, gM0=1.0, kj=1.0, betaj=2.0 / 3.0):
     t_req = (6.0 * M * gM0 / fy) ** 0.5 if fy > 0 else 0.0
     return {"f_jd": f_jd, "p": p, "A_req": A_req, "a": a, "t_req": t_req,
             "area_ok": A >= A_req and p <= f_jd}
+
+
+def _tstub(leff1, leff2, m, e, tf, fy, Ft_total, gM0=1.0):
+    """EN 1993-1-8 6.2.4 equivalent T-stub in tension: the three failure modes
+    of a bolt row. leff1/leff2 are the effective lengths for Mode 1 / Mode 2
+    (often equal), m the bolt distance to the plastic hinge, e the edge
+    distance (n = min(e, 1.25 m)), tf the flange/plate thickness, Ft_total the
+    row's total bolt tension resistance (all bolts of the row). Returns the
+    mode resistances and the governing one. Pure EC3 formulas, unit-tested to
+    the hand calc."""
+    n = min(e, 1.25 * m) if m > 0 else e
+    Mpl1 = 0.25 * leff1 * tf * tf * fy / gM0
+    Mpl2 = 0.25 * leff2 * tf * tf * fy / gM0
+    F1 = 4.0 * Mpl1 / m if m > 0 else 1e30             # complete yielding
+    F2 = ((2.0 * Mpl2 + n * Ft_total) / (m + n)
+          if (m + n) > 0 else 1e30)                    # yield + bolt failure
+    F3 = Ft_total                                      # bolt failure
+    F = min(F1, F2, F3)
+    return {"F1": F1, "F2": F2, "F3": F3, "F": F, "n": n,
+            "mode": 1 if F == F1 else (2 if F == F2 else 3),
+            "Mpl1": Mpl1, "Mpl2": Mpl2}
+
+
+def _bolt_FtRd(d_name, grade, gM2=1.25):
+    """Tension resistance of one bolt, EN 1993-1-8 Table 3.4:
+    Ft,Rd = 0.9 fub As / gM2."""
+    As = {"M12": 84.3, "M16": 157.0, "M20": 245.0, "M24": 353.0,
+          "M30": 561.0}.get(d_name, 245.0)
+    fub = {"4.6": 400.0, "5.6": 500.0, "8.8": 800.0, "10.9": 1000.0}.get(
+        grade, 800.0)
+    return 0.9 * fub * As / gM2
+
+
+def _endplate_rows(rows, Fc_glob):
+    """EN 1993-1-8 6.2.7.2 bolt-row force allocation: rows top-down as
+    [(h_r, F_row_Rd)], each takes its own resistance but the running total may
+    not exceed the global compression/panel-shear limit Fc_glob. Returns
+    (Mj_Rd, [(h_r, F_r allocated)])."""
+    out = []; tot = 0.0; Mj = 0.0
+    for (h, Fr) in rows:
+        take = max(min(Fr, Fc_glob - tot), 0.0)
+        out.append((h, take)); tot += take; Mj += take * h
+    return Mj, out
+
+
+def _endplate_joint(beam_db, col_db, fy, tp, w_gauge, e_edge, hrows,
+                    bolt="M20", bgrade="8.8", gM0=1.0, gM2=1.25,
+                    leff_user=None, beta=1.0, weld_a=0.0):
+    """Bolted end-plate beam-to-column moment joint, EN 1993-1-8 6.2.7.2
+    component method with 2 bolts per row. hrows = lever arms (mm) of the
+    tension bolt rows above the compression centre (the beam's bottom-flange
+    mid-plane), top row first. Components per row: end-plate bending (T-stub),
+    column flange bending (T-stub), column web tension; global limits: column
+    web compression, beam flange compression and the column web panel in
+    shear. leff defaults to min(2*pi*m, 4m+1.25e) per row (the circular /
+    non-circular patterns); pass leff_user (list, one per row, None = auto)
+    for the Table 6.6 alpha patterns next to a flange/stiffener. Sharp-corner
+    m (no root radius / weld spread beyond 0.8*sqrt(2)*a) keeps it on the
+    conservative side. Returns a dict with rows, limits, Mj_Rd, governing."""
+    import math
+    Ft2 = 2.0 * _bolt_FtRd(bolt, bgrade, gM2)          # a row of 2 bolts
+    # geometry: hinge distances per EC3-1-8 fig 6.8 (0.8-radius ignored)
+    twb = beam_db.get("_tw", 10.0); tfb = beam_db.get("_tf", 15.0)
+    hb = beam_db.get("_h", 300.0)
+    twc = col_db.get("_tw", 10.0); tfc = col_db.get("_tf", 15.0)
+    m_p = (w_gauge - twb) / 2.0 - 0.8 * math.sqrt(2.0) * weld_a   # end plate
+    m_c = (w_gauge - twc) / 2.0                                    # col flange
+    Avc = col_db.get("Av_web", 0.5 * col_db.get("A", 5000.0))
+    rows = []
+    for i, hr in enumerate(hrows):
+        lu = (leff_user[i] if leff_user and i < len(leff_user) else None)
+        leff_p = lu or min(2.0 * math.pi * m_p, 4.0 * m_p + 1.25 * e_edge)
+        leff_c = lu or min(2.0 * math.pi * m_c, 4.0 * m_c + 1.25 * e_edge)
+        t_ep = _tstub(leff_p, leff_p, m_p, e_edge, tp, fy, Ft2, gM0)
+        t_cf = _tstub(leff_c, leff_c, m_c, e_edge, tfc, fy, Ft2, gM0)
+        # column web in transverse tension (6.2.6.3), omega for beta=1
+        beff_t = leff_c
+        om = 1.0 / math.sqrt(1.0 + 1.3 * (beff_t * twc / Avc) ** 2) \
+            if beta >= 0.5 else 1.0
+        F_wt = om * beff_t * twc * fy / gM0
+        Fr = min(t_ep["F"], t_cf["F"], F_wt)
+        gov = {t_ep["F"]: "end-plate mode %d" % t_ep["mode"],
+               t_cf["F"]: "column flange mode %d" % t_cf["mode"],
+               F_wt: "column web tension"}[Fr]
+        rows.append({"h": hr, "F": Fr, "gov": gov, "ep": t_ep, "cf": t_cf,
+                     "Fwt": F_wt, "leff_p": leff_p, "leff_c": leff_c})
+    # global limits
+    beff_c = tfb + 5.0 * tfc + 2.0 * tp               # web compression spread
+    om_c = 1.0 / math.sqrt(1.0 + 1.3 * (beff_c * twc / Avc) ** 2) \
+        if beta >= 0.5 else 1.0
+    Fc_wc = om_c * beff_c * twc * fy / gM0
+    McRd = max(beam_db.get("Wpl_z", 0.0), beam_db.get("Wpl_y", 0.0)) * fy / gM0
+    Fc_fb = McRd / (hb - tfb) if hb > tfb else 1e30
+    Vwp = 0.9 * fy * Avc / (math.sqrt(3.0) * gM0)
+    Fc_glob = min(Fc_wc, Fc_fb, Vwp / max(beta, 1e-6))
+    Mj, alloc = _endplate_rows([(r["h"], r["F"]) for r in rows], Fc_glob)
+    glim = {Fc_wc: "column web compression", Fc_fb: "beam flange compression",
+            Vwp / max(beta, 1e-6): "column web panel shear"}[Fc_glob]
+    for r, (h, take) in zip(rows, alloc):
+        r["F_alloc"] = take
+    return {"rows": rows, "Mj_Rd": Mj, "Fc_wc": Fc_wc, "Fc_fb": Fc_fb,
+            "Vwp": Vwp, "Fc_glob": Fc_glob, "glim": glim, "m_p": m_p,
+            "m_c": m_c, "Ft_row": Ft2, "beff_c": beff_c}
+
+
+class EndPlateEC3:
+    """Bolted end-plate moment connection (EC3-1-8 component method)."""
+    _GR = {"S235": 235.0, "S275": 275.0, "S355": 355.0}
+    _BOLTS = ["M16", "M20", "M24", "M30"]
+    _BG = ["8.8", "10.9", "4.6", "5.6"]
+
+    def GetResources(self):
+        return {"Pixmap": _icon("endplate"),
+                "MenuText": "End-Plate Moment Joint (EC3)",
+                "ToolTip": "Bolted end-plate beam-to-column moment connection "
+                           "to EN 1993-1-8 (component method): per bolt row "
+                           "the end-plate and column-flange T-stubs (modes "
+                           "1/2/3) and column web tension; globally the "
+                           "column web compression, beam-flange compression "
+                           "and web panel shear -> the moment resistance "
+                           "Mj,Rd with the governing component, like Robot's "
+                           "connection module.", "Accel": "A, J"}
+
+    def IsActive(self):
+        return True
+
+    def Activated(self):
+        vals = form_dialog("End-Plate Moment Joint (EN 1993-1-8)", [
+            {"key": "_i", "kind": "info", "default":
+             "Flush or extended end-plate, 2 bolts per row. Rows are entered "
+             "by their lever arm above the compression centre (the beam "
+             "bottom-flange mid-plane); 0 skips the row. Effective lengths "
+             "default to min(2 pi m, 4m+1.25e); enter leff directly for a "
+             "row governed by the Table 6.6 alpha pattern (next to the beam "
+             "flange). Sharp-corner m - slightly conservative."},
+            {"key": "beam", "label": "Beam section", "kind": "section",
+             "default": "UB 356x171x57"},
+            {"key": "col", "label": "Column section", "kind": "section",
+             "default": "UB 203x133x30"},
+            {"key": "grade", "label": "Steel grade", "kind": "combo",
+             "options": list(self._GR.keys()), "default": "S275"},
+            {"key": "tp", "label": "End-plate thickness tp (mm)",
+             "kind": "float", "default": 20.0},
+            {"key": "w", "label": "Bolt gauge w (mm, across the web)",
+             "kind": "float", "default": 90.0},
+            {"key": "e", "label": "Edge distance e (mm)", "kind": "float",
+             "default": 40.0},
+            {"key": "a", "label": "Web weld throat a (mm)", "kind": "float",
+             "default": 6.0},
+            {"key": "bolt", "label": "Bolt size", "kind": "combo",
+             "options": self._BOLTS, "default": "M20"},
+            {"key": "bg", "label": "Bolt grade", "kind": "combo",
+             "options": self._BG, "default": "8.8"},
+            {"key": "h1", "label": "Row 1 lever arm h1 (mm)", "kind": "float",
+             "default": 350.0},
+            {"key": "h2", "label": "Row 2 lever arm h2 (mm, 0 = none)",
+             "kind": "float", "default": 260.0},
+            {"key": "l1", "label": "leff row 1 (mm, 0 = auto)", "kind": "float",
+             "default": 0.0},
+            {"key": "l2", "label": "leff row 2 (mm, 0 = auto)", "kind": "float",
+             "default": 0.0},
+            {"key": "med", "label": "Applied moment M_Ed (kNm)",
+             "kind": "float", "default": 120.0},
+            {"key": "beta", "label": "Panel shear beta (1 one-sided, "
+             "0 balanced)", "kind": "float", "default": 1.0},
+        ])
+        if not vals:
+            return
+        bdb = _section_db(vals["beam"]); cdb = _section_db(vals["col"])
+        if bdb is None or cdb is None:
+            err("Section not in the profile library."); return
+        fy = self._GR.get(vals["grade"], 275.0)
+        hrows = [h for h in (vals["h1"], vals["h2"]) if h > 1e-6]
+        leffs = [(vals.get("l1") or None), (vals.get("l2") or None)]
+        r = _endplate_joint(bdb, cdb, fy, max(vals["tp"], 1e-6),
+                            max(vals["w"], 1.0), max(vals["e"], 1.0), hrows,
+                            vals["bolt"], vals["bg"], 1.0, 1.25,
+                            leffs, max(vals.get("beta", 1.0), 0.0),
+                            max(vals.get("a", 0.0), 0.0))
+        MEd = vals["med"] * 1e6
+        util = MEd / r["Mj_Rd"] if r["Mj_Rd"] > 0 else 1e9
+        lines = []
+        for i, rr in enumerate(r["rows"], 1):
+            lines.append(
+                "Row %d (h=%.0f): F=%.1f kN (%s; T-stubs ep %.0f/%.0f/%.0f, "
+                "cf %.0f/%.0f/%.0f kN; web tension %.0f) -> takes %.1f kN"
+                % (i, rr["h"], rr["F"] / 1e3, rr["gov"],
+                   rr["ep"]["F1"] / 1e3, rr["ep"]["F2"] / 1e3,
+                   rr["ep"]["F3"] / 1e3, rr["cf"]["F1"] / 1e3,
+                   rr["cf"]["F2"] / 1e3, rr["cf"]["F3"] / 1e3,
+                   rr["Fwt"] / 1e3, rr.get("F_alloc", 0.0) / 1e3))
+        info("End-plate moment joint (EN 1993-1-8, component method).\n\n"
+             "Mj,Rd = %.1f kNm   M_Ed = %.1f kNm   utilisation = %.2f -> %s\n\n"
+             "%s\n\nGlobal limits: column web compression %.1f kN, beam "
+             "flange compression %.1f kN, web panel shear Vwp,Rd %.1f kN "
+             "(governing: %s).\nBolt row resistance (2 bolts) %.1f kN; "
+             "m_plate=%.1f, m_colflange=%.1f mm.\n\nStiffness (Sj) and weld "
+             "checks are not included - verify the flange welds with the "
+             "Fillet Weld command. Effective lengths use the circular / "
+             "non-circular patterns; for a row beside the beam flange enter "
+             "the Table 6.6 leff directly."
+             % (r["Mj_Rd"] / 1e6, MEd / 1e6, util,
+                "OK" if util <= 1.0 else "FAIL",
+                "\n".join(lines), r["Fc_wc"] / 1e3, r["Fc_fb"] / 1e3,
+                r["Vwp"] / 1e3, r["glim"], r["Ft_row"] / 1e3, r["m_p"],
+                r["m_c"]))
 
 
 class BasePlateEC3:
@@ -15294,6 +15773,7 @@ _add("DynFrame_RcColumnEC2", RcColumnEC2)
 _add("DynFrame_PadFootingEC2", PadFootingEC2)
 _add("DynFrame_TimberEC5", TimberEC5)
 _add("DynFrame_BasePlateEC3", BasePlateEC3)
+_add("DynFrame_EndPlateEC3", EndPlateEC3)
 _add("DynFrame_BoltedConnEC3", BoltedConnEC3)
 _add("DynFrame_FilletWeldEC3", FilletWeldEC3)
 _add("DynFrame_MasonryEC6", MasonryEC6)
@@ -15321,6 +15801,7 @@ _add("DynFrame_RunAnalysis", RunAnalysis)
 _add("DynFrame_ModalAnalysis", ModalAnalysis)
 _add("DynFrame_BucklingAnalysis", BucklingAnalysis)
 _add("DynFrame_ResponseSpectrum", ResponseSpectrum)
+_add("DynFrame_LateralForceEC8", LateralForceEC8)
 _add("DynFrame_Envelope", Envelope)
 _add("DynFrame_MovingLoad", MovingLoad)
 _add("DynFrame_ImportGroundMotion", ImportGroundMotion)

@@ -235,6 +235,20 @@ spreadsheets at the root.
   `BasePlate` table. (Validated: 200×200 column on a 400×400 plate, N=1000 kN,
   C30/37 → f_jd=13.3 MPa, p=6.25 MPa, required area 75 000 mm², overhang 100 mm,
   thickness required 28.3 mm — matching the hand calc.)
+- **End-Plate Moment Joint (EC3)** — a bolted end-plate beam-to-column moment
+  connection to EN 1993-1-8 by the **component method**, like Robot's
+  connections module: per bolt row the **equivalent T-stub** in bending for
+  the end plate and the column flange (failure **modes 1/2/3** — complete
+  yielding, yield + bolt failure, bolt failure) and the column web in
+  transverse tension; globally the column web in compression, the beam flange
+  in compression (M_c,Rd/(h−t_f)) and the **column web panel in shear**
+  (V_wp,Rd = 0.9·f_y·A_vc/√3). Bolt-row forces are allocated top-down under
+  the governing global limit (6.2.7.2) → **M_j,Rd** with the governing
+  component per row. Effective lengths default to the circular /
+  non-circular patterns (2πm, 4m+1.25e) with a manual l_eff override for
+  Table-6.6 α patterns. (Validated: T-stub modes 412.5 / 248.5 / 282.2 kN to
+  the hand calc with the mode flipping thick→3 / thin→1, the row allocation
+  Mj = 90 kN·m exactly, and V_wp,Rd / F_c,fb of a UB356 joint to the digit.)
 - **Bolted Connection (EC3)** — check a bolt group in a shear/tension connection
   to EN 1993-1-8: per-bolt **shear** F_v,Rd (α_v·f_ub·A/γ_M2, threads in or out
   of the plane), **bearing** F_b,Rd (k₁·α_b·f_u·d·t/γ_M2 from the end/edge
@@ -468,6 +482,21 @@ spreadsheets at the root.
   modal mass is captured). Modes are combined by **CQC** (the complete
   quadratic combination, with correlation ρ_ij from the modal frequencies and
   damping — correct for closely-spaced modes) or **SRSS**, your choice.
+- **Seismic Lateral Forces (EC8)** — the EN 1998-1 **lateral force method**
+  (Robot's equivalent-static seismic): the design spectrum S_d(T1) — T1 from
+  the model's own dominant mode or the C_t·H^¾ estimate — gives the base
+  shear **F_b = S_d(T1)·m·λ**, distributed over the member-end masses as
+  **F_i = F_b·z_i·m_i/Σz_j·m_j** (eq 4.11) and written into a seismic **load
+  case of nodal forces**, ready to Calculate or combine; storey forces and
+  shears go to the `LateralForce` table, and re-running replaces the case.
+  (Validated: all four S_d(T) branches to the hand calc; a 2-storey column
+  gives F_b = S_d·m exactly, split F_b/2 per level.)
+- **Plates on elastic foundation (Winkler)** — give a plate a **modulus of
+  subgrade reaction k** (N/mm³) in Add Plate and it bears on springs along
+  its normal (k·A/3 per triangle node): a **raft on soil**, with no nodal
+  supports needed for the vertical direction — Robot's elastic ground.
+  (Validated: a free raft under uniform pressure settles w = q/k uniformly to
+  4 figures, independent of plate stiffness.)
 - **Deflection Check (SLS)** — check every member's maximum span deflection
   from the latest analysis against the serviceability limit (**span/250** for
   appearance, span/350 or span/500 for brittle finishes). The deflection is

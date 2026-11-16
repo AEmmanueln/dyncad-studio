@@ -634,6 +634,80 @@ for (_nmG, _bG) in _PR.families()["I-beam (UB)"]:
 print("  group of 2 on UB 203x133x25 -> %s (governing member GB); all "
       "lighter UB sizes fail GB; sections applied" % proposed)
 print("code group design OK")
+
+print("\n=== EC8 lateral force method: spectrum, base shear, distribution ===")
+# design-spectrum branches to the hand calc (ag=0.25g, soil B, q=1.5):
+_agq = 0.25 * 9810.0
+assert abs(C._ec8_sd(0.30, _agq, 1.2, 0.15, 0.5, 2.0, 1.5) - 4905.0) < 0.5
+assert abs(C._ec8_sd(0.00, _agq, 1.2, 0.15, 0.5, 2.0, 1.5) - 1962.0) < 0.5
+assert abs(C._ec8_sd(1.00, _agq, 1.2, 0.15, 0.5, 2.0, 1.5) - 2452.5) < 0.5
+assert abs(C._ec8_sd(3.00, _agq, 1.2, 0.15, 0.5, 2.0, 1.5) - 545.0) < 0.5
+# eq 4.11 distribution: sums to Fb, linear in z*m
+_fd = dict(C._ec8_lateral_forces([(0.0, 1.0, 0), (3.0, 2.0, 1), (6.0, 1.0, 2)],
+                                 0.0, 90.0))
+assert abs(_fd[1] - 45.0) < 1e-9 and abs(_fd[2] - 45.0) < 1e-9 and 0 not in _fd
+# end-to-end: a 2-storey column (2 x 3 m of IPE 300), Ct estimate ->
+# T1 = 0.085*6^0.75 = 0.3259 s (on the plateau) -> Sd = 4905 mm/s^2,
+# lambda = 1.0 (2 storeys), Fb = Sd*m; the two levels carry Fb/2 each
+# (z*m: 3000*m_bar vs 6000*m_bar/2 - equal).
+dQ = Doc(); FreeCAD.ActiveDocument = dQ
+for (z0, z1, nm) in ((0, 3000, "C1"), (3000, 6000, "C2")):
+    b = dQ.addObject("Part::Feature", nm); b.Shape = Shape(0, [Vec(0, 0, z0), Vec(0, 0, z1)])
+    b.IsBar = True; b.Section = "IPE 300"; b.Material = "Steel S235"
+    b.BarStart = Vec(0, 0, z0); b.BarEnd = Vec(0, 0, z1)
+sQ = dQ.addObject("Part::Feature", "S"); sQ.Restrain = "111111"; sQ.AtNode = Vec(0, 0, 0)
+C.form_dialog = lambda title, fields: {
+    "dir": "X", "ag": 0.25, "soil": "B", "q": 1.5,
+    "t1": "Estimate Ct=0.085 (steel moment frame)", "case": "EQX"}
+gotQ = {}; C.info = lambda m, g=gotQ: g.setdefault("msg", m)
+C.LateralForceEC8().Activated()
+_AQ = C._section_db("IPE 300")["A"]
+_mQ = 2.0 * 7.85e-6 * _AQ * 3000.0 * 1e-3            # tonnes
+_FbQ = 4905.0 * _mQ
+eqloads = [o for o in dQ.Objects if getattr(o, "EC8Auto", False)]
+assert len(eqloads) == 2, len(eqloads)
+_sumF = sum(o.LoadVec.x for o in eqloads)
+assert abs(_sumF - _FbQ) / _FbQ < 1e-6, (_sumF, _FbQ)
+for o in eqloads:
+    assert abs(o.LoadVec.x - _FbQ / 2.0) / _FbQ < 1e-6, o.LoadVec.x
+    assert o.LoadCase == "EQX" and abs(o.LoadVec.y) < 1e-9
+assert dQ.getObject("LateralForce") is not None
+assert "0.326" in gotQ["msg"] and "lateral force" in gotQ["msg"].lower()
+print("  Sd branches exact; 2-storey column: T1=0.326s (Ct H^3/4), "
+      "Fb=%.1f N = Sd*m, split Fb/2 per level into case EQX" % _FbQ)
+print("EC8 lateral force method OK")
+
+print("\n=== Plate on elastic (Winkler) foundation: w = q/k uniform ===")
+# a free raft on soil under uniform pressure settles w = q/k everywhere, with
+# no bending - independent of D. k=0.05 N/mm^3, q=0.01 N/mm^2 -> w=0.2 mm.
+import json as _jw
+dW = Doc(); FreeCAD.ActiveDocument = dW
+aW = 2000.0; NW = 6; hW = aW / NW
+trisW = []
+for jj in range(NW):
+    for ii in range(NW):
+        A_ = [ii * hW, jj * hW, 0.]; B_ = [(ii + 1) * hW, jj * hW, 0.]
+        C_ = [(ii + 1) * hW, (jj + 1) * hW, 0.]; D_ = [ii * hW, (jj + 1) * hW, 0.]
+        trisW.append([A_, B_, C_]); trisW.append([A_, C_, D_])
+plW = dW.addObject("Part::Feature", "Raft"); plW.Shape = Shape(0, [Vec(0, 0, 0), Vec(aW, aW, 0)])
+plW.IsShell = True; plW.ShellThk = 200.0; plW.Material = "Concrete C30/37"
+plW.ShellTris = _jw.dumps(trisW); plW.ShellKfound = 0.05
+# only in-plane rigid modes need fixing; the soil carries the vertical
+for (px, py, mask) in ((0, 0, "110000"), (aW, 0, "110000")):
+    sW = dW.addObject("Part::Feature", "SW%d" % px)
+    sW.Restrain = mask; sW.AtNode = Vec(px, py, 0)
+prW = dW.addObject("Part::Feature", "PRW"); prW.LoadType = "Pressure"
+prW.LoadCase = "DL1"; prW.OnShell = plW.Name; prW.Pressure = -0.01
+gotW = {}; C.info = lambda m, g=gotW: g.setdefault("msg", m)
+C.RunAnalysis().Activated(run_pick="All loads", include_sw=False,
+                          second_order=False)
+stW = dW.getObject("AnalysisState")
+UW = _jw.loads(stW.StU); NW2 = _jw.loads(stW.StNodes)
+_wz = [UW[6 * i + 2] for i in range(len(NW2))]
+assert all(abs(w + 0.2) < 0.002 for w in _wz), (min(_wz), max(_wz))
+print("  raft 2x2 m on k=0.05, q=0.01 -> settlement %.4f..%.4f mm "
+      "(exact 0.2000, uniform, no supports needed)" % (-max(_wz), -min(_wz)))
+print("plate on elastic foundation OK")
 C._section_props_from_name = _saved_spn       # back to the harness mock
 
 print("\n=== Buckling: cantilever column, axial P -> critical factor ===")
@@ -1943,6 +2017,48 @@ C.MasonryEC6().Activated()
 assert dM.getObject("Masonry") is not None and "N_Rd" in gM["msg"]
 print("  masonry command: %s" % gM["msg"].split(chr(10))[0])
 print("EC3 bolted + EC6 masonry OK")
+
+# ---------- end-plate moment joint (EC3-1-8 component method) ----------
+print("\n== EC3-1-8 end-plate moment joint (component method) ==")
+# T-stub hand calc: leff=200, m=30, e=50 (n=min(e,1.25m)=37.5), tf=15, fy=275,
+# row of 2 x M20 8.8 (Ft,Rd=141.12 kN each):
+#   Mpl = 0.25*200*15^2*275 = 3.094e6; Mode1 = 4Mpl/30 = 412.5 kN
+#   Mode2 = (2*3.094e6 + 37.5*282240)/67.5 = 248.5 kN; Mode3 = 282.2 kN
+assert abs(C._bolt_FtRd("M20", "8.8") - 141120.0) < 1.0
+_ts = C._tstub(200.0, 200.0, 30.0, 50.0, 15.0, 275.0, 2 * 141120.0)
+assert abs(_ts["F1"] / 1e3 - 412.5) < 0.1, _ts["F1"]
+assert abs(_ts["F2"] / 1e3 - 248.47) < 0.1, _ts["F2"]
+assert abs(_ts["F3"] / 1e3 - 282.24) < 0.1 and _ts["mode"] == 2
+# thick flange -> mode 3 (bolts) governs; thin -> mode 1
+assert C._tstub(200.0, 200.0, 30.0, 50.0, 40.0, 275.0, 2 * 141120.0)["mode"] == 3
+assert C._tstub(200.0, 200.0, 30.0, 50.0, 6.0, 275.0, 2 * 141120.0)["mode"] == 1
+# 6.2.7.2 row allocation: global cap 280 kN -> 200 + 80; Mj = 90 kNm
+_mj, _al = C._endplate_rows([(350.0, 200e3), (250.0, 150e3)], 280e3)
+assert abs(_mj / 1e6 - 90.0) < 1e-9 and abs(_al[1][1] - 80e3) < 1e-9
+# full joint, UB356 beam + column, S275: the global limits to the hand calc
+_bj = C._section_db("UB 356x171x57")
+_rj = C._endplate_joint(_bj, _bj, 275.0, 20.0, 90.0, 40.0, [320.0, 240.0],
+                        "M20", "8.8", weld_a=6.0)
+# Vwp = 0.9*275*3153/sqrt(3) = 450.6 kN; Fc,fb = Wpl*275/(h-tf) = 804.3 kN
+assert abs(_rj["Vwp"] / 1e3 - 450.57) < 0.5, _rj["Vwp"]
+assert abs(_rj["Fc_fb"] / 1e3 - 804.28) < 0.5, _rj["Fc_fb"]
+assert abs(_rj["m_p"] - ((90 - 8) / 2.0 - 0.8 * 2 ** 0.5 * 6.0)) < 1e-9
+assert _rj["Mj_Rd"] > 0 and len(_rj["rows"]) == 2
+# the allocation never exceeds the governing global limit
+assert sum(rr["F_alloc"] for rr in _rj["rows"]) <= _rj["Fc_glob"] + 1e-6
+dEP = Doc(); FreeCAD.ActiveDocument = dEP
+C.form_dialog = lambda title, fields: {"beam": "UB 356x171x57",
+    "col": "UB 356x171x57", "grade": "S275", "tp": 20.0, "w": 90.0, "e": 40.0,
+    "a": 6.0, "bolt": "M20", "bg": "8.8", "h1": 320.0, "h2": 240.0,
+    "l1": 0.0, "l2": 0.0, "med": 80.0, "beta": 1.0}
+gEP = {}; C.info = lambda m, g=gEP: g.setdefault("msg", m)
+C.EndPlateEC3().Activated()
+assert "Mj,Rd" in gEP["msg"] and "T-stubs" in gEP["msg"], gEP["msg"][:80]
+print("  T-stub modes 412.5/248.5/282.2 kN (mode 2) + thick/thin mode flips; "
+      "row allocation Mj=90 kNm; UB356 joint Vwp=%.1f kN, Fc,fb=%.1f kN, "
+      "Mj,Rd=%.1f kNm" % (_rj["Vwp"] / 1e3, _rj["Fc_fb"] / 1e3,
+                          _rj["Mj_Rd"] / 1e6))
+print("end-plate joint OK")
 
 # ---------- welds, combined footing, AISC, EC9 ----------
 print("\n== fillet weld + combined footing + AISC + EC9 ==")

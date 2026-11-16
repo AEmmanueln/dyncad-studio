@@ -62,6 +62,7 @@ class DynFrameWorkbench(FreeCADGui.Workbench):
                  "DynFrame_Combinations"]
         results = ["DynFrame_RunAnalysis", "DynFrame_ModalAnalysis",
                    "DynFrame_BucklingAnalysis", "DynFrame_ResponseSpectrum",
+                   "DynFrame_LateralForceEC8",
                    "DynFrame_ImportGroundMotion", "DynFrame_GMSpectrum",
                    "DynFrame_TimeHistory", "DynFrame_Envelope",
                    "DynFrame_MovingLoad", "DynFrame_CodeCheck",
@@ -70,6 +71,7 @@ class DynFrameWorkbench(FreeCADGui.Workbench):
                    "DynFrame_RcBeamEC2", "DynFrame_RcColumnEC2",
                    "DynFrame_PadFootingEC2", "DynFrame_CombinedFootingEC2",
                    "DynFrame_TimberEC5", "DynFrame_BasePlateEC3",
+                   "DynFrame_EndPlateEC3",
                    "DynFrame_BoltedConnEC3", "DynFrame_FilletWeldEC3",
                    "DynFrame_MasonryEC6", "DynFrame_AiscSteel",
                    "DynFrame_AluminiumEC9", "DynFrame_TorsionCheckEC3",
